@@ -11,8 +11,8 @@ import { bench, benchCount } from "./benchProbe";
 /**
  * The canvas grid's thumbnails, decoded and ready to draw, by photo.
  *
- * Fetched and decoded in a worker (see tileWorker), cut to the tile's size in device pixels,
- * so drawing one is a plain copy. A few at a time: the grid asks
+ * Fetched in a worker (see tileWorker) and decoded on the page off its main thread, then
+ * cut to the tile's size in device pixels, so drawing one is a plain copy. A few at a time: the grid asks
  * for the tiles it wants most first and calls off the ones that scrolled far away, which
  * aborts their fetch. Kept up to a memory budget, oldest first out, and every bitmap let go
  * of is closed so its memory goes at once, not at the next collection.
@@ -51,7 +51,7 @@ export class TileLoader {
   private page = new Map<string, HTMLImageElement>();
   private closed = false;
   /** How the thumbnails are made: for the log and the measurement. */
-  where = "worker";
+  where = "fetched by a worker, decoded on the page";
 
   constructor(
     /** A thumbnail is ready to draw (or will not come: then `bitmap` returns nothing). */
@@ -106,15 +106,14 @@ export class TileLoader {
     return true;
   }
 
-  /** Calls off a fetch under way. */
+  /** Calls off a fetch, or a decode, under way. */
   cancel(key: string): void {
     if (!this.asked.delete(key)) return;
-    if (this.mode === "worker") this.worker?.postMessage({ kind: "cancel", key });
-    else {
-      const img = this.page.get(key);
+    const img = this.page.get(key);
+    if (img) {
       this.page.delete(key);
-      img?.removeAttribute("src");
-    }
+      img.removeAttribute("src");
+    } else if (this.mode === "worker") this.worker?.postMessage({ kind: "cancel", key });
   }
 
   /** Whether the budget is spent. */
@@ -147,8 +146,8 @@ export class TileLoader {
   private start(key: string, url: string): void {
     this.asked.set(key, url);
     if (bench.on) benchCount("fresh");
-    if (this.mode === "worker") this.worker!.postMessage({ kind: "load", key, url, ...this.size });
-    else this.onPage(key, url);
+    if (this.mode === "worker") this.worker!.postMessage({ kind: "load", key, url });
+    else this.decode(key, url, false);
   }
 
   private drop(key: string, e: Entry): void {
@@ -184,14 +183,14 @@ export class TileLoader {
     this.onArrive(key);
   }
 
-  private fromWorker(m: { kind: string; key?: string; bitmap?: ImageBitmap; w?: number; h?: number; unreachable?: boolean }): void {
-    if (this.mode !== "worker") {
-      m.bitmap?.close();
-      return;
-    }
+  private fromWorker(m: { kind: string; key?: string; bytes?: ArrayBuffer; type?: string; unreachable?: boolean }): void {
+    if (this.mode !== "worker") return;
     if (m.kind === "done") {
       this.workerProven = true;
-      this.arrived(m.key!, { bitmap: m.bitmap!, w: m.w!, h: m.h! });
+      const key = m.key!;
+      // Called off while its bytes were on their way.
+      if (!this.asked.has(key)) return;
+      this.decode(key, URL.createObjectURL(new Blob([m.bytes!], { type: m.type || "image/jpeg" })), true);
     } else if (m.kind === "failed") {
       if (m.unreachable && !this.workerProven) this.toPage("page (the worker could not reach the server)");
       else this.arrived(m.key!, null);
@@ -212,8 +211,12 @@ export class TileLoader {
     }
   }
 
-  /** Without the worker: an <img>, decoded off the main thread, cut on the page. */
-  private onPage(key: string, url: string): void {
+  /**
+   * Decodes a thumbnail on the page: an <img>, decoded off the main thread by `decode()`,
+   * then cut to the tile's size. `url` is the bytes the worker fetched (a blob address,
+   * let go of here) or, without the worker, the thumbnail's own address.
+   */
+  private decode(key: string, url: string, blob: boolean): void {
     const img = new Image();
     img.decoding = "async";
     this.page.set(key, img);
@@ -224,17 +227,23 @@ export class TileLoader {
       let bitmap: ImageBitmap | null = null;
       try {
         await img.decode();
-        if (!mine()) return;
-        const k = Math.max(size.w / img.naturalWidth, size.h / img.naturalHeight);
-        const sw = size.w / k;
-        const sh = size.h / k;
-        bitmap = await createImageBitmap(img, (img.naturalWidth - sw) / 2, (img.naturalHeight - sh) / 2, sw, sh, {
-          resizeWidth: size.w,
-          resizeHeight: size.h,
-          resizeQuality: "medium",
-        });
+        const nw = img.naturalWidth;
+        const nh = img.naturalHeight;
+        if (mine() && nw > 0 && nh > 0) {
+          // The middle of the picture with the tile's shape, never less than a pixel either way.
+          const k = Math.max(size.w / nw, size.h / nh);
+          const sw = Math.max(1, Math.min(nw, size.w / k));
+          const sh = Math.max(1, Math.min(nh, size.h / k));
+          bitmap = await createImageBitmap(img, (nw - sw) / 2, (nh - sh) / 2, sw, sh, {
+            resizeWidth: size.w,
+            resizeHeight: size.h,
+            resizeQuality: "medium",
+          });
+        }
       } catch {
         bitmap = null;
+      } finally {
+        if (blob) URL.revokeObjectURL(url);
       }
       // Called off meanwhile: whatever was made goes.
       if (!mine()) {
