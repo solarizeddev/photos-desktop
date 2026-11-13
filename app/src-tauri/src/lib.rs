@@ -590,8 +590,14 @@ struct SidecarGate {
 
 /// How long a call may wait or run before the watchdog names it.
 const STUCK_RPC_MS: u128 = 5_000;
-/// How often the watchdog looks, and so how often it names a call still stuck.
+/// How often the watchdog looks.
 const WATCHDOG_EVERY: Duration = Duration::from_secs(5);
+/// The longest a stuck call goes unnamed again. It is named at 5 s, then each time its age
+/// has doubled, then at most this often: a long legitimate walk is named a handful of times,
+/// not every 5 s, so it cannot push earlier lines out of the size-capped log.
+const WATCHDOG_RENAME_MAX_MS: u128 = 60_000;
+/// Longest method name logged. The window names the method, so it is capped.
+const WATCHDOG_NAME_MAX: usize = 64;
 /// The most calls the watchdog names in one look; the rest are counted.
 const WATCHDOG_NAMES: usize = 8;
 
@@ -602,6 +608,8 @@ struct Flight {
     since: Instant,
     /// When it was let onto its lane, if it has been.
     admitted: Option<Instant>,
+    /// The age at which the watchdog names it next.
+    next_note_ms: u128,
 }
 
 /// Every call from arriving to answering.
@@ -631,30 +639,54 @@ impl Flights {
     fn start(&self, method: &str) -> FlightGuard<'_> {
         let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let flight = Flight {
-            method: method.to_string(),
+            method: method.chars().take(WATCHDOG_NAME_MAX).collect(),
             background: is_background(priority_for(method)),
             since: Instant::now(),
             admitted: None,
+            next_note_ms: STUCK_RPC_MS,
         };
-        self.open.lock().unwrap().insert(id, flight);
+        self.lock().insert(id, flight);
         FlightGuard { flights: self, id }
     }
 
-    /// The watchdog's lines for calls outstanding at least `min_ms` at `now`: the oldest
-    /// first, `WATCHDOG_NAMES` of them by name, and one line counting all of them by lane
-    /// whenever any is stuck. Only the method name is logged, never params: it is not user
+    /// The registry, whatever became of a thread that held it before: it holds only
+    /// bookkeeping, and a guard dropped while a panic unwinds must not abort the app.
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<u64, Flight>> {
+        self.open.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The watchdog's lines at `now`: the calls due to be named (outstanding at least
+    /// `min_ms`, and named last at half their present age or a minute ago), the oldest
+    /// first, `WATCHDOG_NAMES` of them by name, and one line counting every call by lane
+    /// whenever any is named. Only the method name is logged, never params: it is not user
     /// data.
     fn stuck_report(&self, now: Instant, min_ms: u128) -> Vec<String> {
-        let open = self.open.lock().unwrap();
-        let mut stuck: Vec<&Flight> = open
-            .values()
-            .filter(|f| now.saturating_duration_since(f.since).as_millis() >= min_ms)
-            .collect();
-        if stuck.is_empty() {
+        let mut open = self.lock();
+        let mut due: Vec<u64> = Vec::new();
+        let mut stuck = 0;
+        for (id, f) in open.iter() {
+            let age = now.saturating_duration_since(f.since).as_millis();
+            if age < min_ms {
+                continue;
+            }
+            stuck += 1;
+            if age >= f.next_note_ms.max(min_ms) {
+                due.push(*id);
+            }
+        }
+        if due.is_empty() {
             return Vec::new();
         }
-        stuck.sort_by_key(|f| f.since);
-        let mut lines: Vec<String> = stuck
+        for id in &due {
+            if let Some(f) = open.get_mut(id) {
+                let age = now.saturating_duration_since(f.since).as_millis();
+                f.next_note_ms = (age * 2).min(age + WATCHDOG_RENAME_MAX_MS);
+            }
+        }
+        let mut stuck_flights: Vec<&Flight> = due.iter().filter_map(|id| open.get(id)).collect();
+        stuck_flights.sort_by_key(|f| f.since);
+        let stuck_named = stuck_flights;
+        let mut lines: Vec<String> = stuck_named
             .iter()
             .take(WATCHDOG_NAMES)
             .map(|f| {
@@ -675,7 +707,7 @@ impl Flights {
         };
         lines.push(format!(
             "[rpc] queue stuck={} fg_running={} fg_waiting={} bg_running={} bg_waiting={}",
-            stuck.len(),
+            stuck,
             count(false, true),
             count(false, false),
             count(true, true),
@@ -688,7 +720,7 @@ impl Flights {
 impl FlightGuard<'_> {
     /// The call has been let onto its lane.
     fn admitted(&self) {
-        if let Some(f) = self.flights.open.lock().unwrap().get_mut(&self.id) {
+        if let Some(f) = self.flights.lock().get_mut(&self.id) {
             f.admitted = Some(Instant::now());
         }
     }
@@ -696,7 +728,7 @@ impl FlightGuard<'_> {
 
 impl Drop for FlightGuard<'_> {
     fn drop(&mut self) {
-        self.flights.open.lock().unwrap().remove(&self.id);
+        self.flights.lock().remove(&self.id);
     }
 }
 
@@ -3705,6 +3737,30 @@ mod gate_tests {
         assert_eq!(report[3], "[rpc] queue stuck=3 fg_running=1 fg_waiting=1 bg_running=0 bg_waiting=1");
         drop((waiting, running, behind));
         assert!(flights.stuck_report(later, 5_000).is_empty(), "every call left with its guard");
+    }
+
+    #[test]
+    fn the_watchdog_names_a_long_call_less_and_less_often() {
+        let flights = super::Flights::new();
+        let walk = flights.start("listExtrasForMount");
+        let start = Instant::now();
+        let named_at: Vec<u64> = (1..=60u64)
+            .map(|tick| tick * 5)
+            .filter(|s| !flights.stuck_report(start + Duration::from_secs(*s), 5_000).is_empty())
+            .collect();
+        // At 5 s, at each doubling of its age, then once a minute.
+        assert_eq!(named_at, vec![5, 10, 20, 40, 80, 140, 200, 260], "{named_at:?}");
+        drop(walk);
+    }
+
+    #[test]
+    fn the_watchdog_caps_a_method_name() {
+        let flights = super::Flights::new();
+        let long = "m".repeat(500);
+        let call = flights.start(&long);
+        let report = flights.stuck_report(Instant::now() + Duration::from_secs(6), 5_000);
+        assert!(report[0].len() < 120, "{}", report[0]);
+        drop(call);
     }
 
     #[test]
