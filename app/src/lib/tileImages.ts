@@ -37,6 +37,8 @@
  * still holds for every response.
  */
 
+import { bench, benchCount, benchPending, benchSettled } from "./benchProbe";
+
 /** A bounded store that hands each thing back once, and drops the oldest when full. */
 export type Keep<T> = {
   /** Takes the thing kept under `key` out of the store, if there is one. */
@@ -102,8 +104,15 @@ const kept = createKeep<HTMLImageElement>(MAX_KEPT, release);
  */
 export function takeTileImage(url: string): HTMLImageElement {
   const had = kept.take(url);
-  if (had) return had;
+  if (had) {
+    if (bench.on) benchCount("kept");
+    return had;
+  }
   const img = new Image();
+  if (bench.on) {
+    benchCount("fresh");
+    benchPending(img);
+  }
   img.decoding = "async";
   img.alt = "";
   img.draggable = false;
@@ -118,7 +127,10 @@ export function takeTileImage(url: string): HTMLImageElement {
  */
 export function keepTileImage(url: string, img: HTMLImageElement): void {
   if (img.complete && img.naturalWidth > 0) kept.put(url, img);
-  else release(img);
+  else {
+    if (bench.on) benchSettled(img);
+    release(img);
+  }
 }
 
 /** Drops every kept picture: the server's address is gone, and with it the session. */
