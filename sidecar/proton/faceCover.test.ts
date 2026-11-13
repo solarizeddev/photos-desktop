@@ -91,7 +91,7 @@ describe("the cover cache", () => {
     let fetched = 0;
     const covers = new FaceCovers(async () => {
       fetched++;
-      return jpeg;
+      return { bytes: jpeg, keep: true };
     });
     const live = new AbortController().signal;
     const [a, b] = await Promise.all([covers.get("u", box, live), covers.get("u", box, live)]);
@@ -108,7 +108,7 @@ describe("the cover cache", () => {
     const covers = new FaceCovers(async (uid) => {
       asked.push(uid);
       await new Promise<void>((r) => release.push(r));
-      return jpeg;
+      return { bytes: jpeg, keep: true };
     });
     const live = new AbortController().signal;
     const first = covers.get("a", box, live);
@@ -137,7 +137,7 @@ describe("the cover cache", () => {
     const covers = new FaceCovers(async (uid) => {
       asked.push(uid);
       await new Promise<void>((r) => release.push(r));
-      return jpeg;
+      return { bytes: jpeg, keep: true };
     });
     const live = new AbortController().signal;
     // Two cuts take both places, so the third waits in line.
@@ -163,7 +163,7 @@ describe("the cover cache", () => {
     const release: (() => void)[] = [];
     const covers = new FaceCovers(async () => {
       await new Promise<void>((r) => release.push(r));
-      return jpeg;
+      return { bytes: jpeg, keep: true };
     });
     const live = new AbortController().signal;
     const busy = [covers.get("a", box, live), covers.get("b", box, live)];
@@ -188,7 +188,7 @@ describe("the cover cache", () => {
     const covers = new FaceCovers(async (uid) => {
       asked.push(uid);
       await new Promise<void>((r) => release.push(r));
-      return jpeg;
+      return { bytes: jpeg, keep: true };
     });
     const live = new AbortController().signal;
     const busy = [covers.get("a", box, live), covers.get("b", box, live)];
@@ -209,9 +209,45 @@ describe("the cover cache", () => {
     expect(asked).toEqual(["a", "b", "c"]);
   });
 
+  it("does not keep a cut made from a stand-in picture, so the next ask tries again", async () => {
+    const jpeg = await picture(400, 400, box);
+    let asks = 0;
+    const covers = new FaceCovers(async () => {
+      asks++;
+      return { bytes: jpeg, keep: asks > 1 };
+    });
+    const live = new AbortController().signal;
+    expect(await covers.get("u", box, live)).not.toBeNull();
+    expect(covers.size()).toBe(0);
+    await covers.get("u", box, live);
+    expect(covers.size()).toBe(1);
+    await covers.get("u", box, live);
+    expect(asks).toBe(2);
+  });
+
+  it("joins a cut already being made even when everyone before has left", async () => {
+    const jpeg = await picture(400, 400, box);
+    let fetched = 0;
+    let release!: () => void;
+    const covers = new FaceCovers(async () => {
+      fetched++;
+      await new Promise<void>((r) => (release = r));
+      return { bytes: jpeg, keep: true };
+    });
+    const first = new AbortController();
+    const firstAsk = covers.get("u", box, first.signal);
+    await vi.waitFor(() => expect(fetched).toBe(1));
+    first.abort();
+    const again = covers.get("u", box, new AbortController().signal);
+    release();
+    expect(await again).not.toBeNull();
+    expect(await firstAsk).toBe(await again);
+    expect(fetched).toBe(1);
+  });
+
   it("answers null when there is no picture, and forgets everything at clear", async () => {
     const jpeg = await picture(400, 400, box);
-    const covers = new FaceCovers(async (uid) => (uid === "none" ? null : jpeg));
+    const covers = new FaceCovers(async (uid) => (uid === "none" ? null : { bytes: jpeg, keep: true }));
     const live = new AbortController().signal;
     expect(await covers.get("none", box, live)).toBeNull();
     await covers.get("u", box, live);
@@ -225,7 +261,7 @@ describe("the cover cache", () => {
     let release!: () => void;
     const covers = new FaceCovers(async () => {
       await new Promise<void>((r) => (release = r));
-      return jpeg;
+      return { bytes: jpeg, keep: true };
     });
     const pending = covers.get("u", box, new AbortController().signal);
     await new Promise((r) => setTimeout(r, 0));

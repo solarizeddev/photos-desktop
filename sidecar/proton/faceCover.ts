@@ -95,8 +95,12 @@ export async function cutFace(bytes: Buffer, box: FaceBox, out = COVER_SIZE): Pr
     .toBuffer();
 }
 
-/** The picture a cover is cut from: its HD preview, or the grid thumbnail without one. */
-export type CoverPicture = (uid: string) => Promise<Buffer | null>;
+/**
+ * The picture a cover is cut from, and whether it is the one to keep a cut of: the HD
+ * preview is; the grid thumbnail standing in for a preview that could not be had this time
+ * is not, so the next ask tries the preview again rather than keeping a blurry cover.
+ */
+export type CoverPicture = (uid: string) => Promise<{ bytes: Buffer; keep: boolean } | null>;
 
 /**
  * Cut covers, cached and made a few at a time. A request the window has stopped waiting
@@ -111,7 +115,10 @@ export class FaceCovers {
    * the first ask is still in line, and that second ask must not inherit the first one's
    * cancel.
    */
-  private running = new Map<string, { made: Promise<Buffer | null>; askers: number; stop: AbortController }>();
+  private running = new Map<
+    string,
+    { made: Promise<Buffer | null>; askers: number; stop: AbortController; started: boolean }
+  >();
   private line: { run: () => void; gone: AbortSignal }[] = [];
   private busy = 0;
   /** Bumped by `clear`, so a cut finishing after a lock is not kept. */
@@ -128,9 +135,10 @@ export class FaceCovers {
       return hit;
     }
     if (gone.aborted) return null;
-    // A cut everyone has already left is not joined: it is on its way out with nothing.
+    // A cut everyone left while it waited in line is on its way out with nothing, so it is
+    // not joined; one already being made will still answer, so it is.
     const under = this.running.get(key);
-    const run = under && !under.stop.signal.aborted ? under : this.start(uid, box, key);
+    const run = under && (under.started || !under.stop.signal.aborted) ? under : this.start(uid, box, key);
     run.askers++;
     gone.addEventListener(
       "abort",
@@ -146,12 +154,14 @@ export class FaceCovers {
   private start(uid: string, box: FaceBox, key: string) {
     const stop = new AbortController();
     const epoch = this.epoch;
-    const made = this.turn(stop.signal).then(async (go) => {
+    const run = { made: Promise.resolve<Buffer | null>(null), askers: 0, stop, started: false };
+    run.made = this.turn(stop.signal).then(async (go) => {
       if (!go) return null;
+      run.started = true;
       try {
         const picture = await this.picture(uid);
-        const cut = picture ? await cutFace(picture, box) : null;
-        if (cut && epoch === this.epoch) this.keep(key, cut);
+        const cut = picture ? await cutFace(picture.bytes, box) : null;
+        if (cut && picture?.keep && epoch === this.epoch) this.keep(key, cut);
         return cut;
       } catch {
         return null;
@@ -159,9 +169,8 @@ export class FaceCovers {
         this.release();
       }
     });
-    const run = { made, askers: 0, stop };
     this.running.set(key, run);
-    void made.finally(() => {
+    void run.made.finally(() => {
       if (this.running.get(key) === run) this.running.delete(key);
     });
     return run;

@@ -1976,7 +1976,9 @@ export class ProtonSession {
    */
   private faceCovers = new FaceCovers(async (uid) => {
     const preview = await this.previewBytes(uid).catch(() => null);
-    return preview ?? thumbGet(uid, ThumbnailType.Type1) ?? null;
+    if (preview) return { bytes: preview, keep: true };
+    const thumb = thumbGet(uid, ThumbnailType.Type1);
+    return thumb ? { bytes: thumb, keep: false } : null;
   });
   private thumbFlush: ReturnType<typeof setTimeout> | null = null;
   private thumbFetching = 0;

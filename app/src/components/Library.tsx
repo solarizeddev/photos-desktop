@@ -100,10 +100,25 @@ export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box
   const base = useThumbServerBase();
   const cut = base && box ? faceCoverUrl(base, uid, box) : null;
   const [cutFailed, setCutFailed] = useState<string | null>(null);
-  if (cut && cutFailed !== cut) {
-    return <img src={cut} alt="" draggable={false} loading="lazy" onError={() => setCutFailed(cut)} />;
-  }
-  return <ThumbFaceCover thumb={thumb} box={box} />;
+  const [cutShown, setCutShown] = useState<string | null>(null);
+  if (!cut || cutFailed === cut) return <ThumbFaceCover thumb={thumb} box={box} />;
+  // The grid thumbnail, already in, is cut to the face at once and stays until the sharp
+  // cut has loaded over it, so a card is never blank while its cut is made.
+  const ready = cutShown === cut;
+  return (
+    <>
+      {!ready && <ThumbFaceCover thumb={thumb} box={box} />}
+      <img
+        src={cut}
+        alt=""
+        draggable={false}
+        loading="lazy"
+        style={ready ? undefined : { opacity: 0 }}
+        onLoad={() => setCutShown(cut)}
+        onError={() => setCutFailed(cut)}
+      />
+    </>
+  );
 }
 
 /**
