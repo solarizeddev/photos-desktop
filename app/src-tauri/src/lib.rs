@@ -282,23 +282,42 @@ type CallId = u64;
 /// signing out (a lock screen shown over a session that stayed open is the one thing worse
 /// than a slow lock), unlocking, and the calls that stop or release something. The window's
 /// cancel, or its own timeout, never drops one of these from the queue or stops it.
+///
+/// Unlocking is deliberately not one: an unlock given up on is safer dropped (it is simply
+/// asked again) than carried out later, behind a lock screen.
 fn never_drop(method: &str) -> bool {
     matches!(
         method,
         "lock"
             | "signOut"
-            | "unlock"
-            | "unlockDevice"
             | "localLockSet"
             | "localLockClear"
             | "protectSession"
             | "cancelBrowserLogin"
             | "cancelUpload"
-            | "cancelHydrate"
             | "releaseOriginal"
             | "stopDateEdit"
             | "faceSweepStop"
+            | "faceScanSetPaused"
+            | "faceScanSetEnabled"
+            // What the window shows as wiped once asked: the privacy wipes and removals.
+            | "faceScanClear"
+            | "faceClearHere"
+            | "faceClearEverywhere"
+            | "faceSearchClear"
+            | "unpinAllOffline"
+            | "semanticModelRemove"
+            | "ocrModelRemove"
     )
+}
+
+/// Calls sent to the sidecar at once, past the lanes: locking and signing out, and the lock
+/// status the window reads first. The window shows the lock screen once these answer, and
+/// queued behind a long call on the lane (a whole video, a file the drive is fetching) that
+/// was minutes with the photos still on screen. The channel carries many calls at a time and
+/// locking does not depend on what else is running, so they need no place in the line.
+fn bypasses_lanes(method: &str) -> bool {
+    matches!(method, "lock" | "signOut" | "lockStatus")
 }
 
 /// A window's call id made unique across the app's windows. Each window (the main one, the
@@ -1871,10 +1890,14 @@ async fn rpc(
     // Followed from here until it answers, so the watchdog can name it while it is stuck.
     let flight = shared.flights.start(&method);
     let wait_start = Instant::now();
-    let permit = shared
-        .admit_async(&method, call_id)
-        .await
-        .map(|p| p.into_owned(shared.clone()));
+    let permit = if bypasses_lanes(&method) {
+        Some(None)
+    } else {
+        shared
+            .admit_async(&method, call_id)
+            .await
+            .map(|p| Some(p.into_owned(shared.clone())))
+    };
     let wait_ms = wait_start.elapsed().as_millis();
     if permit.is_some() {
         flight.admitted();
@@ -4000,12 +4023,18 @@ mod gate_tests {
 
     #[test]
     fn locking_and_signing_out_are_never_dropped() {
-        for method in ["lock", "signOut", "unlock", "releaseOriginal", "cancelUpload"] {
+        for method in ["lock", "signOut", "releaseOriginal", "cancelUpload", "faceClearEverywhere"] {
             assert!(super::never_drop(method), "{method}");
         }
-        for method in ["getPreview", "warmThumbnails", "createAlbum"] {
+        // An unlock given up on is dropped rather than carried out behind a lock screen.
+        for method in ["unlock", "unlockDevice", "getPreview", "warmThumbnails", "createAlbum"] {
             assert!(!super::never_drop(method), "{method}");
         }
+        // Locking does not wait behind a long call on the lane.
+        for method in ["lock", "signOut", "lockStatus"] {
+            assert!(super::bypasses_lanes(method), "{method}");
+        }
+        assert!(!super::bypasses_lanes("getVideo"));
     }
 
     #[test]
