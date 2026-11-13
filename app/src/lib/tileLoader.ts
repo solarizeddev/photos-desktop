@@ -244,6 +244,9 @@ export class TileLoader {
         bitmap = null;
       } finally {
         if (blob) URL.revokeObjectURL(url);
+        // The tile has its own copy now: the element's decoded picture goes at once rather
+        // than whenever the element is collected.
+        img.removeAttribute("src");
       }
       // Called off meanwhile: whatever was made goes.
       if (!mine()) {

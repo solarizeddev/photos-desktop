@@ -8,6 +8,11 @@
 
 import { bench, benchCount, benchSpan } from "./benchProbe";
 import { GRID_GAP, TileRange, sectionOfIndex, type GridLayout } from "./gridLayout";
+
+/** Whether two layouts put tiles in the same places: same width, columns, tile size and headers. */
+function sameGeometry(a: GridLayout, b: GridLayout): boolean {
+  return a.width === b.width && a.columns === b.columns && Math.abs(a.tile - b.tile) < 1e-6 && a.header === b.header;
+}
 import { isVideo as classifyVideo, TAG } from "./tags";
 import { cachedMediaType, requestMediaType } from "./mediaTypes";
 import { cachedDuration, requestDuration } from "./durations";
@@ -171,14 +176,40 @@ export class CanvasTimeline {
     const l = data.layout;
     this.sizeLoader();
     this.offset = this.readOffset();
-    if (!was || was.layout.width !== l.width || was.layout.height !== l.height) this.measure(true);
-    else if (this.onlySelectionChanged(was, data)) {
+    if (!was || !sameGeometry(was.layout, l)) this.measure(true);
+    else if (was.layout.height !== l.height || was.sections !== data.sections) {
+      // The photos changed, as they do with every batch of a timeline still being listed,
+      // which mostly adds photos far from the screen. The canvas is made again only if its
+      // height must change, and drawn again only if what it shows changed.
+      if (this.bufferHeight(l) !== this.bufH) this.measure(true);
+      else if (this.shows(was) !== this.shows(data) || !this.sameMarks(was, data)) this.follow(true);
+    } else if (this.onlySelectionChanged(was, data)) {
       // A selection changed (as it does on every move of the rubber band): only the tiles
       // that changed are drawn again, unless every tile's play icon comes or goes with it.
       for (const uid of was.selected) if (!data.selected.has(uid)) this.redrawUid(uid);
       for (const uid of data.selected) if (!was.selected.has(uid)) this.redrawUid(uid);
     } else this.redrawAll();
     this.pump();
+  }
+
+  /** The canvas's height for a list of this layout: the view and up to a screen either side, never taller than the list. */
+  private bufferHeight(l: GridLayout): number {
+    return Math.max(1, Math.min(this.viewH + 2 * this.margin, Math.ceil(l.height)));
+  }
+
+  /** What the canvas shows from `d`: every photo in its span, and where it is. */
+  private shows(d: TimelineData): string {
+    const r = this.marks.fill(d.layout, this.bufTop, this.bufTop + this.bufH);
+    let out = "";
+    for (let i = 0; i < r.n; i++) {
+      const p = r.tiles[i];
+      out += `${d.sections[p.s].items[p.k].uid}@${Math.round(p.y)}|`;
+    }
+    return out;
+  }
+
+  private sameMarks(was: TimelineData, now: TimelineData): boolean {
+    return was.selected === now.selected && was.offline === now.offline && was.local === now.local && was.showBadges === now.showBadges;
   }
 
   private onlySelectionChanged(was: TimelineData, now: TimelineData): boolean {
@@ -278,9 +309,13 @@ export class CanvasTimeline {
     this.speed.setFast(viewH * FAST_SCREENS_S);
     this.margin = Math.max(0, Math.min(viewH, Math.floor((MAX_CANVAS / dpr - viewH) / 2)));
     // Never taller than the list: the canvas must not make it scroll further than it is long.
-    this.bufH = Math.max(1, Math.min(viewH + 2 * this.margin, Math.ceil(l.height)));
-    this.canvas.width = Math.max(1, this.d(l.width));
-    this.canvas.height = Math.max(1, this.d(this.bufH));
+    this.bufH = this.bufferHeight(l);
+    // Setting a canvas's size, even to the size it has, throws its pixels away and makes
+    // it anew: only when it really changes.
+    const cw = Math.max(1, this.d(l.width));
+    const ch = Math.max(1, this.d(this.bufH));
+    if (this.canvas.width !== cw) this.canvas.width = cw;
+    if (this.canvas.height !== ch) this.canvas.height = ch;
     this.canvas.style.width = `${l.width}px`;
     this.canvas.style.height = `${this.bufH}px`;
     this.ctx.imageSmoothingEnabled = true;
