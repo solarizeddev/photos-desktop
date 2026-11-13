@@ -23,6 +23,7 @@
 import { useEffect } from "react";
 import { useT } from "../lib/i18n";
 import "../styles/Confirm.css";
+import { backdropClose } from "../lib/backdrop";
 
 type Props = {
   title: string;
@@ -76,11 +77,8 @@ export function Confirm({
   return (
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        // Never let the click reach the lightbox or grid underneath.
-        e.stopPropagation();
-        onCancel();
-      }}
+      // Never lets the click reach the lightbox or grid underneath.
+      {...backdropClose(onCancel)}
     >
       <div className="cf-panel" role="alertdialog" onClick={(e) => e.stopPropagation()}>
         <h3 className="cf-title">{title}</h3>
