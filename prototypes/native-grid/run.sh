@@ -24,6 +24,7 @@ while [ $# -gt 0 ]; do
 done
 set -- ${PASS[@]+"${PASS[@]}"}
 IFS=, read -r -a GRID_LIST <<< "$GRIDS"
+[ ${#GRID_LIST[@]} -gt 0 ] || { echo "run.sh: --web-grids needs at least one of app, pool, canvas" >&2; exit 2; }
 for g in "${GRID_LIST[@]}"; do
   case "$g" in app|pool|canvas) ;; *) printf 'run.sh: unknown grid %s (app, pool or canvas)\n' "$g" >&2; exit 2 ;; esac
 done
@@ -75,7 +76,11 @@ mkdir -p "$OUT"
 # window's frame, so the native side is then given the same width and height to lay out in.
 SAME=()
 WEB=()
-STEPS=$(( ${#GRID_LIST[@]} + 1 ))
+case "${NG_ONLY:-}" in
+  webkit) STEPS=${#GRID_LIST[@]} ;;
+  native) STEPS=1 ;;
+  *) STEPS=$(( ${#GRID_LIST[@]} + 1 )) ;;
+esac
 STEP=0
 if [ "${NG_ONLY:-webkit}" = webkit ]; then
   for g in "${GRID_LIST[@]}"; do

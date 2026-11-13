@@ -22,6 +22,9 @@ fn main() {
         eprintln!("no web build at {} (run.sh builds it)", args.dist.display());
         std::process::exit(1);
     }
+    // The app's grids ask for thumbnails cut to tile size; every size is made now, before
+    // the window opens, so none is made while being measured.
+    ng_common::warm_sized(&pool);
     gtk::init().expect("GTK 3");
     let phases = ng_common::script(&args);
     let rec = Recorder::new(true);
@@ -56,6 +59,7 @@ fn main() {
                 env[k] = v;
             }
             env["grid"] = json!(a.web_grid);
+            env["thumbs_sized"] = json!(ng_common::THUMBS_SIZED.load(std::sync::atomic::Ordering::Relaxed));
             env["frame_time_source"] = json!("gaps between requestAnimationFrame callbacks (performance.now())");
             let out = r.finish("webkitgtk", &ph, &data, env, a.config_json());
             std::fs::write(&a.out, serde_json::to_string_pretty(&out).unwrap()).expect("write the result");

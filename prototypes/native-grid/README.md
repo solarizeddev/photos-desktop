@@ -52,8 +52,10 @@ second, and ask for what is on screen once it slows (Google Photos' web grid and
 this during a fling), so their flings show more blank tiles by design. `canvas` draws no
 rounded corners, hover or badges.
 
-All three ask for thumbnails as the app now does, cut to the tile's size (`?w=`), and the
-server cuts them (once per size, on the first ask) as the sidecar does.
+`pool` and `canvas` ask for thumbnails cut to the tile's size (`?w=`), as the app does from
+its tile-sized thumbnails change on; the `app` grid does if the branch it is built from has
+that change (the combined branch does). The report counts how many were asked for cut, per
+grid. The server makes every size the sidecar cuts to before the window opens.
 
 ## What is measured
 

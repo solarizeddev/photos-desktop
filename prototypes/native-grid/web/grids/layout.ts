@@ -58,36 +58,73 @@ export type Placed = { idx: number; x: number; y: number };
 export type PlacedHeader = { key: string; count: number; y: number };
 
 /**
- * Every tile and header with any part between `from` and `to` (list coordinates). Sections
- * are found by binary search, so this costs what is in the range, not the list's length.
+ * What is in a stretch of the list. Its objects are reused from one call to the next (only
+ * the first `n` and `hn` are current), so working it out on every scroll step makes no
+ * garbage. Tile indexes rise with y, so the tiles in a stretch are `first..last`.
  */
-export function inRange(l: Layout, from: number, to: number, tiles: Placed[], headers: PlacedHeader[]): void {
-  tiles.length = 0;
-  headers.length = 0;
-  const s = l.sections;
-  let lo = 0;
-  let hi = s.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1;
-    if (s[mid].top <= from) lo = mid;
-    else hi = mid - 1;
+export class Range {
+  tiles: Placed[] = [];
+  n = 0;
+  heads: PlacedHeader[] = [];
+  hn = 0;
+  get first(): number {
+    return this.n > 0 ? this.tiles[0].idx : -1;
   }
-  for (let i = lo; i < s.length && s[i].top < to; i++) {
-    const sec = s[i];
-    if (sec.top + sec.height <= from) continue;
-    if (l.header > 0 && sec.top + l.header > from) headers.push({ key: sec.key, count: sec.count, y: sec.top });
-    const gridTop = sec.top + l.header;
-    const rows = Math.ceil(sec.count / l.columns);
-    const r0 = Math.max(0, Math.floor((from - gridTop) / l.pitch));
-    const r1 = Math.min(rows, Math.ceil((to - gridTop) / l.pitch));
-    for (let r = r0; r < r1; r++) {
-      const y = gridTop + r * l.pitch;
-      for (let c = 0; c < l.columns; c++) {
-        const k = r * l.columns + c;
-        if (k >= sec.count) break;
-        tiles.push({ idx: sec.start + k, x: c * (l.tile + GAP), y });
+  get last(): number {
+    return this.n > 0 ? this.tiles[this.n - 1].idx : -2;
+  }
+  private tile(idx: number, x: number, y: number): void {
+    const t = this.tiles[this.n];
+    if (t) {
+      t.idx = idx;
+      t.x = x;
+      t.y = y;
+    } else this.tiles.push({ idx, x, y });
+    this.n++;
+  }
+  private head(key: string, count: number, y: number): void {
+    const h = this.heads[this.hn];
+    if (h) {
+      h.key = key;
+      h.count = count;
+      h.y = y;
+    } else this.heads.push({ key, count, y });
+    this.hn++;
+  }
+
+  /**
+   * Every tile and header with any part between `from` and `to` (list coordinates). Sections
+   * are found by binary search, so this costs what is in the range, not the list's length.
+   */
+  fill(l: Layout, from: number, to: number): this {
+    this.n = 0;
+    this.hn = 0;
+    const s = l.sections;
+    let lo = 0;
+    let hi = s.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (s[mid].top <= from) lo = mid;
+      else hi = mid - 1;
+    }
+    for (let i = lo; i < s.length && s[i].top < to; i++) {
+      const sec = s[i];
+      if (sec.top + sec.height <= from) continue;
+      if (l.header > 0 && sec.top + l.header > from) this.head(sec.key, sec.count, sec.top);
+      const gridTop = sec.top + l.header;
+      const rows = Math.ceil(sec.count / l.columns);
+      const r0 = Math.max(0, Math.floor((from - gridTop) / l.pitch));
+      const r1 = Math.min(rows, Math.ceil((to - gridTop) / l.pitch));
+      for (let r = r0; r < r1; r++) {
+        const y = gridTop + r * l.pitch;
+        for (let c = 0; c < l.columns; c++) {
+          const k = r * l.columns + c;
+          if (k >= sec.count) break;
+          this.tile(sec.start + k, c * (l.tile + GAP), y);
+        }
       }
     }
+    return this;
   }
 }
 
@@ -131,6 +168,7 @@ export class Speed {
   private top = 0;
   private at = 0;
   private v = 0;
+  /** One timer for the whole scroll: it checks, when it fires, whether scrolling went on. */
   private settle: ReturnType<typeof setTimeout> | null = null;
   constructor(
     private fast: number,
@@ -148,14 +186,21 @@ export class Speed {
     }
     this.top = top;
     this.at = now;
-    if (this.settle) clearTimeout(this.settle);
-    this.settle = setTimeout(() => {
-      this.settle = null;
-      this.v = 0;
-      this.onSettle();
-    }, 120);
+    if (!this.settle) this.arm(SETTLE_MS);
   }
   isFast(): boolean {
     return this.v > this.fast;
   }
+  private arm(ms: number): void {
+    this.settle = setTimeout(() => {
+      const quiet = performance.now() - this.at;
+      if (quiet < SETTLE_MS) return this.arm(SETTLE_MS - quiet);
+      this.settle = null;
+      this.v = 0;
+      this.onSettle();
+    }, ms);
+  }
 }
+
+/** How long without a scroll step counts as stopped. */
+const SETTLE_MS = 120;

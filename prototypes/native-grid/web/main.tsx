@@ -106,7 +106,7 @@ async function run() {
   if (grid === "pool" || grid === "canvas") {
     const base = location.origin + "/t/tok/";
     const root = document.getElementById("root")!;
-    g = grid === "pool" ? mountPool(root, cfg, base) : mountCanvas(root, cfg, base, (where) => (extra.decode_in = where));
+    g = grid === "pool" ? mountPool(root, cfg, base) : mountCanvas(root, cfg, base, (env) => Object.assign(extra, env));
     await frame();
   } else {
     await connectThumbServer();

@@ -396,6 +396,8 @@ pub type Hook = Arc<dyn Fn(&str, &str, &[u8]) -> Option<(&'static str, Vec<u8>)>
 
 pub static THUMBS_SERVED: AtomicU64 = AtomicU64::new(0);
 pub static THUMBS_ABANDONED: AtomicU64 = AtomicU64::new(0);
+/// Thumbnails asked for cut to a tile's size (`?w=`), of those served.
+pub static THUMBS_SIZED: AtomicU64 = AtomicU64::new(0);
 
 /// The wait a thumbnail costs, the same for a given tile on both sides.
 pub fn latency_ms(idx: usize, lat: (u64, u64)) -> u64 {
@@ -449,6 +451,9 @@ fn connection(mut s: TcpStream, pool: Arc<Vec<Vec<u8>>>, lat: (u64, u64), dist: 
                 return Ok(());
             }
             THUMBS_SERVED.fetch_add(1, Ordering::Relaxed);
+            if sized.is_some() {
+                THUMBS_SIZED.fetch_add(1, Ordering::Relaxed);
+            }
         } else if let Some((ctype, out)) = hook(&method, &target, &body) {
             respond(&mut s, "200 OK", ctype, &out)?;
         } else if let Some(dist) = &dist {
@@ -478,29 +483,41 @@ fn query_width(target: &str) -> Option<u32> {
     (32..512).contains(&w).then_some(w)
 }
 
+/// The widths the app's sidecar cuts thumbnails to (sidecar/proton/thumbSizes.ts).
+pub const THUMB_WIDTHS: [u32; 5] = [128, 192, 256, 320, 384];
+
+type Sized = Arc<std::sync::OnceLock<Arc<Vec<Vec<u8>>>>>;
+
 /// The pool shrunk so its shorter side is `w`, as the app's sidecar shrinks a thumbnail for
-/// `?w=` (sharp, fit "outside", JPEG): made once per width, on the first ask for it.
-fn sized_pool(pool: &Arc<Vec<Vec<u8>>>, w: u32) -> Arc<Vec<Vec<u8>>> {
-    static MADE: Mutex<Option<HashMap<u32, Arc<Vec<Vec<u8>>>>>> = Mutex::new(None);
-    let mut made = MADE.lock().unwrap();
-    let made = made.get_or_insert_with(HashMap::new);
-    if let Some(p) = made.get(&w) {
-        return p.clone();
+/// `?w=` (sharp, fit "outside", JPEG). Made once per width; the lock is held only to find
+/// the width's slot, so asks for other widths, and for the full pool, never wait on a resize.
+pub fn sized_pool(pool: &Arc<Vec<Vec<u8>>>, w: u32) -> Arc<Vec<Vec<u8>>> {
+    static MADE: Mutex<Option<HashMap<u32, Sized>>> = Mutex::new(None);
+    let slot: Sized = MADE.lock().unwrap().get_or_insert_with(HashMap::new).entry(w).or_default().clone();
+    slot.get_or_init(|| {
+        let t = Instant::now();
+        let out: Vec<Mutex<Vec<u8>>> = (0..pool.len()).map(|_| Mutex::new(vec![])).collect();
+        in_parallel(pool.len(), |i| {
+            let img = image::load_from_memory_with_format(&pool[i], image::ImageFormat::Jpeg).expect("decode thumbnail");
+            let (iw, ih) = (img.width() as f32, img.height() as f32);
+            let k = (w as f32 / iw.min(ih)).min(1.0);
+            let small = img.resize_exact(((iw * k).round() as u32).max(1), ((ih * k).round() as u32).max(1), image::imageops::FilterType::Triangle);
+            *out[i].lock().unwrap() = encode(&small.to_rgb8());
+        });
+        let p: Vec<Vec<u8>> = out.into_iter().map(|m| m.into_inner().unwrap()).collect();
+        let avg = p.iter().map(|b| b.len()).sum::<usize>() / p.len().max(1);
+        eprintln!("[thumbs] made {} pictures at {w} px, {} KB on average, in {:.1} s", p.len(), avg / 1024, t.elapsed().as_secs_f64());
+        Arc::new(p)
+    })
+    .clone()
+}
+
+/// Makes every width the app may ask for, before anything is measured, so no resize lands in
+/// a measured phase or in one side's CPU count.
+pub fn warm_sized(pool: &Arc<Vec<Vec<u8>>>) {
+    for w in THUMB_WIDTHS {
+        sized_pool(pool, w);
     }
-    let t = Instant::now();
-    let out: Vec<Mutex<Vec<u8>>> = (0..pool.len()).map(|_| Mutex::new(vec![])).collect();
-    in_parallel(pool.len(), |i| {
-        let img = image::load_from_memory_with_format(&pool[i], image::ImageFormat::Jpeg).expect("decode thumbnail");
-        let (iw, ih) = (img.width() as f32, img.height() as f32);
-        let k = (w as f32 / iw.min(ih)).min(1.0);
-        let small = img.resize_exact(((iw * k).round() as u32).max(1), ((ih * k).round() as u32).max(1), image::imageops::FilterType::Triangle);
-        *out[i].lock().unwrap() = encode(&small.to_rgb8());
-    });
-    let p: Arc<Vec<Vec<u8>>> = Arc::new(out.into_iter().map(|m| m.into_inner().unwrap()).collect());
-    let avg = p.iter().map(|b| b.len()).sum::<usize>() / p.len().max(1);
-    eprintln!("[thumbs] made {} pictures at {w} px for ?w={w}, {} KB on average, in {:.1} s", p.len(), avg / 1024, t.elapsed().as_secs_f64());
-    made.insert(w, p.clone());
-    p
 }
 
 /// Starts the server on a free local port and returns the port. One thread per connection,

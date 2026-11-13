@@ -39,7 +39,7 @@ fn main() {
     let c = &n["config"];
     println!("{} tiles, tile {} px, window {}x{}, thumbnail wait {}-{} ms, {} fetches at once, script x{}",
         s(&c["n"]), s(&c["tile"]), s(&c["window"][0]), s(&c["window"][1]), s(&c["latency_ms"][0]), s(&c["latency_ms"][1]), s(&c["parallel_fetches"]), s(&c["script_scale"]));
-    println!("pictures: {} different 512 px JPEGs{}; the WebKit grids ask for them cut to tile size (?w=), as the app does",
+    println!("pictures: {} different 512 px JPEGs{}; cut to tile size when a grid asks with ?w= (see the row below)",
         s(&c["unique_thumbnails"]), if c["photos"].is_null() { " (synthetic)".to_string() } else { format!(" from {}", s(&c["photos"])) });
     let m = &n["env"]["machine"];
     println!("machine: {} ({} threads), session {} / {}", s(&m["cpu"]), s(&m["cores"]), s(&m["session"]), s(&m["desktop"]));
@@ -70,6 +70,7 @@ fn main() {
     row("peak memory, all processes (MB)", &|v| s(&v["peak_rss_mb"]));
     row("peak threads, all processes", &|v| s(&v["peak_threads"]));
     row("thumbnails fetched / abandoned", &|v| format!("{} / {}", s(&v["thumbnails_served"]), s(&v["thumbnails_abandoned"])));
+    row("of them cut to tile size (?w=)", &|v| if v["side"] == "native-gtk4" { "scaled itself".into() } else { s(&v["env"]["thumbs_sized"]) });
     println!();
     println!("  main thread = the one that runs the UI: the GTK main loop natively; in WebKit the web");
     println!("  process's main thread (JavaScript, style, layout), which is the one the app's profiles showed pinned.");
