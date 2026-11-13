@@ -123,6 +123,7 @@ import { isTransient, withRetry } from "./transient.ts";
 import { activeRevisionOf, nodeDurationMs, nodeLocation, nodeName, toMillis } from "./nodes.ts";
 import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
+import { SmallThumbs } from "./thumbSizes.ts";
 import { sameAccount } from "./accountSwitch.ts";
 import { hostNotice } from "./hostCall.ts";
 import {
@@ -1143,6 +1144,7 @@ export class ProtonSession {
     labelStore.unload();
     hiddenStore.unload();
     this.thumbWaiting.clear();
+    this.smallThumbs.clear();
     lockVault();
     this.offlineResume = null;
     this.retried = null;
@@ -1244,6 +1246,7 @@ export class ProtonSession {
     faceScanner.setSource(null);
     duplicateFinder.setSource(null);
     this.thumbWaiting.clear();
+    this.smallThumbs.clear();
     this.timelineRun = null;
     this.session = null;
     this.photos = null;
@@ -1274,6 +1277,7 @@ export class ProtonSession {
     labelStore.unload();
     hiddenStore.unload();
     this.thumbWaiting.clear();
+    this.smallThumbs.clear();
     this.legacySignIn = false;
     lockVault();
     this.removeStoredAccount();
@@ -1966,6 +1970,8 @@ export class ProtonSession {
 
   /** Uncached thumbnails asked for over the thumbnail server, gathered into one fetch. */
   private thumbWaiting = new Map<string, ((bytes: Buffer | null) => void)[]>();
+  /** Grid thumbnails cut down to the size the grid shows them: see `thumbSizes`. */
+  private smallThumbs = new SmallThumbs();
   private thumbFlush: ReturnType<typeof setTimeout> | null = null;
   private thumbFetching = 0;
 
@@ -1975,7 +1981,13 @@ export class ProtonSession {
    */
   async thumbServer(): Promise<{ base: string }> {
     if (!this.photos && !this.offlineOnly) throw new Error("Not signed in");
-    return { base: await startThumbServer((uid, gone) => this.thumbnailFor(uid, gone)) };
+    return {
+      base: await startThumbServer((uid, gone, width) =>
+        width
+          ? this.smallThumbs.get(uid, width, () => this.thumbnailFor(uid, gone))
+          : this.thumbnailFor(uid, gone),
+      ),
+    };
   }
 
   /**

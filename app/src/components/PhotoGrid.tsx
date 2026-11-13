@@ -23,6 +23,7 @@
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { isVideo as classifyVideo, TAG } from "../lib/tags";
 import { cachedThumbnail, requestThumbnail, useThumbServerBase } from "../lib/thumbStore";
+import { thumbPxFor, thumbUrlFor } from "../lib/thumbSize";
 import { cachedDuration, formatVideoTime, requestDuration } from "../lib/durations";
 import { cachedMediaType, requestMediaType } from "../lib/mediaTypes";
 import { useT } from "../lib/i18n";
@@ -144,6 +145,8 @@ type CellProps = {
   local?: boolean;
   /** Badge density, from the tile's rendered width. */
   tier?: BadgeTier;
+  /** The size to ask the thumbnail server for (see thumbSize); null for the full picture. */
+  thumbPx?: number | null;
   renderOverlay?: (item: GridItem) => ReactNode;
 };
 
@@ -161,6 +164,7 @@ export function PhotoCell({
   offline = false,
   local = false,
   tier = "all",
+  thumbPx = null,
   renderOverlay,
 }: CellProps) {
   const t = useT();
@@ -176,10 +180,7 @@ export function PhotoCell({
   // empty for the rest of its life. The server reads only the path, so the query is
   // only there to make the webview load it again.
   const [attempt, setAttempt] = useState(0);
-  const served =
-    lazy && serverBase
-      ? serverBase + encodeURIComponent(item.uid) + (attempt ? `?a=${attempt}` : "")
-      : null;
+  const served = lazy && serverBase ? thumbUrlFor(serverBase, item.uid, thumbPx, attempt) : null;
   const fetchesOwn = lazy && !served;
   const imgRef = useRef<HTMLImageElement | null>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -412,7 +413,7 @@ export function PhotoCell({
   );
 }
 
-type GridProps = Omit<CellProps, "item" | "thumb" | "selected" | "tier" | "selectionMode"> & {
+type GridProps = Omit<CellProps, "item" | "thumb" | "selected" | "tier" | "selectionMode" | "thumbPx"> & {
   items: GridItem[];
   /** Eager thumbnails; omit to let each cell lazy-load its own (large timeline). */
   thumbs?: Record<string, string | null>;
@@ -441,12 +442,18 @@ export function PhotoGrid({
   // the measured width once there is one — and only re-renders if that changed the
   // tier at all, so the timeline's month sections do not each pay for a second pass.
   const [tier, setTier] = useState<BadgeTier>(() => badgeTier(cellSize));
+  // The size each tile asks the thumbnail server for, from the same measured tile: a
+  // picture the size it is shown rather than Proton's 512 px one (see thumbSize).
+  const [thumbPx, setThumbPx] = useState<number | null>(() => thumbPxFor(cellSize, window.devicePixelRatio));
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     const apply = (w: number) => {
-      const next = badgeTier(tileWidth(w, cellSize));
+      const tile = tileWidth(w, cellSize);
+      const next = badgeTier(tile);
       setTier((prev) => (prev === next ? prev : next));
+      const px = thumbPxFor(tile, window.devicePixelRatio);
+      setThumbPx((prev) => (prev === px ? prev : px));
     };
     apply(el.clientWidth);
     const ro = new ResizeObserver((entries) => {
@@ -470,6 +477,7 @@ export function PhotoGrid({
           offline={!!offlineUids?.has(item.uid)}
           local={!!localUids?.has(item.uid)}
           tier={tier}
+          thumbPx={thumbPx}
           {...cell}
         />
       ))}

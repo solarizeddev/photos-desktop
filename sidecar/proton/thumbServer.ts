@@ -41,13 +41,14 @@
 
 import { createServer, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { thumbWidthFor } from "./thumbSizes.ts";
 
 /**
  * The bytes of one grid thumbnail, or null when there is none to give. `gone` fires when
  * the webview stops waiting, as it does for a tile scrolled away, so the thumbnail is not
  * fetched ahead of the ones still on screen.
  */
-export type ThumbnailSource = (uid: string, gone: AbortSignal) => Promise<Buffer | null>;
+export type ThumbnailSource = (uid: string, gone: AbortSignal, width?: number) => Promise<Buffer | null>;
 
 /** A node uid: base64url halves joined by a tilde. Anything else is refused unread. */
 const UID_SHAPE = /^[A-Za-z0-9_=~-]{1,256}$/;
@@ -98,8 +99,11 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
   if (req.method !== "GET") return refuse(405);
   if (req.headers.host !== `127.0.0.1:${port}`) return refuse(403);
 
-  // `/t/<token>/<uid>`, nothing else.
-  const parts = (req.url ?? "").split("?")[0].split("/");
+  // `/t/<token>/<uid>`, nothing else; `?w=<px>` asks for the picture cut down to a tile that
+  // size (see thumbSizes), and anything else in the query only makes the webview load anew.
+  const [path, query = ""] = (req.url ?? "").split("?", 2);
+  const parts = path.split("/");
+  const width = thumbWidthFor(Number(new URLSearchParams(query).get("w") ?? NaN)) ?? undefined;
   if (parts.length !== 4 || parts[0] !== "" || parts[1] !== "t") return refuse(404);
   const given = Buffer.from(parts[2], "base64url");
   const current = token;
@@ -119,7 +123,7 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
     if (!res.writableFinished) gone.abort();
   });
   try {
-    const bytes = await source(uid, gone.signal);
+    const bytes = await source(uid, gone.signal, width);
     if (gone.signal.aborted) return;
     if (!bytes) return refuse(404);
     res.writeHead(200, {
