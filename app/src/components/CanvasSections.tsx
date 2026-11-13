@@ -133,8 +133,8 @@ export function CanvasSections({
   useLayoutEffect(() => {
     const was = lastLayout.current;
     lastLayout.current = { layout, shape };
-    const scroller = scrollRef.current;
     const wrap = wrapRef.current;
+    const scroller = scrollerOf(scrollRef, wrap);
     // Nothing to keep before the first real layout (the first commit has no width), or
     // when the list changed rather than its layout.
     if (!was || !scroller || !wrap || was.shape !== shape || width === 0 || was.layout.width === 0) return;
@@ -151,8 +151,8 @@ export function CanvasSections({
   // it). Made before the paint, and before the effect below hands it what to draw.
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
-    const scroller = scrollRef.current;
     const wrap = wrapRef.current;
+    const scroller = scrollerOf(scrollRef, wrap);
     if (!canvas || !scroller || !wrap) return;
     const engine = new CanvasTimeline(
       canvas,
@@ -303,6 +303,15 @@ export function CanvasSections({
       )}
     </div>
   );
+}
+
+/**
+ * The scroll area the list is in. React attaches a parent element's ref only after its
+ * children's layout effects have run, so when the scroll area and this list mount together
+ * the ref is not set yet: the scroll area is then found by looking.
+ */
+function scrollerOf(ref: RefObject<HTMLElement | null>, wrap: HTMLElement | null): HTMLElement | null {
+  return ref.current ?? wrap?.closest<HTMLElement>(".g-scroll") ?? null;
 }
 
 /** A month header laid out out of sight, to learn the height every header shares. */
