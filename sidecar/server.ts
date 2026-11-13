@@ -319,6 +319,7 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   cancelUpload: () => session.cancelUpload(),
   clearUploads: () => session.clearUploads(),
   getNodeDetails: (p) => session.getNodeDetails(p.uid),
+  cachedNames: (p) => session.cachedNames(uidList(p?.uids).slice(0, 200)),
   cloudEditorSource: (p) => session.cloudEditorSource(p.uid),
   saveCloudEdit: (p) => session.saveCloudEdit(p.jpegBase64, p.meta),
   renamePhoto: (p) => session.renamePhoto(p.uid, p.name),

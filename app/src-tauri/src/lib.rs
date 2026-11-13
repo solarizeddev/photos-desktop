@@ -144,7 +144,7 @@ fn priority_for(method: &str) -> Priority {
 fn classified(method: &str) -> Option<Priority> {
     Some(match method {
         // The user is waiting on the answer.
-        "getPreview" | "getVideo" | "getNodeDetails" | "hydrateFile" | "startHydrate"
+        "getPreview" | "getVideo" | "getNodeDetails" | "cachedNames" | "hydrateFile" | "startHydrate"
         // Session lifecycle: must never sit behind a warm.
         | "__init" | "ping" | "lock" | "unlock" | "signOut" | "unlockDevice"
         | "localLockState" | "localLockCheck" | "localLockSet" | "localLockClear"
