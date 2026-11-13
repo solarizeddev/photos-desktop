@@ -9,9 +9,13 @@ import "@app/styles/Photos.css";
 import { VirtualSections } from "@app/components/VirtualSections";
 import { PhotoGrid } from "@app/components/PhotoGrid";
 import { connectThumbServer } from "@app/lib/thumbStore";
+import type { MountedGrid, Probe } from "./grids/layout";
+import { mountPool } from "./grids/pool";
+import { mountCanvas } from "./grids/canvas";
 
 type Phase = { name: string; kind: "idle" | "linear" | "fling"; v?: number; tau?: number; ms: number };
-type Config = { n: number; cell: number; sections: boolean; phases: Phase[] };
+/** `grid`: "app" (the app's own components), "pool" (reused DOM tiles) or "canvas". */
+type Config = { n: number; cell: number; sections: boolean; grid?: string; phases: Phase[] };
 
 const log = (m: string) => fetch("/log", { method: "POST", body: m }).catch(() => {});
 window.addEventListener("error", (e) => log("error: " + e.message));
@@ -63,12 +67,52 @@ function offset(p: Phase, t: number): number {
   return 0;
 }
 
-async function run() {
-  const cfg: Config = await (await fetch("/config.json")).json();
-  await connectThumbServer();
+/** The app's grid, mounted by React; its tiles are read back from the page. */
+async function mountApp(cfg: Config): Promise<MountedGrid> {
   createRoot(document.getElementById("root")!).render(<App cfg={cfg} />);
   let sc: HTMLElement | null = null;
   while (!(sc = document.querySelector(".g-scroll")) || !sc.querySelector(".g-cell")) await frame();
+  const scroller = sc;
+  return {
+    scroller,
+    get gridWidth() {
+      return (scroller.querySelector(".g-grid") as HTMLElement | null)?.clientWidth ?? 0;
+    },
+    probe(): Probe {
+      const view = scroller.getBoundingClientRect();
+      const cells = scroller.querySelectorAll<HTMLElement>(".g-cell");
+      const xs = new Set<number>();
+      let vis = 0;
+      let blank = 0;
+      let tile: [number, number] = [0, 0];
+      for (const c of cells) {
+        const r = c.getBoundingClientRect();
+        if (r.bottom <= view.top || r.top >= view.bottom) continue;
+        vis++;
+        xs.add(Math.round(r.left));
+        tile = [Math.round(r.width), Math.round(r.height)];
+        if (!c.querySelector("img[data-ok]")) blank++;
+      }
+      return { vis, blank, columns: xs.size, tile, built: cells.length };
+    },
+  };
+}
+
+async function run() {
+  const cfg: Config = await (await fetch("/config.json")).json();
+  const grid = cfg.grid ?? "app";
+  const extra: Record<string, unknown> = {};
+  let g: MountedGrid;
+  if (grid === "pool" || grid === "canvas") {
+    const base = location.origin + "/t/tok/";
+    const root = document.getElementById("root")!;
+    g = grid === "pool" ? mountPool(root, cfg, base) : mountCanvas(root, cfg, base, (where) => (extra.decode_in = where));
+    await frame();
+  } else {
+    await connectThumbServer();
+    g = await mountApp(cfg);
+  }
+  const sc = g.scroller;
 
   const data = cfg.phases.map((p) => ({ name: p.name, dts: [] as number[], probes: 0, probesBlank: 0, blankSum: 0, visSum: 0 }));
   const env = { columns: 0, tile_drawn: [0, 0], hit_end: false, cells_built_max: 0 };
@@ -90,21 +134,10 @@ async function run() {
       // Ten times a second: which tiles are on screen, and which of them have no picture yet.
       if (now - lastProbe >= 100) {
         lastProbe = now;
-        const view = sc.getBoundingClientRect();
-        const cells = sc.querySelectorAll<HTMLElement>(".g-cell");
-        const xs = new Set<number>();
-        let vis = 0;
-        let blank = 0;
-        for (const c of cells) {
-          const r = c.getBoundingClientRect();
-          if (r.bottom <= view.top || r.top >= view.bottom) continue;
-          vis++;
-          xs.add(Math.round(r.left));
-          env.tile_drawn = [Math.round(r.width), Math.round(r.height)];
-          if (!c.querySelector("img[data-ok]")) blank++;
-        }
-        env.columns = Math.max(env.columns, xs.size);
-        env.cells_built_max = Math.max(env.cells_built_max, cells.length);
+        const { vis, blank, columns, tile, built } = g.probe();
+        if (vis > 0) env.tile_drawn = tile;
+        env.columns = Math.max(env.columns, columns);
+        env.cells_built_max = Math.max(env.cells_built_max, built);
         d.probes++;
         d.visSum += vis;
         d.blankSum += blank;
@@ -124,7 +157,7 @@ async function run() {
     method: "POST",
     body: JSON.stringify({
       phases: data,
-      env: { ...env, ua: navigator.userAgent, scale: devicePixelRatio, view: [sc.clientWidth, sc.clientHeight], window: [innerWidth, innerHeight], list_height: sc.scrollHeight, grid_width: (sc.querySelector(".g-grid") as HTMLElement | null)?.clientWidth ?? null },
+      env: { ...env, ...extra, ua: navigator.userAgent, scale: devicePixelRatio, view: [sc.clientWidth, sc.clientHeight], window: [innerWidth, innerHeight], list_height: sc.scrollHeight, grid_width: g.gridWidth || null },
     }),
   });
 }

@@ -5,10 +5,28 @@
 #   bash prototypes/native-grid/run.sh                    the full run, about two and a half minutes
 #   bash prototypes/native-grid/run.sh --photos ~/Pictures   with thumbnails made from your own JPEGs
 #   bash prototypes/native-grid/run.sh --n 20000 --tile 150 --lat-min 5 --lat-max 40 --parallel 6
+#   bash prototypes/native-grid/run.sh --web-grids app,canvas   only some of the WebKit grids
 #
+# The WebKit side runs once per grid in --web-grids (default app,pool,canvas: the app's own
+# components, reused DOM tiles, one canvas), then the native side once.
 # Every option goes to both sides unchanged (see README.md). Do not touch the windows while
 # they scroll, and leave them visible: a covered or minimised window is not drawn.
 set -euo pipefail
+# --web-grids is this script's; every other option goes to both sides.
+GRIDS=app,pool,canvas
+PASS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --web-grids) GRIDS="${2:?--web-grids needs a list, e.g. app,pool,canvas}"; shift 2 ;;
+    --web-grids=*) GRIDS="${1#*=}"; shift ;;
+    *) PASS+=("$1"); shift ;;
+  esac
+done
+set -- ${PASS[@]+"${PASS[@]}"}
+IFS=, read -r -a GRID_LIST <<< "$GRIDS"
+for g in "${GRID_LIST[@]}"; do
+  case "$g" in app|pool|canvas) ;; *) printf 'run.sh: unknown grid %s (app, pool or canvas)\n' "$g" >&2; exit 2 ;; esac
+done
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 APP="$HERE/../../app"
 say() { printf '\n== %s\n' "$*"; }
@@ -56,28 +74,38 @@ mkdir -p "$OUT"
 # The page goes first: where its tiles end up depends on the engine's scroll bar and the
 # window's frame, so the native side is then given the same width and height to lay out in.
 SAME=()
+WEB=()
+STEPS=$(( ${#GRID_LIST[@]} + 1 ))
+STEP=0
 if [ "${NG_ONLY:-webkit}" = webkit ]; then
-  say "1 of 2: the app's grid in WebKitGTK. A window opens and scrolls by itself for about a minute."
-  "$BIN/ng-webkit" --dist "$HERE/web/dist" --out "$OUT/webkit.json" "$@" 2> >(tee "$OUT/webkit.log" >&2) || die "the WebKitGTK side failed; see $OUT/webkit.log"
-  num() { tr -d '\n ' < "$OUT/webkit.json" | sed -n "s/.*$1\([0-9][0-9]*\).*/\1/p"; }
-  gw=$(num '"grid_width":'); vw=$(num '"view":\['); vh=$(num '"view":\[[0-9]*,')
-  [ -n "$gw" ] && SAME+=(--grid-width "$gw")
-  [ -n "$vw" ] && [ -n "$vh" ] && SAME+=(--view-width "$vw" --view-height "$vh")
-  sleep 2
+  for g in "${GRID_LIST[@]}"; do
+    STEP=$((STEP + 1))
+    say "$STEP of $STEPS: the '$g' grid in WebKitGTK. A window opens and scrolls by itself for about a minute."
+    "$BIN/ng-webkit" --dist "$HERE/web/dist" --out "$OUT/webkit-$g.json" --web-grid "$g" "$@" 2> >(tee "$OUT/webkit-$g.log" >&2) || die "the WebKitGTK side ($g) failed; see $OUT/webkit-$g.log"
+    WEB+=("$OUT/webkit-$g.json")
+    if [ ${#SAME[@]} -eq 0 ]; then
+      num() { tr -d '\n ' < "$OUT/webkit-$g.json" | sed -n "s/.*$1\([0-9][0-9]*\).*/\1/p"; }
+      gw=$(num '"grid_width":'); vw=$(num '"view":\['); vh=$(num '"view":\[[0-9]*,')
+      [ -n "$gw" ] && SAME+=(--grid-width "$gw")
+      [ -n "$vw" ] && [ -n "$vh" ] && SAME+=(--view-width "$vw" --view-height "$vh")
+    fi
+    sleep 2
+  done
 fi
 if [ "${NG_ONLY:-native}" = native ]; then
-  say "2 of 2: the native GTK4 grid. Another window, the same script."
+  STEP=$((STEP + 1))
+  say "$STEP of $STEPS: the native GTK4 grid. Another window, the same script."
   "$BIN/ng-native" --out "$OUT/native.json" "$@" ${SAME[@]+"${SAME[@]}"} 2> >(tee "$OUT/native.log" >&2) || die "the native side failed; see $OUT/native.log"
 fi
-[ -f "$OUT/native.json" ] && [ -f "$OUT/webkit.json" ] || { echo "one side only; results in $OUT"; exit 0; }
+[ -f "$OUT/native.json" ] && [ ${#WEB[@]} -gt 0 ] || { echo "one side only; results in $OUT"; exit 0; }
 
 # ---- report ------------------------------------------------------------------------------
 REPORT="$OUT/native-grid-comparison.txt"
 {
-  "$BIN/ng-compare" "$OUT/native.json" "$OUT/webkit.json"
+  "$BIN/ng-compare" "$OUT/native.json" "${WEB[@]}"
   printf '\n---- raw: native.json ----\n'; cat "$OUT/native.json"
-  printf '\n---- raw: webkit.json ----\n'; cat "$OUT/webkit.json"; echo
+  for f in "${WEB[@]}"; do printf '\n---- raw: %s ----\n' "$(basename "$f")"; cat "$f"; echo; done
 } > "$REPORT"
 echo
-"$BIN/ng-compare" "$OUT/native.json" "$OUT/webkit.json"
+"$BIN/ng-compare" "$OUT/native.json" "${WEB[@]}"
 say "written to $REPORT  (this one file is all there is to send)"
