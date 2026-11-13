@@ -95,6 +95,34 @@ export async function makeSprites(icons: (px: (css: number) => number) => Record
 
 export type TileState = { selected: boolean; hovered: boolean };
 
+/** A square of the background colour with a round hole: its quarters are the corner masks. */
+let mask: { canvas: HTMLCanvasElement; r: number; bg: string } | null = null;
+
+function cornerMask(r: number, bg: string): HTMLCanvasElement {
+  if (mask && mask.r === r && mask.bg === bg) return mask.canvas;
+  const canvas = mask?.canvas ?? document.createElement("canvas");
+  canvas.width = canvas.height = Math.max(1, 2 * r);
+  const c = canvas.getContext("2d")!;
+  c.clearRect(0, 0, canvas.width, canvas.height);
+  c.fillStyle = bg;
+  c.fillRect(0, 0, canvas.width, canvas.height);
+  c.globalCompositeOperation = "destination-out";
+  c.beginPath();
+  c.arc(r, r, r, 0, Math.PI * 2);
+  c.fill();
+  mask = { canvas, r, bg };
+  return canvas;
+}
+
+function roundCorners(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number, bg: string): void {
+  if (r <= 0) return;
+  const m = cornerMask(r, bg);
+  ctx.drawImage(m, 0, 0, r, r, x, y, r, r);
+  ctx.drawImage(m, r, 0, r, r, x + w - r, y, r, r);
+  ctx.drawImage(m, 0, r, r, r, x, y + h - r, r, r);
+  ctx.drawImage(m, r, r, r, r, x + w - r, y + h - r, r, r);
+}
+
 const BADGE_BG = "rgba(0, 0, 0, 0.55)";
 
 /** Widths of the length labels already measured, by text and font. */
@@ -102,7 +130,7 @@ const textWidths = new Map<string, number>();
 
 /**
  * Paints one tile at (x, y), w x h, all in device pixels. `picture` is drawn as it is when
- * it is already cut to w x h with rounded corners (`rounded`), else cut and clipped here.
+ * it is already cut to w x h, else scaled; its corners are rounded here.
  */
 export function paintTile(
   ctx: CanvasRenderingContext2D,
@@ -114,7 +142,6 @@ export function paintTile(
   w: number,
   h: number,
   picture: ImageBitmap | undefined,
-  rounded: boolean,
   marks: TileBadges,
   state: TileState,
 ): void {
@@ -129,23 +156,23 @@ export function paintTile(
     ctx.scale(0.97, 0.97);
     ctx.translate(-(x + w / 2), -(y + h / 2));
   }
-  if (picture && rounded && picture.width === w && picture.height === h) {
-    ctx.drawImage(picture, x, y);
-  } else {
-    ctx.save();
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, radius);
-    ctx.clip();
-    if (picture) {
+  if (picture) {
+    if (picture.width === w && picture.height === h) ctx.drawImage(picture, x, y);
+    else {
+      // Cut for another size (a zoom or a resize under way): scaled until its own comes.
       const k = Math.max(w / picture.width, h / picture.height);
       const sw = w / k;
       const sh = h / k;
       ctx.drawImage(picture, (picture.width - sw) / 2, (picture.height - sh) / 2, sw, sh, x, y, w, h);
-    } else {
-      ctx.fillStyle = p.bg2;
-      ctx.fillRect(x, y, w, h);
     }
-    ctx.restore();
+    // The corners rounded by stamping the background over them: four small copies rather
+    // than a clip to a rounded path for every tile.
+    roundCorners(ctx, x, y, w, h, radius, p.bg);
+  } else {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, radius);
+    ctx.fillStyle = p.bg2;
+    ctx.fill();
   }
   if (state.selected) {
     // `.g-cell.sel`: the picture a little darker, a 2.5 px accent ring inside the edge.

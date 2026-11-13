@@ -9,8 +9,13 @@
 /**
  * The canvas grid's thumbnail worker: fetches a thumbnail from the loopback server, decodes
  * it, cuts it to fill a tile of exactly the size it is drawn at (centred, as object-fit:
- * cover does), rounds its corners, and hands the finished bitmap to the page. The page then
- * only copies it onto the canvas: it never decodes, scales or clips a picture.
+ * cover does), and hands the bitmap to the page, which only copies it onto the canvas: it
+ * never decodes or scales a picture.
+ *
+ * No OffscreenCanvas here: drawing on one in a worker and handing over the result with
+ * transferToImageBitmap crashes WebKitGTK 2.52's web process (a release assertion on the
+ * worker thread, some thousands of thumbnails in; reproduced under prototypes/native-grid
+ * with `--web-grid appcanvas`). The corners are rounded where the tile is drawn instead.
  *
  * A fetch the page calls off (its tile scrolled far away) is aborted here, which closes the
  * connection, which tells the server to stop fetching it: WebKit never does that for an
@@ -30,11 +35,10 @@ const scope = self as unknown as {
   onmessage: ((e: MessageEvent<In>) => void) | null;
 };
 const running = new Map<string, AbortController>();
-/** Whether this engine resizes in createImageBitmap, and has an OffscreenCanvas to round corners on. */
+/** Whether this engine resizes in createImageBitmap. */
 let canResize = true;
-const canRound = typeof OffscreenCanvas === "function";
 
-async function cut(blob: Blob, { w, h, r }: Cut): Promise<ImageBitmap> {
+async function cut(blob: Blob, { w, h }: Cut): Promise<ImageBitmap> {
   const full = await createImageBitmap(blob);
   const k = Math.max(w / full.width, h / full.height);
   const sw = Math.min(full.width, w / k);
@@ -50,21 +54,8 @@ async function cut(blob: Blob, { w, h, r }: Cut): Promise<ImageBitmap> {
       canResize = false;
     }
   }
-  if (!canRound) return fitted;
-  const canvas = new OffscreenCanvas(w, h);
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return fitted;
-  ctx.beginPath();
-  ctx.roundRect(0, 0, w, h, r);
-  ctx.clip();
-  if (fitted === full) ctx.drawImage(full, sx, sy, sw, sh, 0, 0, w, h);
-  else ctx.drawImage(fitted, 0, 0);
-  fitted.close();
-  return canvas.transferToImageBitmap();
+  return fitted;
 }
-
-// What this worker can do, said once at start: whether it rounds corners itself.
-scope.postMessage({ kind: "caps", round: canRound });
 
 scope.onmessage = async (e: MessageEvent<In>) => {
   const m = e.data;

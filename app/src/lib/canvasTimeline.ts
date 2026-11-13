@@ -28,7 +28,7 @@ import { ScrollSpeed } from "./scrollSpeed";
  *     on the view again: what is drawn is shifted by one copy of itself and only the newly
  *     exposed strip is drawn.
  *   - Thumbnails are fetched and decoded in a worker, cut to the tile's size in device
- *     pixels with rounded corners (see tileLoader), so drawing one is a copy. Those on
+ *     pixels (see tileLoader), so drawing one is a copy; the corners are stamped round. Those on
  *     screen are asked for first, from the edge the list moves towards, then a screen
  *     ahead; none while the list moves faster than four screens a second; and fetches for
  *     tiles that went far away are called off.
@@ -413,7 +413,6 @@ export class CanvasTimeline {
       W,
       H,
       this.loader?.bitmap(uid),
-      !!this.loader?.rounded,
       marks,
       { selected: d.selected.has(uid), hovered: index === this.hover },
     );

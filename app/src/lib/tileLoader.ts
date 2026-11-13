@@ -11,8 +11,8 @@ import { bench, benchCount } from "./benchProbe";
 /**
  * The canvas grid's thumbnails, decoded and ready to draw, by photo.
  *
- * Fetched and decoded in a worker (see tileWorker), cut to the tile's size in device pixels
- * with its corners rounded, so drawing one is a plain copy. A few at a time: the grid asks
+ * Fetched and decoded in a worker (see tileWorker), cut to the tile's size in device pixels,
+ * so drawing one is a plain copy. A few at a time: the grid asks
  * for the tiles it wants most first and calls off the ones that scrolled far away, which
  * aborts their fetch. Kept up to a memory budget, oldest first out, and every bitmap let go
  * of is closed so its memory goes at once, not at the next collection.
@@ -52,8 +52,6 @@ export class TileLoader {
   private closed = false;
   /** How the thumbnails are made: for the log and the measurement. */
   where = "worker";
-  /** Whether the thumbnails come with their corners rounded; if not, the grid clips them. */
-  rounded = false;
 
   constructor(
     /** A thumbnail is ready to draw (or will not come: then `bitmap` returns nothing). */
@@ -186,15 +184,12 @@ export class TileLoader {
     this.onArrive(key);
   }
 
-  private fromWorker(m: { kind: string; key?: string; bitmap?: ImageBitmap; w?: number; h?: number; round?: boolean; unreachable?: boolean }): void {
+  private fromWorker(m: { kind: string; key?: string; bitmap?: ImageBitmap; w?: number; h?: number; unreachable?: boolean }): void {
     if (this.mode !== "worker") {
       m.bitmap?.close();
       return;
     }
-    if (m.kind === "caps") {
-      this.rounded = !!m.round;
-      this.where = m.round ? "worker" : "worker, clipped here";
-    } else if (m.kind === "done") {
+    if (m.kind === "done") {
       this.workerProven = true;
       this.arrived(m.key!, { bitmap: m.bitmap!, w: m.w!, h: m.h! });
     } else if (m.kind === "failed") {
@@ -208,7 +203,6 @@ export class TileLoader {
     if (this.mode === "page") return;
     this.mode = "page";
     this.where = where;
-    this.rounded = false;
     this.worker?.terminate();
     this.worker = null;
     if (this.closed) return;
