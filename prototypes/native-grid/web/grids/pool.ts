@@ -12,12 +12,31 @@ import { HEADER_GUESS, Speed, inRange, layout, sectionCounts, thumbPxFor, thumbU
 
 /** Screens kept built either side of the view. */
 const OVERSCAN = 1;
+/** Thumbnails fetched at once: the six connections the engine holds per host, and two in line. */
+const IN_FLIGHT = 8;
 /** Faster than this many screens a second, no new thumbnail is asked for. */
 const FAST_SCREENS_S = 4;
 /** Where an unused element waits: off the list, and not painted. */
 const PARKED = "translate(-10000px, 0)";
 
-type Tile = { el: HTMLDivElement; img: HTMLImageElement; idx: number; url: string; y: number; waiting: boolean };
+/**
+ * A tile element and the picture it is loading or showing. Pictures are fetched here, not
+ * by pointing the <img> at the server: WebKit never stops an image's download when its
+ * `src` changes or the element goes (CachedImage keeps loading with no one to show it to),
+ * so every tile that scrolled past held one of the six connections to the server until its
+ * thumbnail arrived. A fetch is aborted the moment its tile is handed on. The picture is
+ * decoded (`img.decode()`, off the main thread) before it is shown: WebKit otherwise
+ * decodes a small on-screen image on the main thread while it paints.
+ */
+type Tile = {
+  el: HTMLDivElement;
+  img: HTMLImageElement;
+  idx: number;
+  y: number;
+  state: "none" | "loading" | "ok" | "failed";
+  stop: AbortController | null;
+  blob: string;
+};
 type Header = { el: HTMLDivElement; title: HTMLSpanElement; count: HTMLSpanElement; key: string };
 
 export function mountPool(root: HTMLElement, cfg: { n: number; cell: number; sections: boolean }, base: string): MountedGrid {
@@ -54,11 +73,7 @@ export function mountPool(root: HTMLElement, cfg: { n: number; cell: number; sec
     const img = document.createElement("img");
     img.decoding = "async";
     img.alt = "";
-    const t: Tile = { el, img, idx: -1, url: "", y: 0, waiting: false };
-    // Shown only when the picture that loaded is still the one this element is for.
-    img.addEventListener("load", () => {
-      if (img.src === t.url) img.setAttribute("data-ok", "");
-    });
+    const t: Tile = { el, img, idx: -1, y: 0, state: "none", stop: null, blob: "" };
     el.appendChild(img);
     list.appendChild(el);
     tiles.push(t);
@@ -80,16 +95,67 @@ export function mountPool(root: HTMLElement, cfg: { n: number; cell: number; sec
     return h;
   };
 
-  /** Points a tile's picture at its thumbnail, unless it already shows it. */
-  const show = (t: Tile) => {
-    t.waiting = false;
-    const url = thumbUrlFor(base, "u" + t.idx, px, 0);
-    if (t.url !== url) {
+  let inFlight = 0;
+  let lastTop = 0;
+
+  /** Lets go of a tile's picture: its fetch stops, its blob goes, it shows nothing. */
+  const release = (t: Tile) => {
+    t.stop?.abort();
+    t.stop = null;
+    if (t.blob) {
       t.img.removeAttribute("data-ok");
-      t.url = url;
-      t.img.src = url;
-    } else if (t.img.complete && t.img.naturalWidth > 0) {
-      t.img.setAttribute("data-ok", "");
+      t.img.removeAttribute("src");
+      URL.revokeObjectURL(t.blob);
+      t.blob = "";
+    }
+    t.state = "none";
+  };
+
+  const load = (t: Tile) => {
+    const stop = new AbortController();
+    t.stop = stop;
+    t.state = "loading";
+    inFlight++;
+    fetch(thumbUrlFor(base, "u" + t.idx, px, 0), { signal: stop.signal })
+      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+      .then(async (blob) => {
+        if (t.stop !== stop) return;
+        const url = URL.createObjectURL(blob);
+        t.blob = url;
+        t.img.src = url;
+        await t.img.decode();
+        if (t.stop !== stop) return;
+        t.img.setAttribute("data-ok", "");
+        t.state = "ok";
+        t.stop = null;
+      })
+      .catch(() => {
+        if (t.stop !== stop) return;
+        t.state = "failed";
+        t.stop = null;
+      })
+      .finally(() => {
+        inFlight--;
+        pump();
+      });
+  };
+
+  /** Starts fetches: tiles on screen first, then those ahead in the way the list is going. */
+  const pump = () => {
+    if (speed.isFast() || inFlight >= IN_FLIGHT) return;
+    const top = scroller.scrollTop;
+    const bottom = top + scroller.clientHeight;
+    for (const p of placed) {
+      if (p.y + l.rowH <= top || p.y >= bottom) continue;
+      const t = byIdx.get(p.idx);
+      if (t && t.state === "none") load(t);
+      if (inFlight >= IN_FLIGHT) return;
+    }
+    const down = top >= lastTop;
+    for (let i = 0; i < placed.length; i++) {
+      const t = byIdx.get(placed[down ? i : placed.length - 1 - i].idx);
+      if (t && t.state === "none") load(t);
+      if (inFlight >= IN_FLIGHT) return;
     }
   };
 
@@ -104,44 +170,24 @@ export function mountPool(root: HTMLElement, cfg: { n: number; cell: number; sec
     for (const [idx, t] of byIdx) {
       if (wanted.has(idx)) continue;
       byIdx.delete(idx);
+      release(t);
       t.idx = -1;
       free.push(t);
     }
     for (const p of placed) {
-      let t = byIdx.get(p.idx);
-      if (!t) {
-        t = free.pop() ?? makeTile();
-        t.idx = p.idx;
-        byIdx.set(p.idx, t);
-        t.y = p.y;
-        t.el.style.transform = `translate(${p.x}px, ${p.y}px)`;
-        if (speed.isFast()) {
-          // Moving too fast to be worth a picture: shown blank until the list slows.
-          t.waiting = true;
-          if (t.url) {
-            t.img.removeAttribute("data-ok");
-            t.img.removeAttribute("src");
-            t.url = "";
-          }
-        } else {
-          show(t);
-        }
-      } else if (t.waiting && !speed.isFast()) {
-        show(t);
-      }
+      if (byIdx.has(p.idx)) continue;
+      const t = free.pop() ?? makeTile();
+      t.idx = p.idx;
+      t.y = p.y;
+      byIdx.set(p.idx, t);
+      t.el.style.transform = `translate(${p.x}px, ${p.y}px)`;
     }
-    // What is left over is parked, once: a parked one is not touched again. Its picture
-    // goes, so the engine can drop a load still under way and the decoded image.
+    // What is left over is parked, once: a parked one is not touched again.
     for (const t of free) {
-      if (t.el.style.transform === PARKED) continue;
-      t.el.style.transform = PARKED;
-      t.waiting = false;
-      if (t.url) {
-        t.img.removeAttribute("data-ok");
-        t.img.removeAttribute("src");
-        t.url = "";
-      }
+      if (t.el.style.transform !== PARKED) t.el.style.transform = PARKED;
     }
+    pump();
+    lastTop = top;
 
     wantedKeys.clear();
     for (const h of placedHeaders) wantedKeys.add(h.key);
@@ -162,7 +208,7 @@ export function mountPool(root: HTMLElement, cfg: { n: number; cell: number; sec
     }
   };
 
-  const speed = new Speed(scroller.clientHeight * FAST_SCREENS_S, () => update());
+  const speed = new Speed(scroller.clientHeight * FAST_SCREENS_S, () => pump());
   scroller.addEventListener(
     "scroll",
     () => {
@@ -185,7 +231,7 @@ export function mountPool(root: HTMLElement, cfg: { n: number; cell: number; sec
         const y = t.y;
         if (y + l.rowH <= top || y >= bottom) continue;
         vis++;
-        if (!t.img.hasAttribute("data-ok")) blank++;
+        if (t.state !== "ok") blank++;
       }
       return { vis, blank, columns: l.columns, tile: [Math.round(l.tile), Math.round(l.rowH)], built: tiles.length };
     },

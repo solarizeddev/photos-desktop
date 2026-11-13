@@ -44,7 +44,7 @@ gets there, before anything in the app is changed:
 | grid | what it is | what it tests |
 |---|---|---|
 | `app` | the app's `VirtualSections` + `PhotoGrid` | the app as it is |
-| `pool` | the same tiles as plain DOM: a fixed set of elements, each placed by a transform, handed from the tiles that scroll away to those that scroll in; one screen built either side (the app builds two) | recycling, as Android's RecyclerView and iOS's collection views do: no element made or taken down while scrolling, no React |
+| `pool` | the same tiles as plain DOM: a fixed set of elements, each placed by a transform, handed from the tiles that scroll away to those that scroll in; one screen built either side (the app builds two); pictures fetched by the page, aborted when their tile is handed on, and decoded (`img.decode()`) before shown | recycling, as Android's RecyclerView and iOS's collection views do: no element made or taken down while scrolling, no React. WebKit never stops an `<img>`'s download when its `src` changes, and decodes a small on-screen picture on the main thread while painting; this grid does neither |
 | `canvas` | the view is one `<canvas>`, drawn on each scroll step; thumbnails fetched and decoded into `ImageBitmap`s in a worker, and fetches for tiles more than two screens away called off | drawing tiles the way a native grid does: no element per tile at all, no decode on the main thread |
 
 `pool` and `canvas` ask for no thumbnail while the list moves faster than four screens a
