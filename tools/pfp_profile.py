@@ -12,10 +12,13 @@ What it records
   - which threads of the Node sidecar burn the CPU
   - the app's "[rpc] <method> wait=<ms> hold=<ms>" log lines written during the run
     (the app logs every call that waited or ran for 1 s or more)
+  - the app's watchdog lines for calls still stuck (waiting or running for 5 s or more)
+    and how many of Proton's download slots are held, where the build writes them
 
 What it does NOT record
   - no photo names, no file contents, no account data, no hostname, no username
-  - from the app log it copies ONLY the "[rpc] method wait= hold=" lines
+  - from the app log it copies ONLY the "[rpc] ..." timing and watchdog lines and the
+    download-slot counts: method names, durations and counts
 
 Usage
   1. Close the app completely.
@@ -45,6 +48,11 @@ CLK = os.sysconf("SC_CLK_TCK")
 PAGE = os.sysconf("SC_PAGE_SIZE")
 RPC_LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[host\] \[rpc\] (\w+) wait=(\d+) hold=(\d+)")
 OTHER_TAG = re.compile(r"^\[\d\d:\d\d:\d\d\] \[(\w+)\] \[(\w+)\]")
+# The app's watchdog, every 5 s while a call is stuck (method names and counts only):
+STUCK_LINE = re.compile(
+    r"^\[(\d\d):(\d\d):(\d\d)\] \[host\] \[rpc\] (\w+) stuck lane=(fg|bg) (?:waiting=(\d+)|running=(\d+) waited=(\d+))")
+QUEUE_LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[host\] \[rpc\] queue (stuck=\d+ .*)$")
+SLOTS_LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[sidecar\] \[slots\] in_use=(\d+) oldest=(\d+)")
 
 STEPS = [
     ("launch",
@@ -408,6 +416,16 @@ def main():
     # the app's own slow-call log, rpc timing lines only
     rpc_lines, other_tags = [], defaultdict(int)
     by_method = defaultdict(list)
+    stuck_lines, slot_lines = [], []
+    stuck_by = defaultdict(lambda: defaultdict(int))   # phase -> "method lane state" -> worst ms
+    slots_by = defaultdict(lambda: [0, 0])             # phase -> [most in use, oldest ms]
+
+    def when(h, mi, s):
+        sec = (int(h) * 3600 + int(mi) * 60 + int(s)
+               - (utc_start.hour * 3600 + utc_start.minute * 60 + utc_start.second)) % 86400
+        phase = next((p[0] for p in phases if p[1] <= sec <= p[2]),
+                     min(phases, key=lambda p: min(abs(sec - p[1]), abs(sec - p[2])))[0])
+        return sec, phase
     if log_path and os.path.exists(log_path):
         size = os.path.getsize(log_path)
         with open(log_path, "r", errors="replace") as f:
@@ -423,9 +441,33 @@ def main():
                                  min(phases, key=lambda p: min(abs(sec - p[1]), abs(sec - p[2])))[0])
                     by_method[method].append((int(wait), int(hold)))
                     rpc_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} {method:28} wait={int(wait):7d} ms hold={int(hold):7d} ms")
-                else:
-                    m = OTHER_TAG.match(line)
-                    other_tags[(m.group(1) + "/" + m.group(2)) if m else "untagged"] += 1
+                    continue
+                m = STUCK_LINE.match(line)
+                if m:
+                    h, mi, s, method, lane, waiting, running, waited = m.groups()
+                    sec, phase = when(h, mi, s)
+                    state, ms = ("waiting", int(waiting)) if waiting else ("running", int(running))
+                    key = f"{method} {lane} {state}"
+                    stuck_by[phase][key] = max(stuck_by[phase][key], ms)
+                    extra = f" waited={int(waited):7d} ms" if waited else ""
+                    stuck_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} {method:28} {lane} {state}={ms:7d} ms{extra}")
+                    continue
+                m = QUEUE_LINE.match(line)
+                if m:
+                    h, mi, s, rest = m.groups()
+                    sec, phase = when(h, mi, s)
+                    stuck_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} queue {rest}")
+                    continue
+                m = SLOTS_LINE.match(line)
+                if m:
+                    h, mi, s, in_use, oldest = m.groups()
+                    sec, phase = when(h, mi, s)
+                    slots_by[phase][0] = max(slots_by[phase][0], int(in_use))
+                    slots_by[phase][1] = max(slots_by[phase][1], int(oldest))
+                    slot_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} in_use={in_use} oldest={int(oldest) // 1000} s")
+                    continue
+                m = OTHER_TAG.match(line)
+                other_tags[(m.group(1) + "/" + m.group(2)) if m else "untagged"] += 1
 
     rows = sampler.rows
     cols = ["t", "phase", "role", "pid", "cpu", "main_cpu", "rss_mb", "pss_mb", "threads", "read_mb", "write_mb"]
@@ -462,6 +504,19 @@ def main():
         for role, t in sorted(gone, key=lambda x: x[1]):
             phase = next((p[0] for p in phases if p[1] <= t <= p[2]), "?")
             summary.append(f"{role:16} last seen at {t:.0f} s (step: {phase})")
+    summary.append("\n== Calls stuck, named by the app's watchdog while stuck (worst per step)")
+    if not stuck_by:
+        summary.append("none (or this build has no watchdog)")
+    for name, _, _, _ in phases:
+        for key, ms in sorted(stuck_by.get(name, {}).items(), key=lambda kv: -kv[1])[:10]:
+            summary.append(f"{name:16} {key:40} {ms / 1000:7.1f} s")
+    summary.append("\n== Proton download slots held (of 5), most and oldest per step")
+    if not slots_by:
+        summary.append("none held (or this build does not log them)")
+    for name, _, _, _ in phases:
+        if name in slots_by:
+            most, oldest = slots_by[name]
+            summary.append(f"{name:16} in_use max={most}  oldest={oldest / 1000:.0f} s")
     summary.append(f"\n== Slow calls logged by the app (>= 1 s): {len(rpc_lines)}")
     summary += rpc_lines[:400]
     if not log_path:
@@ -470,6 +525,10 @@ def main():
         f.write("\n".join(summary) + "\n")
     with open(os.path.join(out_dir, "rpc_slow.txt"), "w") as f:
         f.write("\n".join(rpc_lines) + "\n")
+    with open(os.path.join(out_dir, "rpc_stuck.txt"), "w") as f:
+        f.write("\n".join(stuck_lines) + "\n")
+    with open(os.path.join(out_dir, "slots.txt"), "w") as f:
+        f.write("\n".join(slot_lines) + "\n")
     with open(os.path.join(out_dir, "meta.json"), "w") as f:
         json.dump({
             "system": system_info(args.app_id),
