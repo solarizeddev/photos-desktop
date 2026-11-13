@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { openDownloader } from "./downloadSlots.ts";
+import { openDownloader, slotsInUse } from "./downloadSlots.ts";
 import { getOriginal, getVideo, releaseOriginal } from "./download.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -58,6 +58,17 @@ describe("a downloader that is not used", () => {
     unused();
     unused(); // a second call gives nothing back twice
     await vi.waitFor(() => expect(client.slots.inUse).toBe(0));
+  });
+
+  it("is counted while it holds its slot, and not after", async () => {
+    const client = slotClient();
+    const before = slotsInUse().count;
+    const used = await openDownloader(client, "a");
+    const left = await openDownloader(client, "b");
+    expect(slotsInUse().count).toBe(before + 2);
+    await used.downloader.downloadToStream(new WritableStream()).completion();
+    left.unused();
+    await vi.waitFor(() => expect(slotsInUse().count).toBe(before));
   });
 
   it("waits for a free slot only so long, then fails rather than hangs", async () => {

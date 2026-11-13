@@ -41,7 +41,72 @@ export type OpenedDownloader = {
   downloader: any;
   /** Gives the slot back without downloading. For a downloader that will not be used. */
   unused(): void;
+  /** Fired to stop a download of it under way, which then ends and gives the slot back. */
+  stop: AbortController;
 };
+
+/** Downloaders holding a slot, by when each took it: what the slot log reports. */
+const holding = new Map<number, number>();
+let nextHolder = 0;
+
+/** How many slots this app holds, and for how long the oldest has been held. */
+export function slotsInUse(now = Date.now()): { count: number; oldestMs: number } {
+  let oldest = now;
+  for (const since of holding.values()) oldest = Math.min(oldest, since);
+  return { count: holding.size, oldestMs: now - oldest };
+}
+
+/** How often the slot log looks. */
+const SLOT_LOG_EVERY_MS = 5_000;
+let slotLog: ReturnType<typeof setInterval> | null = null;
+let lastLogged = 0;
+
+/** "[HH:MM:SS]" in UTC, as the host stamps its own lines in the same log. */
+function stamp(now = new Date()): string {
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `[${two(now.getUTCHours())}:${two(now.getUTCMinutes())}:${two(now.getUTCSeconds())}]`;
+}
+
+/**
+ * Every few seconds while any slot is held, one line in the app's log saying how many and
+ * for how long the oldest: a slot lost, or a download that never ends, shows as a count that
+ * does not come down, rather than as a hang nobody can see.
+ */
+function watchSlots(): void {
+  if (slotLog) return;
+  slotLog = setInterval(() => {
+    const { count, oldestMs } = slotsInUse();
+    if (count > 0 || lastLogged > 0) {
+      process.stderr.write(`${stamp()} [sidecar] [slots] in_use=${count} oldest=${oldestMs}\n`);
+    }
+    lastLogged = count;
+    if (count === 0 && slotLog) {
+      clearInterval(slotLog);
+      slotLog = null;
+    }
+  }, SLOT_LOG_EVERY_MS);
+  slotLog.unref?.();
+}
+
+/**
+ * Follows a downloader's slot: held from now, and let go when a download of it ends, which
+ * is when the SDK gives the slot back.
+ */
+function follow(downloader: any): void {
+  const id = nextHolder++;
+  holding.set(id, Date.now());
+  watchSlots();
+  const start = downloader.downloadToStream?.bind(downloader);
+  if (!start) return;
+  downloader.downloadToStream = (...args: unknown[]) => {
+    const controller = start(...args);
+    void Promise.resolve()
+      .then(() => controller.completion())
+      .catch(() => {})
+      .finally(() => holding.delete(id));
+    return controller;
+  };
+}
 
 /**
  * A downloader for `uid`, with the way to give its slot back unused. Waiting for a free
@@ -56,9 +121,11 @@ export async function openDownloader(client: any, uid: string, waitMs = SLOT_WAI
   } finally {
     clearTimeout(timer);
   }
+  follow(downloader);
   let done = false;
   return {
     downloader,
+    stop,
     unused() {
       if (done) return;
       done = true;
