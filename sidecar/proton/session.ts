@@ -123,6 +123,7 @@ import { isTransient, withRetry } from "./transient.ts";
 import { activeRevisionOf, nodeDurationMs, nodeLocation, nodeName, toMillis } from "./nodes.ts";
 import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
+import { openDownloader } from "./downloadSlots.ts";
 import { sameAccount } from "./accountSwitch.ts";
 import { hostNotice } from "./hostCall.ts";
 import {
@@ -1763,9 +1764,12 @@ export class ProtonSession {
       const kept = originalGet(uid);
       if (kept) return kept;
       try {
-        const downloader = await photos.getFileDownloader(uid);
+        const { downloader, unused } = await openDownloader(photos, uid);
         const claimed = downloader.getClaimedSizeInBytes?.() ?? 0;
-        if (claimed > SCAN_ORIGINAL_MAX_BYTES) return null;
+        if (claimed > SCAN_ORIGINAL_MAX_BYTES) {
+          unused(); // too large to read: its download slot goes back unused
+          return null;
+        }
         const chunks: Uint8Array[] = [];
         let total = 0;
         const sink = new WritableStream<Uint8Array>({
