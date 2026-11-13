@@ -452,6 +452,8 @@ def main():
     ap = argparse.ArgumentParser(description="Profile Photos for Proton desktop from /proc")
     ap.add_argument("--app-id", default="eu.akoos.photos")
     ap.add_argument("--idle", type=int)
+    ap.add_argument("--ask", action="store_true",
+                    help="ask about the library, the build and what feels slow, for the record")
     ap.add_argument("--bench", action="store_true",
                     help="record the app's own scroll measurement (start the app with PFP_SCROLL_BENCH=1)")
     ap.add_argument("--log", help=argparse.SUPPRESS)         # testing: the app log to read
@@ -479,6 +481,9 @@ def main():
     if not args.auto:
         print(f"Photos for Proton desktop profiler. About {'3' if args.bench else '10'} minutes. "
               "Nothing personal is recorded.\n")
+    # The questions about the library are asked only with --ask: the measurement itself says
+    # what they used to, and a run that repeats one before is quicker without them.
+    if args.ask and not args.auto:
         answers["photo_count"] = input("Roughly how many photos are in the library? ").strip()
         answers["background_work"] = input(
             "Was a face scan / search indexing still running last time you used the app? (y/n/unknown) ").strip()
