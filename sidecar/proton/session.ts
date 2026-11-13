@@ -53,6 +53,7 @@ import {
   SESSION_FILE,
   isReady,
   originalGet,
+  originalSize,
   metaGet,
   metaPut,
   readSealedOrDiscard,
@@ -123,6 +124,7 @@ import { isTransient, withRetry } from "./transient.ts";
 import { activeRevisionOf, nodeDurationMs, nodeLocation, nodeName, toMillis } from "./nodes.ts";
 import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
+import { OpenVideos, videoFromBytes, videoFromDownloader, type VideoSource } from "./videoStream.ts";
 import { sameAccount } from "./accountSwitch.ts";
 import { hostNotice } from "./hostCall.ts";
 import {
@@ -150,6 +152,7 @@ import {
   type OriginalStatus,
   type SaveStatus,
   type VideoBytes,
+  MAX_INMEMORY_VIDEO,
 } from "./download.ts";
 import {
   cloudEditorSource as runCloudEditorSource,
@@ -1143,6 +1146,7 @@ export class ProtonSession {
     labelStore.unload();
     hiddenStore.unload();
     this.thumbWaiting.clear();
+    this.videos.clear();
     lockVault();
     this.offlineResume = null;
     this.retried = null;
@@ -1244,6 +1248,7 @@ export class ProtonSession {
     faceScanner.setSource(null);
     duplicateFinder.setSource(null);
     this.thumbWaiting.clear();
+    this.videos.clear();
     this.timelineRun = null;
     this.session = null;
     this.photos = null;
@@ -1274,6 +1279,7 @@ export class ProtonSession {
     labelStore.unload();
     hiddenStore.unload();
     this.thumbWaiting.clear();
+    this.videos.clear();
     this.legacySignIn = false;
     lockVault();
     this.removeStoredAccount();
@@ -1966,6 +1972,8 @@ export class ProtonSession {
 
   /** Uncached thumbnails asked for over the thumbnail server, gathered into one fetch. */
   private thumbWaiting = new Map<string, ((bytes: Buffer | null) => void)[]>();
+  /** Videos the window is playing, for the thumbnail server: see `videoSource`. */
+  private videos = new OpenVideos((uid) => this.videoSource(uid));
   private thumbFlush: ReturnType<typeof setTimeout> | null = null;
   private thumbFetching = 0;
 
@@ -1975,7 +1983,12 @@ export class ProtonSession {
    */
   async thumbServer(): Promise<{ base: string }> {
     if (!this.photos && !this.offlineOnly) throw new Error("Not signed in");
-    return { base: await startThumbServer((uid, gone) => this.thumbnailFor(uid, gone)) };
+    return {
+      base: await startThumbServer(
+        (uid, gone) => this.thumbnailFor(uid, gone),
+        (uid) => this.videos.get(uid),
+      ),
+    };
   }
 
   /**
@@ -2157,6 +2170,32 @@ export class ProtonSession {
   }
 
   // ---- Download ----
+
+  /**
+   * A video for the window to play over the thumbnail server, a range at a time. A copy
+   * kept offline plays from the disk, with or without Proton, when it is small enough to
+   * hold (the sealed copy is decrypted whole); otherwise it is streamed from Proton. Null
+   * when neither can be had, or Proton does not say how large the video is, which ranges
+   * need: the window then falls back to `getVideo`.
+   */
+  private async videoSource(uid: string): Promise<VideoSource | null> {
+    const keptType = metaGet(uid)?.mediaType ?? "";
+    if (isOfflineReady(uid) && keptType.startsWith("video/")) {
+      const size = originalSize(uid);
+      if (size !== null && size <= MAX_INMEMORY_VIDEO) {
+        const stored = originalGet(uid);
+        if (stored) return videoFromBytes(stored, keptType);
+      }
+    }
+    if (!this.photos) return null;
+    const node = await this.photos.getNode(uid);
+    const mime = (node as any)?.mediaType || "video/mp4";
+    if (!String(mime).startsWith("video/")) return null;
+    const downloader = await this.photos.getFileDownloader(uid);
+    const size = downloader.getClaimedSizeInBytes?.() ?? 0;
+    if (!size) return null;
+    return videoFromDownloader(downloader, size, mime);
+  }
 
   async getVideo(uid: string): Promise<VideoBytes> {
     // A copy kept offline plays from the disk, with or without Proton.
