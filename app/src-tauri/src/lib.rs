@@ -611,9 +611,8 @@ impl SidecarGate {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Start following a cancellable call. Idempotent, and deliberately so: the call is
-    /// registered on the way in from the frontend AND again once it reaches a pool
-    /// thread, and the second must not wipe a cancel that landed between the two.
+    /// Start following a cancellable call. Idempotent, and deliberately so: registering a
+    /// call twice must never wipe a cancel that landed in between.
     fn track(&self, id: CallId) {
         self.pending.lock().unwrap().entry(id).or_insert(false);
     }
