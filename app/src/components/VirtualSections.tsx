@@ -24,6 +24,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type 
 import { flushSync } from "react-dom";
 import { GRID_GAP } from "./PhotoGrid";
 import { anchorAfterScroll, builtSpan, rowsInSpan } from "../lib/virtualWindow";
+import { bench, benchCount, benchRows, benchSpan } from "../lib/benchProbe";
 
 /** A tile's width over its height, as `.g-cell` draws it. */
 const CELL_ASPECT = 0.85;
@@ -90,6 +91,8 @@ export function VirtualSections<T>({
   grid: (section: VirtualSection<T>, items: T[]) => ReactNode;
   className?: string;
 }) {
+  // For the scroll measurement only (see `scrollBench`): when this draw began.
+  const benchFrom = bench.on ? performance.now() : 0;
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   // The tile size held while the list is being resized. The page answers a window drag in
@@ -154,6 +157,7 @@ export function VirtualSections<T>({
     let frame = 0;
     const read = () => {
       frame = 0;
+      const t0 = bench.on ? performance.now() : 0;
       const top = scroller.getBoundingClientRect().top - wrap.getBoundingClientRect().top;
       const height = scroller.clientHeight;
       liveTop.current = top;
@@ -163,6 +167,7 @@ export function VirtualSections<T>({
         const anchor = anchorAfterScroll(prev.top, top, height);
         return anchor === prev.top && prev.height === height ? prev : { top: anchor, height };
       });
+      if (bench.on) benchSpan("read_ms", t0);
     };
     const schedule = () => {
       if (!frame) frame = requestAnimationFrame(read);
@@ -259,6 +264,7 @@ export function VirtualSections<T>({
   const { from, to } = span;
 
   let at = 0;
+  let builtRows = 0;
   const out: ReactNode[] = [];
   for (const section of sections) {
     const rows = Math.ceil(section.items.length / columns);
@@ -275,6 +281,7 @@ export function VirtualSections<T>({
     const before = firstRow * pitch;
     const after = (rows - lastRow) * pitch;
     builtFrom.current.set(section.key, firstRow * columns);
+    builtRows += lastRow - firstRow;
     out.push(
       <section className="g-section live" key={section.key} data-vs={section.key}>
         {header && <MeasuredHeader onHeight={setHeaderHeight}>{header(section)}</MeasuredHeader>}
@@ -290,6 +297,12 @@ export function VirtualSections<T>({
   // from the two layouts rather than measured, so the whole move costs one style write a
   // tile and a single layout.
   useLayoutEffect(() => {
+    if (bench.on && benchFrom) {
+      // From this draw's start to its tiles being in the page: the list's whole cost.
+      benchCount("vs");
+      benchSpan("vs_ms", benchFrom);
+      benchRows(builtRows);
+    }
     const pending = change.current;
     change.current = null;
     const wrap = wrapRef.current;

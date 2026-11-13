@@ -33,6 +33,7 @@ import {
 import { isVideo as classifyVideo, TAG } from "../lib/tags";
 import { cachedThumbnail, requestThumbnail, useThumbServerBase } from "../lib/thumbStore";
 import { keepTileImage, takeTileImage } from "../lib/tileImages";
+import { bench, benchCount, benchSpan } from "../lib/benchProbe";
 import { cachedDuration, formatVideoTime, requestDuration } from "../lib/durations";
 import { cachedMediaType, requestMediaType } from "../lib/mediaTypes";
 import { useT } from "../lib/i18n";
@@ -154,7 +155,12 @@ function observerFor(area: Element | null): IntersectionObserver {
   if (existing) return existing;
   const created = new IntersectionObserver(
     (entries) => {
+      const t0 = bench.on ? performance.now() : 0;
       for (const entry of entries) nearScreen.get(entry.target)?.(entry.isIntersecting);
+      if (bench.on) {
+        benchCount("io", entries.length);
+        benchSpan("io_ms", t0);
+      }
     },
     { root: area, rootMargin: "1200px" },
   );
@@ -188,6 +194,7 @@ const justLoaded: HTMLImageElement[] = [];
 let showFrame = 0;
 
 function showLoaded(img: HTMLImageElement): void {
+  if (bench.on) benchCount("loads");
   if (img.dataset.ok) return;
   justLoaded.push(img);
   if (!showFrame) showFrame = requestAnimationFrame(showJustLoaded);
@@ -195,6 +202,7 @@ function showLoaded(img: HTMLImageElement): void {
 
 function showJustLoaded(): void {
   showFrame = 0;
+  const t0 = bench.on ? performance.now() : 0;
   const batch = justLoaded.splice(0);
   const height = window.innerHeight;
   const onScreen = batch.map((img) => {
@@ -206,6 +214,11 @@ function showJustLoaded(): void {
     if (onScreen[i]) img.dataset.fade = "1";
     img.dataset.ok = "1";
   });
+  if (bench.on) {
+    benchCount("shown", batch.length);
+    benchCount("fade", onScreen.filter(Boolean).length);
+    benchSpan("show_ms", t0);
+  }
 }
 
 type CellProps = {
@@ -253,6 +266,7 @@ export const PhotoCell = memo(function PhotoCell({
   renderOverlay,
 }: CellProps) {
   const t = useT();
+  if (bench.on) benchCount("cells");
   // `thumb === undefined` -> lazy: fetch this cell's thumbnail only once it
   // scrolls near the viewport, from a bounded LRU, so a huge library never loads
   // every thumbnail into memory at once.
@@ -281,6 +295,7 @@ export const PhotoCell = memo(function PhotoCell({
     const img = takeTileImage(served);
     const onLoad = () => showLoaded(img);
     const onError = () => {
+      if (bench.on) benchCount("err");
       img.remove();
       if (attempt < 3) {
         retryTimer.current = setTimeout(() => setAttempt(attempt + 1), 1500 * (attempt + 1));
@@ -306,14 +321,15 @@ export const PhotoCell = memo(function PhotoCell({
   const retryTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   // A tile scrolled away lets go of its request, so the server is not left fetching it
   // ahead of the ones now on screen.
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    if (bench.on) benchCount("mount");
+    return () => {
+      if (bench.on) benchCount("unmount");
       clearTimeout(retryTimer.current);
       const img = imgRef.current;
       if (img && !img.complete) img.removeAttribute("src");
-    },
-    [],
-  );
+    };
+  }, []);
   const ref = useRef<HTMLDivElement>(null);
   const [self, setSelf] = useState<string | null | undefined>(() =>
     lazy ? cachedThumbnail(item.uid) : undefined,
@@ -573,6 +589,7 @@ export function PhotoGrid({
     return () => ro.disconnect();
   }, [cellSize]);
   const selectionMode = (selected?.size ?? 0) > 0;
+  if (bench.on) benchCount("grids");
 
   // The callers' handlers are new functions on each of their renders, which would have
   // every tile drawn again with them. Each tile gets one that never changes and calls the

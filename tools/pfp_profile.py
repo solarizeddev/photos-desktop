@@ -14,11 +14,13 @@ What it records
     (the app logs every call that waited or ran for 1 s or more)
   - the app's watchdog lines for calls still stuck (waiting or running for 5 s or more)
     and how many of Proton's download slots are held, where the build writes them
+  - with --bench: the app's own scroll measurement ("[bench] ..." lines: frame times and
+    what the window's own code did each second while the app scrolled its timeline itself)
 
 What it does NOT record
   - no photo names, no file contents, no account data, no hostname, no username
-  - from the app log it copies ONLY the "[rpc] ..." timing and watchdog lines and the
-    download-slot counts: method names, durations and counts
+  - from the app log it copies ONLY the "[rpc] ..." timing and watchdog lines, the
+    download-slot counts and the "[bench] ..." lines: method names, durations and counts
 
 Usage
   1. Close the app completely.
@@ -26,9 +28,19 @@ Usage
   3. Follow the prompts (about 10 minutes).
   4. Upload the .tar.gz it prints at the end.
 
+Scroll measurement (a build that has it)
+  1. Close the app completely.
+  2. python3 pfp_profile.py --bench
+  3. When it says so, start the app with:
+       flatpak run --env=PFP_SCROLL_BENCH=1 eu.akoos.photos
+     unlock it, and then leave it alone: the timeline scrolls by itself for about a
+     minute (down, back up, a fast fling, a rest). The script goes on when it is done.
+  4. Upload the .tar.gz it prints at the end.
+
 Options
   --app-id ID     Flatpak app id (default eu.akoos.photos)
-  --idle SECONDS  length of the final idle step (default 120)
+  --idle SECONDS  length of the final idle step (default 120; 20 with --bench)
+  --bench         record the app's own scroll measurement instead of the manual steps
 """
 
 import argparse
@@ -47,6 +59,7 @@ from datetime import datetime, timezone
 CLK = os.sysconf("SC_CLK_TCK")
 PAGE = os.sysconf("SC_PAGE_SIZE")
 RPC_LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[host\] \[rpc\] (\w+) wait=(\d+) hold=(\d+)")
+BENCH_LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[host\] \[bench\] (start|sec|sum|done|skip)((?: [a-z0-9_]+=[a-z0-9_-]+)*)\s*$")
 OTHER_TAG = re.compile(r"^\[\d\d:\d\d:\d\d\] \[(\w+)\] \[(\w+)\]")
 # The app's watchdog, every 5 s while a call is stuck (method names and counts only):
 STUCK_LINE = re.compile(
@@ -81,6 +94,90 @@ STEPS = [
      "Search for something by content (for example: beach) and wait for results.\n"
      "   Press Enter when results are shown, or s + Enter to skip."),
 ]
+
+
+def bench_steps(app_id):
+    """The steps of a --bench run: the app scrolls itself, so there is little to do."""
+    return [
+        ("launch",
+         "Press Enter, THEN start the app from a terminal with:\n"
+         f"     flatpak run --env=PFP_SCROLL_BENCH=1 {app_id}\n"
+         "   Press Enter again as soon as its window shows anything (lock screen or photos)."),
+        ("unlock_to_ready",
+         "Unlock / sign in if asked, stay on the Photos timeline, and then do not touch the app:\n"
+         "   within 20 seconds the timeline starts to scroll by itself.\n"
+         "   Press Enter as soon as you have unlocked."),
+    ]
+
+
+def bench_fields(text):
+    """`name=value` fields of a [bench] line: numbers as ints, the phase as it is."""
+    out = {}
+    for part in text.split():
+        name, _, value = part.partition("=")
+        try:
+            out[name] = int(value)
+        except ValueError:
+            out[name] = value
+    return out
+
+
+def wait_for_bench(log_path, offset, limit):
+    """Waits until the app writes that its scroll measurement is over, or `limit` seconds."""
+    start = time.monotonic()
+    seen = False
+    while time.monotonic() - start < limit:
+        if log_path and os.path.exists(log_path):
+            with open(log_path, "r", errors="replace") as f:
+                if os.path.getsize(log_path) >= offset:
+                    f.seek(offset)
+                for line in f:
+                    m = BENCH_LINE.match(line)
+                    if m:
+                        seen = True
+                        if m.group(4) in ("done", "skip"):
+                            return m.group(4)
+        print(f"\r   {'measuring' if seen else 'waiting for the app to start scrolling'} "
+              f"{int(time.monotonic() - start):4d} s ", end="", flush=True)
+        time.sleep(1)
+    return "seen" if seen else None
+
+
+def bench_summary(start, sums, rows, windows):
+    """The summary's lines for the app's own scroll measurement."""
+    out = []
+    if start:
+        out.append(f"window {start.get('w', 0)}x{start.get('h', 0)}, list {start.get('view_h', 0)} px of "
+                   f"{start.get('list_h', 0)} px, tile {start.get('tile_w', 0)} px, {start.get('tiles', 0)} tiles built; "
+                   f"first screen {'drawn' if start.get('ready') else 'NOT drawn'} after {start.get('waited', 0) / 1000:.1f} s")
+    out.append("frames: time each took in ms. late = share of the time spent in frames over 25 ms.")
+    out.append("own = the window's own measured code, as a share of the time. main = the window's main")
+    out.append("thread as /proc saw it in the same seconds; main minus own is the browser's own work")
+    out.append("(layout, painting, decoding, compositing) or code the measurement does not cover.")
+    out.append(f"{'part':8} {'secs':>5} {'frames':>6} {'p50':>5} {'p95':>5} {'max':>5} {'>50ms':>5} {'late':>5} {'own':>5} {'main':>5}")
+    for f in sums:
+        name = f.get("phase", "all")
+        lo, hi = windows.get(name, (None, None))
+        main = [r["main_cpu"] for r in rows
+                if r["role"] == "webview" and r["main_cpu"] is not None and lo is not None and lo <= r["t"] <= hi + 1]
+        main_txt = f"{sum(main) / len(main):4.0f}%" if main else "    ?"
+        out.append(f"{name:8} {f.get('ms', 0) / 1000:5.0f} {f.get('fr', 0):6d} {f.get('p50', 0):5d} {f.get('p95', 0):5d} "
+                   f"{f.get('max', 0):5d} {f.get('over50', 0):5d} {f.get('late_pct', 0):4d}% {f.get('js_pct', 0):4d}% {main_txt}")
+    out.append("own code by what, ms (they overlap: a draw of the view holds the list's, and raf holds read and show).")
+    out.append("late = time in late frames; not-own = the part of it the measured code does not account for:")
+    out.append(f"{'part':8} {'view':>7} {'list':>7} {'read':>7} {'show':>7} {'observer':>8} {'raf':>7} {'late':>7} {'not-own':>8} {'self':>6}")
+    for f in sums:
+        out.append(f"{f.get('phase', 'all'):8} {f.get('photos_ms', 0):7d} {f.get('vs_ms', 0):7d} {f.get('read_ms', 0):7d} "
+                   f"{f.get('show_ms', 0):7d} {f.get('io_ms', 0):8d} {f.get('raf_ms', 0):7d} {f.get('late_ms', 0):7d} "
+                   f"{f.get('other_ms', 0):8d} {f.get('self_ms', 0):6d}")
+    out.append("counts: view/list = times drawn again; tiles drawn, built, taken down; thumbnails loaded,")
+    out.append("taken back already loaded (kept) or asked of the server (fresh), failed; calls to the sidecar:")
+    out.append(f"{'part':8} {'view':>5} {'list':>5} {'drawn':>7} {'built':>6} {'down':>6} {'loaded':>6} {'kept':>6} {'fresh':>6} {'err':>4} {'rpc':>5}")
+    for f in sums:
+        out.append(f"{f.get('phase', 'all'):8} {f.get('photos', 0):5d} {f.get('vs', 0):5d} {f.get('cells', 0):7d} "
+                   f"{f.get('mount', 0):6d} {f.get('unmount', 0):6d} {f.get('loads', 0):6d} {f.get('kept', 0):6d} "
+                   f"{f.get('fresh', 0):6d} {f.get('err', 0):4d} {f.get('rpc', 0):5d}")
+    return out
 
 
 def read(path, binary=False):
@@ -350,10 +447,16 @@ def summarise(rows, phases):
 def main():
     ap = argparse.ArgumentParser(description="Profile Photos for Proton desktop from /proc")
     ap.add_argument("--app-id", default="eu.akoos.photos")
-    ap.add_argument("--idle", type=int, default=120)
+    ap.add_argument("--idle", type=int)
+    ap.add_argument("--bench", action="store_true",
+                    help="record the app's own scroll measurement (start the app with PFP_SCROLL_BENCH=1)")
+    ap.add_argument("--log", help=argparse.SUPPRESS)         # testing: the app log to read
     ap.add_argument("--match", help=argparse.SUPPRESS)       # testing: match processes by name
     ap.add_argument("--auto", type=int, help=argparse.SUPPRESS)  # testing: seconds per step, no prompts
     args = ap.parse_args()
+    if args.idle is None:
+        args.idle = 20 if args.bench else 120
+    steps = bench_steps(args.app_id) if args.bench else STEPS
 
     if not sys.platform.startswith("linux"):
         sys.exit("This script reads /proc and only works on Linux.")
@@ -370,7 +473,8 @@ def main():
 
     answers = {}
     if not args.auto:
-        print("Photos for Proton desktop profiler. About 10 minutes. Nothing personal is recorded.\n")
+        print(f"Photos for Proton desktop profiler. About {'3' if args.bench else '10'} minutes. "
+              "Nothing personal is recorded.\n")
         answers["photo_count"] = input("Roughly how many photos are in the library? ").strip()
         answers["background_work"] = input(
             "Was a face scan / search indexing still running last time you used the app? (y/n/unknown) ").strip()
@@ -378,7 +482,7 @@ def main():
         answers["build"] = input("Which build is installed? (official / patched) ").strip()
         answers["notes"] = input("Anything that feels especially slow? (free text, optional) ").strip()
 
-    log_path = find_log(args.app_id)
+    log_path = args.log or find_log(args.app_id)
     log_offset = os.path.getsize(log_path) if log_path else 0
     # One instant for both clocks, so the app's log lines land in the right step.
     sampler.t0 = time.monotonic()
@@ -386,7 +490,7 @@ def main():
 
     sampler.start()
     phases = []
-    for name, text in STEPS:
+    for name, text in steps:
         if args.auto:
             sampler.phase = name
             t = time.monotonic() - sampler.t0
@@ -400,6 +504,17 @@ def main():
         t = time.monotonic() - sampler.t0
         reply = input("   [Enter when done] ").strip().lower()
         phases.append((name, t, time.monotonic() - sampler.t0, reply == "s"))
+    if args.bench:
+        print("\n--- Step: bench\n   Leave the app alone: it scrolls its timeline by itself (about a minute).")
+        sampler.phase = "bench"
+        t = time.monotonic() - sampler.t0
+        ended = wait_for_bench(log_path, log_offset, args.auto or 150)
+        print()
+        if ended != "done":
+            print("   The app did not report a finished measurement"
+                  + (": it had no timeline to scroll." if ended == "skip" else
+                     ". Was it started with PFP_SCROLL_BENCH=1, and is this a build that has it?"))
+        phases.append(("bench", t, time.monotonic() - sampler.t0, ended is None))
     idle = args.auto or args.idle
     print(f"\n--- Step: idle\n   Do not touch the app for {idle} seconds (shows whether memory is given back).")
     sampler.phase = "idle"
@@ -417,6 +532,8 @@ def main():
     rpc_lines, other_tags = [], defaultdict(int)
     by_method = defaultdict(list)
     stuck_lines, slot_lines = [], []
+    bench_lines, bench_sums, bench_start = [], [], None
+    bench_windows = {}                                   # part of the run -> (first second, last second)
     stuck_by = defaultdict(lambda: defaultdict(int))   # phase -> "method lane state" -> worst ms
     slots_by = defaultdict(lambda: [0, 0])             # phase -> [most in use, oldest ms]
 
@@ -465,6 +582,23 @@ def main():
                     slots_by[phase][0] = max(slots_by[phase][0], int(in_use))
                     slots_by[phase][1] = max(slots_by[phase][1], int(oldest))
                     slot_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} in_use={in_use} oldest={int(oldest) // 1000} s")
+                    continue
+                m = BENCH_LINE.match(line)
+                if m:
+                    h, mi, s, kind, rest = m.groups()
+                    sec, phase = when(h, mi, s)
+                    fields = bench_fields(rest)
+                    bench_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {kind}{rest}")
+                    if kind == "start":
+                        bench_start = fields
+                    elif kind == "sec":
+                        part = str(fields.get("phase", "?"))
+                        lo, hi = bench_windows.get(part, (sec - 1, sec))
+                        bench_windows[part] = (min(lo, sec - 1), max(hi, sec))
+                        lo, hi = bench_windows.get("all", (sec - 1, sec))
+                        bench_windows["all"] = (min(lo, sec - 1), max(hi, sec))
+                    elif kind in ("sum", "done"):
+                        bench_sums.append(fields)
                     continue
                 m = OTHER_TAG.match(line)
                 other_tags[(m.group(1) + "/" + m.group(2)) if m else "untagged"] += 1
@@ -517,6 +651,14 @@ def main():
         if name in slots_by:
             most, oldest = slots_by[name]
             summary.append(f"{name:16} in_use max={most}  oldest={oldest / 1000:.0f} s")
+    summary.append("\n== Scroll measurement (the app scrolling its own timeline, measured from inside)")
+    if bench_sums:
+        summary += bench_summary(bench_start, bench_sums, rows, bench_windows)
+    elif bench_lines:
+        summary.append("started but not finished, or the app had no timeline to scroll: see bench.txt")
+    else:
+        summary.append("not run. For one: python3 pfp_profile.py --bench, and start the app with")
+        summary.append(f"  flatpak run --env=PFP_SCROLL_BENCH=1 {args.app_id}")
     summary.append(f"\n== Slow calls logged by the app (>= 1 s): {len(rpc_lines)}")
     summary += rpc_lines[:400]
     if not log_path:
@@ -529,6 +671,8 @@ def main():
         f.write("\n".join(stuck_lines) + "\n")
     with open(os.path.join(out_dir, "slots.txt"), "w") as f:
         f.write("\n".join(slot_lines) + "\n")
+    with open(os.path.join(out_dir, "bench.txt"), "w") as f:
+        f.write("\n".join(bench_lines) + "\n")
     with open(os.path.join(out_dir, "meta.json"), "w") as f:
         json.dump({
             "system": system_info(args.app_id),
@@ -544,6 +688,10 @@ def main():
         tar.add(out_dir, arcname=os.path.basename(out_dir))
 
     print("\n".join(summary[:60]))
+    if bench_sums:
+        at = next(i for i, line in enumerate(summary) if line.startswith("\n== Scroll measurement"))
+        if at >= 60:
+            print("\n".join(summary[at:at + 30]))
     seen = sorted(set(sampler.roles.values()))
     if not any(r in ("host", "sidecar", "webview") for r in seen):
         print("\nWARNING: no app processes were found. Was the app started during the run?")

@@ -24,6 +24,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -157,6 +158,8 @@ import { isWindows } from "../lib/platform";
 import { onThisDay, seasons } from "../lib/memories";
 import { dropPreview, prefetchAfter } from "../lib/previewStore";
 import { unwarmedBatches, warmWholeBatch } from "../lib/warmBatches";
+import { bench, benchCount, benchSpan } from "../lib/benchProbe";
+import { maybeRunScrollBench } from "../lib/scrollBench";
 import "../styles/Photos.css";
 
 /** Each category's mark in the filter menu, where there is one to draw. */
@@ -290,6 +293,8 @@ export function Photos({
   offline?: boolean;
   onSignOut: () => void;
 }) {
+  // For the scroll measurement only (see `scrollBench`): when this draw of the view began.
+  const benchFrom = bench.on ? performance.now() : 0;
   const t = useT();
   const [allItems, setItems] = useState<TimelineItem[]>([]);
   // What is hidden stays out of every list below; only the Hidden page reads `allItems`.
@@ -473,6 +478,19 @@ export function Photos({
   const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // The scroll measurement, in a run of the app started for one and in no other: the
+  // timeline scrolls itself and the log says what each second cost (see `scrollBench`).
+  useEffect(() => {
+    void maybeRunScrollBench(() => scrollRef.current);
+  }, []);
+  // And, while one runs, what each draw of this whole view costs: from its start to its
+  // changes being in the page. A draw of the view takes every list under it along.
+  useLayoutEffect(() => {
+    if (bench.on && benchFrom) {
+      benchCount("photos");
+      benchSpan("photos_ms", benchFrom);
+    }
+  });
   // Escape belongs to the lightbox while it is open.
   const sel = useSelection(scrollRef, lightboxIdx === null);
   const { selected } = sel;
