@@ -25,7 +25,7 @@ Usage
 
 Options
   --app-id ID     Flatpak app id (default eu.akoos.photos)
-  --idle SECONDS  length of the final idle step (default 240)
+  --idle SECONDS  length of the final idle step (default 120)
 """
 
 import argparse
@@ -342,7 +342,7 @@ def summarise(rows, phases):
 def main():
     ap = argparse.ArgumentParser(description="Profile Photos for Proton desktop from /proc")
     ap.add_argument("--app-id", default="eu.akoos.photos")
-    ap.add_argument("--idle", type=int, default=240)
+    ap.add_argument("--idle", type=int, default=120)
     ap.add_argument("--match", help=argparse.SUPPRESS)       # testing: match processes by name
     ap.add_argument("--auto", type=int, help=argparse.SUPPRESS)  # testing: seconds per step, no prompts
     args = ap.parse_args()
