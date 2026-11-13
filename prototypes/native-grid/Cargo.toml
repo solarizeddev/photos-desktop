@@ -1,0 +1,8 @@
+# A measurement prototype, not part of the app: nothing in app/, sidecar/ or setup/ builds or reads this.
+[workspace]
+resolver = "2"
+members = ["common", "native", "webkit"]
+
+[profile.release]
+opt-level = 3
+debug = false
