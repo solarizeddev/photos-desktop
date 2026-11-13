@@ -2923,6 +2923,13 @@ export class ProtonSession {
   private ocrNext = 0;
   /** The last photos read, by what was read, so going back to one shows its text at once. */
   private ocrRead = new Map<string, OcrJob["result"]>();
+  /**
+   * The photo fetches of reads, one after another. A read only fetches once every read
+   * started before it has fetched, and not at all if a newer read has started by then:
+   * stepping through the viewer used to start a download per photo, all at once, and
+   * hold every original in memory together.
+   */
+  private ocrFetching: Promise<unknown> = Promise.resolve();
 
   /**
    * Starts reading the text in a photo of the library (its full-resolution original, or its
@@ -2946,19 +2953,29 @@ export class ProtonSession {
       return { id };
     }
     const started = Date.now();
+    // Only the newest read is worth anything: the reader stops an older one at its next
+    // step anyway, so one still waiting to fetch its photo gives up before it does.
+    const superseded = () => id !== this.ocrNext;
+    const turn = this.ocrFetching;
+    let fetched!: () => void;
+    this.ocrFetching = new Promise<void>((done) => (fetched = done));
     void (async () => {
       let bytes: Buffer | null = null;
-      if (source.path) bytes = await readPictureFile(source.path);
-      else if (source.uid && this.photos) {
-        // The original the viewer is showing is read as it is, not fetched a second time.
-        bytes = await viewedOriginal(source.uid);
-        if (!bytes) for await (const got of this.scanPictures(this.photos, [source.uid])) bytes = got.bytes;
+      try {
+        await turn;
+        if (superseded()) {
+          job.state = "failed";
+          return;
+        }
+        bytes = await this.ocrBytes(source);
+      } finally {
+        fetched();
       }
-      if (!bytes) {
+      if (!bytes || superseded()) {
         job.state = "failed";
         return;
       }
-      const fetched = Date.now();
+      const fetchedAt = Date.now();
       const result = await readText(bytes, (stage) => (job.stage = stage));
       job.result = result;
       job.state = result ? "done" : "failed";
@@ -2970,12 +2987,24 @@ export class ProtonSession {
           this.ocrRead.delete(old);
         }
       }
-      diag.log("ocr", "read", { ms: Date.now() - started, fetch_ms: fetched - started, blocks: result?.blocks.length ?? -1 });
+      diag.log("ocr", "read", { ms: Date.now() - started, fetch_ms: fetchedAt - started, blocks: result?.blocks.length ?? -1 });
     })().catch((e) => {
       job.state = "failed";
       process.stderr.write(`[ocr] read failed: ${(e as Error)?.name ?? "error"}\n`);
     });
     return { id };
+  }
+
+  /** The bytes a read is made from: a picture file, or the photo's original. */
+  private async ocrBytes(source: { uid?: string; path?: string }): Promise<Buffer | null> {
+    let bytes: Buffer | null = null;
+    if (source.path) bytes = await readPictureFile(source.path);
+    else if (source.uid && this.photos) {
+      // The original the viewer is showing is read as it is, not fetched a second time.
+      bytes = await viewedOriginal(source.uid);
+      if (!bytes) for await (const got of this.scanPictures(this.photos, [source.uid])) bytes = got.bytes;
+    }
+    return bytes;
   }
 
   ocrResult(id: number): OcrJob | null {
