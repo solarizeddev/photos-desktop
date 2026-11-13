@@ -491,8 +491,8 @@ export function ViewerShell({
             /* No `controls`: the bar below is the player, and it draws what the Android
                viewer draws rather than what this browser happens to. The two blocks that
                remain were always about the offers around that bar rather than the bar
-               itself. A photo from Drive plays from a blob, but a file opened from
-               Explorer plays from a real URL, and picture-in-picture and the video's own
+               itself. A video from Drive plays from the loopback server (or a blob), and
+               a file opened from Explorer plays from a real URL, and picture-in-picture and the video's own
                menu each led out of the app with a copy of a file already on the disk.
 
                The element is handed up as state rather than held in a ref, so the
