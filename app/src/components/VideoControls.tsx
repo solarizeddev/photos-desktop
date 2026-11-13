@@ -110,8 +110,11 @@ export function VideoControls({ video }: Props) {
     if (!video) return;
     // A play() the browser refuses (no gesture yet, source not ready) rejects, and an
     // unhandled rejection in the console is all that would otherwise come of it.
-    if (video.paused) void video.play().catch(() => {});
-    else video.pause();
+    // Before its metadata is in, a video starts itself (see ViewerShell): a play() this
+    // early would have WebKitGTK save the whole stream to disk.
+    if (video.paused) {
+      if (video.readyState >= HTMLMediaElement.HAVE_METADATA) void video.play().catch(() => {});
+    } else video.pause();
   }, [video]);
 
   const toggleMute = useCallback(() => {
