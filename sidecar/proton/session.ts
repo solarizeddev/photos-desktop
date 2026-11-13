@@ -125,7 +125,7 @@ import { activeRevisionOf, nodeDurationMs, nodeLocation, nodeName, toMillis } fr
 import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
 import { FaceCovers } from "./faceCover.ts";
-import { OpenVideos, downloadVideo, releaseUnusedDownloader, videoFromBytes, type VideoSource } from "./videoStream.ts";
+import { OpenVideos, downloadVideo, videoFromBytes, type VideoSource } from "./videoStream.ts";
 import { openDownloader } from "./downloadSlots.ts";
 import { sameAccount } from "./accountSwitch.ts";
 import { hostNotice } from "./hostCall.ts";
@@ -2239,11 +2239,10 @@ export class ProtonSession {
     // The downloader holds one of the SDK's few download slots from here until a download
     // of it ends: every way out below either downloads (whose end gives it back) or gives
     // it back without downloading.
-    const stop = new AbortController();
-    const downloader = await this.photos.getFileDownloader(uid, stop.signal);
+    const { downloader, unused, stop } = await openDownloader(this.photos, uid);
     const size = downloader.getClaimedSizeInBytes?.() ?? 0;
     if (!size || size > MAX_STREAMED_VIDEO) {
-      releaseUnusedDownloader(downloader, stop);
+      unused();
       return null;
     }
     return downloadVideo(downloader, size, mime, stop);

@@ -207,21 +207,8 @@ export function downloadVideo(downloader: any, size: number, mime: string, stop:
   return video;
 }
 
-/**
- * Hands back the SDK's download slot of a downloader that will not be used. The SDK only
- * gives a slot back when a download ends, so one is started with `stop` already fired: it
- * ends at once, and its end gives the slot back.
- */
-export function releaseUnusedDownloader(downloader: any, stop: AbortController): void {
-  stop.abort();
-  try {
-    void Promise.resolve(
-      downloader.downloadToStream(new WritableStream<Uint8Array>({ write() {} })).completion(),
-    ).catch(() => {});
-  } catch {
-    /* a downloader that will not even start has nothing to give back */
-  }
-}
+/** Hands back the slot of a downloader that will not be used: see `downloadSlots`. */
+export { releaseUnusedDownloader } from "./downloadSlots.ts";
 
 /** How many videos are kept open: the one playing and the one stepped back from. */
 const OPEN_KEPT = 2;
