@@ -34,6 +34,29 @@ The script: 3 s still, 30 s down at 1500 px/s, a flick down (15000 px/s decaying
 15 s back up, a flick up, 2 s still. Position is a function of time, so both are at the same
 place at the same moment whatever their frame rates.
 
+## The WebKit grids (`--web-grids`, default `app,pool,canvas`)
+
+The WebKit side runs once for each, then the native side once, and the report puts them in
+columns side by side. The two that are not the app's are written here, in `web/grids/`, to
+find out whether WebKit can scroll this many tiles at all and which way of building a grid
+gets there, before anything in the app is changed:
+
+| grid | what it is | what it tests |
+|---|---|---|
+| `app` | the app's `VirtualSections` + `PhotoGrid` | the app as it is |
+| `pool` | the same tiles as plain DOM: a fixed set of elements, each placed by a transform, handed from the tiles that scroll away to those that scroll in; one screen built either side (the app builds two); pictures fetched by the page, aborted when their tile is handed on, and decoded (`img.decode()`) before shown | recycling, as Android's RecyclerView and iOS's collection views do: no element made or taken down while scrolling, no React. WebKit never stops an `<img>`'s download when its `src` changes, and decodes a small on-screen picture on the main thread while painting; this grid does neither |
+| `canvas` | the view is one `<canvas>`, drawn on each scroll step; thumbnails fetched and decoded into `ImageBitmap`s in a worker, and fetches for tiles more than two screens away called off | drawing tiles the way a native grid does: no element per tile at all, no decode on the main thread |
+
+`pool` and `canvas` ask for no thumbnail while the list moves faster than four screens a
+second, and ask for what is on screen once it slows (Google Photos' web grid and Glide do
+this during a fling), so their flings show more blank tiles by design. `canvas` draws no
+rounded corners, hover or badges.
+
+`pool` and `canvas` ask for thumbnails cut to the tile's size (`?w=`), as the app does from
+its tile-sized thumbnails change on; the `app` grid does if the branch it is built from has
+that change (the combined branch does). The report counts how many were asked for cut, per
+grid. The server makes every size the sidecar cuts to before the window opens.
+
 ## What is measured
 
 - **Frame times**: gaps between GTK frame clock ticks natively, between `requestAnimationFrame`
@@ -50,8 +73,8 @@ place at the same moment whatever their frame rates.
 `--n 20000` `--tile 150` `--width 1600 --height 1000` `--lat-min 5 --lat-max 40` `--parallel 6`
 `--photos DIR` (thumbnails from your own JPEGs instead of synthetic ones) `--unique 512`
 `--speed 1500` `--fling 15000` `--scale 1.0` (script length) `--lru 2000` `--no-sections`
-`--cache-dir DIR` (default `~/.cache/pfp-native-grid`). `NG_ONLY=native` or `NG_ONLY=webkit`
-runs one side.
+`--cache-dir DIR` (default `~/.cache/pfp-native-grid`) `--web-grids app,pool,canvas`.
+`NG_ONLY=native` or `NG_ONLY=webkit` runs one side.
 
 ## What it does not tell you
 

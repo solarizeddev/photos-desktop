@@ -22,10 +22,13 @@ fn main() {
         eprintln!("no web build at {} (run.sh builds it)", args.dist.display());
         std::process::exit(1);
     }
+    // The app's grids ask for thumbnails cut to tile size; every size is made now, before
+    // the window opens, so none is made while being measured.
+    ng_common::warm_sized(&pool);
     gtk::init().expect("GTK 3");
     let phases = ng_common::script(&args);
     let rec = Recorder::new(true);
-    let config = json!({ "n": args.n, "cell": args.tile, "sections": args.sections, "phases": ng_common::script_json(&phases) }).to_string();
+    let config = json!({ "n": args.n, "cell": args.tile, "sections": args.sections, "grid": args.web_grid, "phases": ng_common::script_json(&phases) }).to_string();
     let host_env: Arc<Mutex<Value>> = Arc::new(Mutex::new(json!({})));
 
     let (a, r, ph, he) = (args.clone(), rec.clone(), phases.clone(), host_env.clone());
@@ -55,6 +58,8 @@ fn main() {
             for (k, v) in he.lock().unwrap().as_object().cloned().unwrap_or_default() {
                 env[k] = v;
             }
+            env["grid"] = json!(a.web_grid);
+            env["thumbs_sized"] = json!(ng_common::THUMBS_SIZED.load(std::sync::atomic::Ordering::Relaxed));
             env["frame_time_source"] = json!("gaps between requestAnimationFrame callbacks (performance.now())");
             let out = r.finish("webkitgtk", &ph, &data, env, a.config_json());
             std::fs::write(&a.out, serde_json::to_string_pretty(&out).unwrap()).expect("write the result");
