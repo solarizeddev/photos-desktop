@@ -194,6 +194,7 @@ import {
   deletePhotosForever as runDeleteForever,
   emptyTrash as runEmptyTrash,
   listTrashed as readTrash,
+  TrashListing,
   restorePhotos as runRestore,
   type TrashItem,
   type TrashResult,
@@ -1143,6 +1144,7 @@ export class ProtonSession {
     labelStore.unload();
     hiddenStore.unload();
     this.thumbWaiting.clear();
+    this.trash.changed();
     lockVault();
     this.offlineResume = null;
     this.retried = null;
@@ -1244,6 +1246,7 @@ export class ProtonSession {
     faceScanner.setSource(null);
     duplicateFinder.setSource(null);
     this.thumbWaiting.clear();
+    this.trash.changed();
     this.timelineRun = null;
     this.session = null;
     this.photos = null;
@@ -1274,6 +1277,7 @@ export class ProtonSession {
     labelStore.unload();
     hiddenStore.unload();
     this.thumbWaiting.clear();
+    this.trash.changed();
     this.legacySignIn = false;
     lockVault();
     this.removeStoredAccount();
@@ -1966,6 +1970,8 @@ export class ProtonSession {
 
   /** Uncached thumbnails asked for over the thumbnail server, gathered into one fetch. */
   private thumbWaiting = new Map<string, ((bytes: Buffer | null) => void)[]>();
+  /** The trash as last read, shared by the window and the drive's listing: see `TrashListing`. */
+  private trash = new TrashListing();
   private thumbFlush: ReturnType<typeof setTimeout> | null = null;
   private thumbFetching = 0;
 
@@ -2249,7 +2255,8 @@ export class ProtonSession {
     if (!this.photos) throw new Error("Not signed in");
     const isMedia = (t: string | null) => !!t && (t.startsWith("image/") || t.startsWith("video/"));
 
-    const trashed = (await readTrash(this.photos)).filter((t) => t.type !== "album");
+    const photos = this.photos;
+    const trashed = (await this.trash.get(() => readTrash(photos))).filter((t) => t.type !== "album");
     const shared = await this.getShared(true);
     const sharedFiles = shared.filter((s) => s.type !== "album" && isMedia(s.mediaType));
     const albums: { uid: string; name: string; items: { uid: string; captureTime: number }[] }[] = [];
@@ -2445,7 +2452,12 @@ export class ProtonSession {
     options: { force?: boolean; saveToTimeline?: boolean },
   ): Promise<DeleteAlbumOutcome> {
     if (!this.photos) throw new Error("Not signed in");
-    return runDeleteAlbum(this.photos, uid, options);
+    try {
+      return await runDeleteAlbum(this.photos, uid, options);
+    } finally {
+      // A deleted album goes to the trash, and may take its photos with it.
+      this.trash.changed();
+    }
   }
 
   async addPhotosToAlbum(albumUid: string, uids: string[]): Promise<AlbumResult[]> {
@@ -2865,13 +2877,17 @@ export class ProtonSession {
   async trashPhotos(uids: string[]): Promise<{ uid: string; ok: boolean; error?: string }[]> {
     if (!this.photos) throw new Error("Not signed in");
     const out: { uid: string; ok: boolean; error?: string }[] = [];
-    for await (const r of withStallGuard(this.photos.trashNodes(uids), SDK_STALL_MS, "trashNodes")) {
-      const result = r as any;
-      out.push(
-        result.ok
-          ? { uid: result.uid, ok: true }
-          : { uid: result.uid, ok: false, error: String(result.error?.message ?? result.error) },
-      );
+    try {
+      for await (const r of withStallGuard(this.photos.trashNodes(uids), SDK_STALL_MS, "trashNodes")) {
+        const result = r as any;
+        out.push(
+          result.ok
+            ? { uid: result.uid, ok: true }
+            : { uid: result.uid, ok: false, error: String(result.error?.message ?? result.error) },
+        );
+      }
+    } finally {
+      this.trash.changed();
     }
     duplicateFinder.removed(out.filter((r) => r.ok).map((r) => r.uid));
     return out;
@@ -3032,24 +3048,37 @@ export class ProtonSession {
 
   async listTrashed(): Promise<TrashItem[]> {
     if (!this.photos) throw new Error("Not signed in");
-    return readTrash(this.photos);
+    const photos = this.photos;
+    return this.trash.get(() => readTrash(photos));
   }
 
   async restorePhotos(uids: string[]): Promise<TrashResult[]> {
     if (!this.photos) throw new Error("Not signed in");
-    const results = await runRestore(this.photos, uids);
-    duplicateFinder.restored(results.filter((r) => r.ok).map((r) => r.uid));
-    return results;
+    try {
+      const results = await runRestore(this.photos, uids);
+      duplicateFinder.restored(results.filter((r) => r.ok).map((r) => r.uid));
+      return results;
+    } finally {
+      this.trash.changed();
+    }
   }
 
   async deletePhotosForever(uids: string[]): Promise<TrashResult[]> {
     if (!this.photos) throw new Error("Not signed in");
-    return runDeleteForever(this.photos, uids);
+    try {
+      return await runDeleteForever(this.photos, uids);
+    } finally {
+      this.trash.changed();
+    }
   }
 
   async emptyTrash(): Promise<{ emptied: boolean }> {
     if (!this.photos) throw new Error("Not signed in");
-    return runEmptyTrash(this.photos);
+    try {
+      return await runEmptyTrash(this.photos);
+    } finally {
+      this.trash.changed();
+    }
   }
 
   /**

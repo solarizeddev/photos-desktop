@@ -108,3 +108,60 @@ export async function emptyTrash(photos: any): Promise<{ emptied: boolean }> {
   await photos.emptyTrash();
   return { emptied: true };
 }
+
+/** How long a read of the trash stands for the next one. */
+const TRASH_FRESH_MS = 20_000;
+
+/**
+ * The trash, read once for everyone who asks at about the same time.
+ *
+ * Two readers want it together: the window warming its Trash view, and the file
+ * manager's drive listing what is in the trash beside the library. Each read lists every
+ * trashed uid and then decrypts every node, which on a large trash runs to tens of
+ * seconds, and the window's own calls queued behind it. Now a read under way is joined
+ * rather than started again, and a finished one stands for a short while, until the app
+ * itself changes the trash.
+ */
+export class TrashListing {
+  private read: { rows: Promise<TrashItem[]>; generation: number; at: number | null } | null = null;
+  private generation = 0;
+
+  constructor(
+    private freshMs = TRASH_FRESH_MS,
+    private now: () => number = Date.now,
+  ) {}
+
+  get(load: () => Promise<TrashItem[]>): Promise<TrashItem[]> {
+    const read = this.read;
+    if (read && read.generation === this.generation && (read.at === null || this.now() - read.at < this.freshMs)) {
+      return read.rows;
+    }
+    const mine: { rows: Promise<TrashItem[]>; generation: number; at: number | null } = {
+      rows: Promise.resolve([]),
+      generation: this.generation,
+      at: null,
+    };
+    mine.rows = load().then(
+      (rows) => {
+        mine.at = this.now();
+        return rows;
+      },
+      (e) => {
+        // A failed read is not kept: the next caller tries again.
+        if (this.read === mine) this.read = null;
+        throw e;
+      },
+    );
+    this.read = mine;
+    return mine.rows;
+  }
+
+  /**
+   * The trash has changed (a photo trashed, restored or deleted, the trash emptied) or the
+   * session is going: no read from before this stands for any caller after it.
+   */
+  changed(): void {
+    this.generation++;
+    this.read = null;
+  }
+}

@@ -185,7 +185,12 @@ fn classified(method: &str) -> Option<Priority> {
         | "hiddenRefresh"
         // Keeping every photo on this PC: a whole-library download that yields to the window,
         // and the lookups that decide what it keeps.
-        | "hydrateFileBg" | "mountFates" | "keepReady" | "mountHidden" => Priority::Background,
+        | "hydrateFileBg" | "mountFates" | "keepReady" | "mountHidden"
+        // The trash read ahead for a view not yet open. It lists and decrypts every
+        // trashed photo: tens of seconds on a large trash, which on the foreground lane
+        // held up every call the window made behind it. Opening Trash reads it as
+        // `listTrashed`, in the foreground, and the sidecar shares the one read.
+        | "listTrashedAhead" => Priority::Background,
 
         // What a page on screen is drawing: its thumbnails and its lists. These fall
         // through to `UserAction` below, named here so no one moves them back under the
@@ -3357,6 +3362,12 @@ mod gate_tests {
         assert!(methods.len() > 100, "the handler tables were not read: {}", methods.len());
         let open: Vec<&String> = methods.iter().filter(|m| super::classified(m).is_none()).collect();
         assert!(open.is_empty(), "name these in `classified`: {open:?}");
+    }
+
+    #[test]
+    fn the_trash_read_ahead_never_holds_up_the_window() {
+        assert!(super::is_background(super::priority_for("listTrashedAhead")));
+        assert!(!super::is_background(super::priority_for("listTrashed")));
     }
 
     #[test]
