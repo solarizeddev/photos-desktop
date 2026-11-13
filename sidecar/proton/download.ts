@@ -56,7 +56,7 @@ import { guarded, writeChunk } from "./fileWrites.ts";
 
 // Cap for in-memory video playback. A larger file would strain the sidecar heap
 // and the JSON-RPC channel, so past it the app offers a download instead.
-export const MAX_INMEMORY_VIDEO = 150 * 1024 * 1024;
+const MAX_INMEMORY_VIDEO = 150 * 1024 * 1024;
 
 /**
  * The size at which the viewer stops handing originals over the RPC channel and
