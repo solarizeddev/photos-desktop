@@ -272,8 +272,10 @@ impl PartialOrd for Ticket {
 
 /// The id a cancellable call is known by, minted by the frontend.
 ///
-/// Only a call the frontend explicitly marks this way can ever be dropped: everything
-/// else, every mutation included, reaches the sidecar exactly as before.
+/// The window gives every call one, so any of its calls can be let go of: dropped while it
+/// queues, or, once sent, cancelled in the sidecar. A change let go of only on the window's
+/// timeout is then not carried out after the window has reported it failed. The host's own
+/// calls (`sidecar_rpc`) carry none and always run.
 type CallId = u64;
 
 /// What a call the frontend let go of answers with. It is not a failure and no caller
