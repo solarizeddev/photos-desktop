@@ -498,14 +498,21 @@ export function ViewerShell({
                The element is handed up as state rather than held in a ref, so the
                controls are given the real thing on the render after it mounts. */
             <>
+              {/* Started by hand once its metadata is in, on a fresh element for each video,
+                  and only the metadata loaded ahead: together, and only together, these keep
+                  WebKitGTK's player from saving the whole stream to a file under /var/tmp,
+                  which `autoplay`, any other preload, an early play(), or a reused element
+                  each bring back. The video is decrypted, so it must not reach the disk. */}
               <video
+                key={stage.url}
                 className="lbx-video"
                 ref={setVideoEl}
                 src={stage.url}
                 poster={stage.poster}
+                preload="metadata"
                 disablePictureInPicture
                 onContextMenu={(e) => e.preventDefault()}
-                autoPlay
+                onLoadedMetadata={(e) => void e.currentTarget.play().catch(() => {})}
                 onClick={(e) => e.stopPropagation()}
                 onError={onVideoError}
               />

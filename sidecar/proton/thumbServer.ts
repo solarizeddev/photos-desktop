@@ -205,9 +205,12 @@ async function serveVideo(
     res.end();
     return;
   }
+  const length = end - start + 1;
+  let sent = 0;
   try {
     for await (const piece of video.read(start, end, gone)) {
       if (gone.aborted) break;
+      sent += piece.length;
       if (!res.write(piece)) {
         await new Promise<void>((resolve) => {
           const done = () => {
@@ -220,7 +223,12 @@ async function serveVideo(
         });
       }
     }
-    if (!gone.aborted) res.end();
+    if (gone.aborted) return;
+    // Fewer bytes than were promised: ending the answer normally would leave the player
+    // waiting for the rest for ever. Cutting the connection makes it give up, and the
+    // viewer falls back.
+    if (sent < length) res.destroy();
+    else res.end();
   } catch {
     // The headers are out: all that can be said now is that the answer stops short.
     res.destroy();

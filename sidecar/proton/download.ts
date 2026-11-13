@@ -53,6 +53,7 @@ import { activeRevisionOf, nodeDurationMs, nodeName, toMillis } from "./nodes.ts
 import { SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { decryptOriginalTo, metaGet, metaPut, originalGet, originalSize } from "./store.ts";
 import { guarded, writeChunk } from "./fileWrites.ts";
+import { releaseUnusedDownloader } from "./videoStream.ts";
 
 // Cap for in-memory video playback. A larger file would strain the sidecar heap
 // and the JSON-RPC channel, so past it the app offers a download instead.
@@ -248,9 +249,15 @@ export async function getVideo(photos: any, uid: string): Promise<VideoBytes> {
   }
   const node = await photos.getNode(uid);
   const mime = (node as any).mediaType || "video/mp4";
-  const downloader = await photos.getFileDownloader(uid);
+  const stop = new AbortController();
+  const downloader = await photos.getFileDownloader(uid, stop.signal);
   const claimed = downloader.getClaimedSizeInBytes?.() ?? 0;
-  if (claimed && claimed > MAX_INMEMORY_VIDEO) throw new Error("VIDEO_TOO_LARGE");
+  if (claimed && claimed > MAX_INMEMORY_VIDEO) {
+    // The downloader holds one of the SDK's few download slots until a download of it
+    // ends; left unused, the slot was never given back.
+    releaseUnusedDownloader(downloader, stop);
+    throw new Error("VIDEO_TOO_LARGE");
+  }
 
   const chunks: Uint8Array[] = [];
   let total = 0;
