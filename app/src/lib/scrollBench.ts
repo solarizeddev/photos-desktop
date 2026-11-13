@@ -20,6 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { drawnGridIn } from "./gridRegistry";
 import { invoke } from "@tauri-apps/api/core";
 import {
   addFrame,
@@ -76,6 +77,8 @@ function say(kind: string, fields: Record<string, number | string>): void {
 
 /** Tiles on screen in the scroll area, and how many of them show their picture. */
 function onScreen(scroller: HTMLElement): { tiles: number; shown: number } {
+  const drawn = drawnGridIn(scroller);
+  if (drawn) return drawn.onScreen();
   const box = scroller.getBoundingClientRect();
   let tiles = 0;
   let shown = 0;
@@ -138,13 +141,14 @@ export async function maybeRunScrollBench(getScroller: () => HTMLElement | null)
       await sleep(250);
     }
     scroller = getScroller();
-    if (!scroller || scroller.querySelector(".g-cell") === null) {
+    if (!scroller || (scroller.querySelector(".g-cell") === null && !drawnGridIn(scroller))) {
       say("skip", { reason: "no_grid", waited: performance.now() - waitFrom });
       return;
     }
     const area = scroller;
     const first = area.querySelector<HTMLElement>(".g-cell");
     say("start", {
+      grid: drawnGridIn(area)?.kind() ?? "dom",
       ready,
       waited: performance.now() - waitFrom,
       w: window.innerWidth,
@@ -152,8 +156,9 @@ export async function maybeRunScrollBench(getScroller: () => HTMLElement | null)
       dpr100: window.devicePixelRatio * 100,
       view_h: area.clientHeight,
       list_h: area.scrollHeight,
-      tile_w: first?.offsetWidth ?? 0,
-      tiles: area.querySelectorAll(".g-cell").length,
+      tile_w: first?.offsetWidth ?? drawnGridIn(area)?.onScreen().width ?? 0,
+      // A canvas grid builds no tiles: those it has on screen.
+      tiles: drawnGridIn(area)?.onScreen().tiles ?? area.querySelectorAll(".g-cell").length,
       imgs: area.querySelectorAll(".g-cell img").length,
     });
 
@@ -192,7 +197,7 @@ export async function maybeRunScrollBench(getScroller: () => HTMLElement | null)
             ...compact(stretchFields(now)),
             // As they stand at the end of the second, not sums over it.
             rows: rowsNow(),
-            tiles: area.querySelectorAll(".g-cell").length,
+            tiles: drawnGridIn(area)?.onScreen().tiles ?? area.querySelectorAll(".g-cell").length,
             imgs: area.querySelectorAll(".g-cell img").length,
             pending: pendingNow(),
             top: area.scrollTop,

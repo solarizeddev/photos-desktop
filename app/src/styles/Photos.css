@@ -1463,6 +1463,48 @@
   filter: brightness(0.82);
 }
 
+/* ---- The timeline drawn on a canvas (CanvasSections) ----
+   The tiles are pixels on one canvas; the elements here are what has to be real: the month
+   headers near the screen, and the one tile under the pointer, which carries the select
+   dot and takes the clicks. */
+.g-canvasgrid {
+  position: relative;
+  overflow: hidden;
+}
+.g-canvasgrid-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: block;
+  pointer-events: none;
+}
+.g-canvasgrid-head {
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+.g-canvasgrid-measure {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.g-hovercell {
+  position: absolute;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.g-hovercell .g-seldot {
+  opacity: 1;
+}
+.g-hovercell.sel .g-seldot {
+  transform: scale(1.08);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
 .g-marquee {
   position: fixed;
   z-index: 800;

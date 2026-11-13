@@ -151,7 +151,8 @@ def bench_summary(start, sums, rows, windows):
     out = []
     if start:
         out.append(f"window {start.get('w', 0)}x{start.get('h', 0)}, list {start.get('view_h', 0)} px of "
-                   f"{start.get('list_h', 0)} px, tile {start.get('tile_w', 0)} px, {start.get('tiles', 0)} tiles built; "
+                   f"{start.get('list_h', 0)} px, tile {start.get('tile_w', 0)} px, {start.get('tiles', 0)} tiles built, "
+                   f"grid {str(start.get('grid', 'dom')).replace('_', ' ')}; "
                    f"first screen {'drawn' if start.get('ready') else 'NOT drawn'} after {start.get('waited', 0) / 1000:.1f} s")
     out.append("frames: time each took in ms. late = share of the time spent in frames over 25 ms.")
     out.append("own = the window's own measured code, as a share of the time. main = the window's main")

@@ -31,6 +31,8 @@ import {
   type ReactNode,
 } from "react";
 import { isVideo as classifyVideo, TAG } from "../lib/tags";
+import { GRID_GAP, columnsFor } from "../lib/gridLayout";
+import { badgeTier, tileBadges, type BadgeTier, type TypeMark } from "../lib/tileBadges";
 import { cachedThumbnail, requestThumbnail, useThumbServerBase } from "../lib/thumbStore";
 import { keepTileImage, takeTileImage } from "../lib/tileImages";
 import { bench, benchCount, benchSpan } from "../lib/benchProbe";
@@ -51,45 +53,17 @@ import {
 
 export type GridItem = { uid: string; tags?: number[]; name?: string };
 
-/** The gap between tiles, matching `.g-grid` in the stylesheet. */
-export const GRID_GAP = 6;
+export { GRID_GAP };
+export { badgeTier, type BadgeTier };
 
 /**
- * Android drops the lower-priority corner badges as tiles shrink, so a dense grid does
- * not crowd. It picks the tier from the grid's column count; this grid is sized rather
- * than counted, so the tier comes from what that column count stood for — how wide a
- * tile actually ends up.
- *
- * The thresholds are Android's own tile widths at its tier boundaries, on the 360dp
- * screen its grid is laid out for (20dp side insets, 6dp between columns):
- *
- *   3 columns -> (360 - 40 - 12) / 3 = 102.7dp   every badge
- *   4 columns -> (360 - 40 - 18) / 4 =  75.5dp   one secondary badge beside the cloud
- *   5 columns -> (360 - 40 - 24) / 5 =  59.2dp   the cloud badge alone
- *
- * A dp and a CSS pixel are one and the same here — the badges themselves are ported at
- * 1:1, an 18dp box as an 18px box — so those widths carry over unchanged.
- */
-const TIER_ALL_PX = 103;
-const TIER_COMPACT_PX = 76;
-
-export type BadgeTier = "all" | "compact" | "minimal";
-
-export function badgeTier(tileWidth: number): BadgeTier {
-  if (tileWidth >= TIER_ALL_PX) return "all";
-  if (tileWidth >= TIER_COMPACT_PX) return "compact";
-  return "minimal";
-}
-
-/**
- * What one tile ends up being, which is what the tier reads. This is the arithmetic
- * `repeat(auto-fill, minmax(cellSize, 1fr))` performs: fit as many whole columns as the
- * width allows once the gaps are taken out, then share the remainder between them. So a
- * tile is never narrower than `cellSize` and is usually a little wider.
+ * What one tile ends up being, which is what the tier reads: the arithmetic
+ * `repeat(auto-fill, minmax(cellSize, 1fr))` performs (see gridLayout). A tile is never
+ * narrower than `cellSize` and is usually a little wider.
  */
 export function tileWidth(gridWidth: number, cellSize: number): number {
   if (gridWidth <= 0) return cellSize;
-  const columns = Math.max(1, Math.floor((gridWidth + GRID_GAP) / (cellSize + GRID_GAP)));
+  const columns = columnsFor(gridWidth, cellSize);
   return (gridWidth - GRID_GAP * (columns - 1)) / columns;
 }
 
@@ -97,19 +71,12 @@ const gridStyle = (cellSize: number) => ({
   gridTemplateColumns: `repeat(auto-fill, minmax(${cellSize}px, 1fr))`,
 });
 
-/**
- * The one photo-type mark a tile can carry, and the string that names it. Videos are
- * left out on purpose: the play icon in the middle of the tile already marks those, so
- * a second video badge in the corner would say it twice. Same three types as Android,
- * resolved in the same order.
- */
-function typeBadgeOf(tags: number[] | undefined): { icon: ReactNode; key: string } | null {
-  if (!tags) return null;
-  if (tags.includes(TAG.MotionPhoto)) return { icon: <MotionPhotoIcon />, key: "badge.motionPhoto" };
-  if (tags.includes(TAG.Panorama)) return { icon: <PanoramaIcon />, key: "badge.panorama" };
-  if (tags.includes(TAG.Raw)) return { icon: <RawIcon />, key: "badge.raw" };
-  return null;
-}
+/** The icon and the string for each photo-type mark (see tileBadges). */
+const TYPE_MARKS: Record<TypeMark, { icon: ReactNode; key: string }> = {
+  motionPhoto: { icon: <MotionPhotoIcon />, key: "badge.motionPhoto" },
+  panorama: { icon: <PanoramaIcon />, key: "badge.panorama" },
+  raw: { icon: <RawIcon />, key: "badge.raw" },
+};
 
 /**
  * One observer for every tile in a scroll area rather than one each: a library of
@@ -417,32 +384,12 @@ export const PhotoCell = memo(function PhotoCell({
     };
   }, [fetchesOwn, wantsDuration, wantsMediaType, item.uid]);
 
-  // Android's ladder, unchanged: at the compact tier the cloud badge keeps its corner and
-  // exactly one secondary joins it, picked in this order. At the smallest tier the cloud
-  // badge is alone. The play icon is not a badge and stays on every video either way.
-  const hasDuration = isVideo && durationMs !== null && durationMs > 0;
-  const typeBadge = showBadges ? typeBadgeOf(item.tags) : null;
-  const isFavorite = showBadges && !!item.tags?.includes(TAG.Favorite);
-  const secondary = hasDuration
-    ? "duration"
-    : offline
-      ? "offline"
-      : typeBadge
-        ? "type"
-        : isFavorite
-          ? "favorite"
-          : "none";
-  const allow = (which: string) =>
-    tier === "all" ? true : tier === "compact" ? secondary === which : false;
-
-  const showOffline = offline && allow("offline");
-  // The length goes away while a selection is being made, alongside the play icon —
-  // what matters then is which photos are picked. The pin stays: that one is about the
-  // photo rather than about playing it. It still takes the compact tier's one slot
-  // either way, as it does on the phone.
-  const showDuration = hasDuration && !selectionMode && allow("duration");
-  const showType = !!typeBadge && allow("type");
-  const showFavorite = isFavorite && allow("favorite");
+  const marks = tileBadges({ tags: item.tags, isVideo, durationMs, offline, local, tier, selectionMode, showBadges });
+  const showOffline = marks.offline;
+  const showDuration = marks.durationMs !== null;
+  const typeBadge = marks.type ? TYPE_MARKS[marks.type] : null;
+  const showType = !!typeBadge;
+  const showFavorite = marks.favorite;
 
   const src = lazy ? self : thumb;
   // A thumbnail that will not decode shows the empty tile, not the browser's broken image.
@@ -500,7 +447,7 @@ export const PhotoCell = memo(function PhotoCell({
         </span>
       )}
 
-      {showBadges && isVideo && !selectionMode && (
+      {marks.play && (
         <div className="g-play">
           <PlayArrowIcon size={17} />
         </div>
@@ -517,7 +464,7 @@ export const PhotoCell = memo(function PhotoCell({
             </span>
           )}
           {showDuration && (
-            <span className="g-tilebadge g-duration">{formatVideoTime(durationMs!)}</span>
+            <span className="g-tilebadge g-duration">{formatVideoTime(marks.durationMs!)}</span>
           )}
         </div>
       )}

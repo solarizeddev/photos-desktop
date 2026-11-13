@@ -35,7 +35,8 @@
  *     browser cannot guess a URL;
  *   - the Host header must be this address exactly, so a hostname rebound to 127.0.0.1
  *     by a web page is refused;
- *   - no CORS header is sent, so no other origin can read a response;
+ *   - a CORS header is sent to the app's own window and nothing else (see APP_ORIGINS), so
+ *     no other origin can read a response;
  *   - responses carry `no-store`: the webview must not keep a decrypted thumbnail in its
  *     own disk cache, where the only copy on disk until now has been the sealed one.
  */
@@ -45,6 +46,25 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { parseFaceBox, type FaceBox } from "./faceCover.ts";
 import { parseRange, type VideoSource } from "./videoStream.ts";
 import { thumbWidthFor } from "./thumbSizes.ts";
+
+/**
+ * The origins the app's own window runs at: Tauri's on Linux and macOS, on Windows, and the
+ * dev server's. The canvas timeline fetches thumbnails from a worker (see the window's
+ * tileWorker) rather than through <img>, and a fetch across origins may read the answer only
+ * if the server says its origin may. Only these are told so; every other origin reads
+ * nothing, as before, and still needs the token to ask at all.
+ */
+export const APP_ORIGINS: ReadonlySet<string> = new Set([
+  "tauri://localhost",
+  "http://tauri.localhost",
+  "https://tauri.localhost",
+  "http://localhost:1420",
+]);
+
+/** The CORS headers for a request from `origin`: none unless it is the app's window. */
+function corsFor(origin: string | undefined): Record<string, string> {
+  return origin && APP_ORIGINS.has(origin) ? { "Access-Control-Allow-Origin": origin, Vary: "Origin" } : { Vary: "Origin" };
+}
 
 /**
  * The bytes of one grid thumbnail, or null when there is none to give. `gone` fires when
@@ -170,8 +190,9 @@ export async function stopThumbServer(): Promise<void> {
 }
 
 async function handle(req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) {
+  const cors = corsFor(req.headers.origin);
   const refuse = (code: number) => {
-    res.writeHead(code, { "Cache-Control": "no-store" });
+    res.writeHead(code, { "Cache-Control": "no-store", ...cors });
     res.end();
   };
   const head = req.method === "HEAD";
@@ -233,6 +254,7 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
       "Content-Length": String(bytes.length),
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff",
+      ...cors,
     });
     res.end(bytes);
   } catch {

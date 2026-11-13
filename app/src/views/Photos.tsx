@@ -132,11 +132,13 @@ import { ShareDialog } from "../components/ShareDialog";
 import { FilterPanel, type MediaType } from "../components/FilterPanel";
 import { PhotoGrid, PhotoGridSkeleton } from "../components/PhotoGrid";
 import { VirtualSections } from "../components/VirtualSections";
+import { CanvasSections } from "../components/CanvasSections";
 import {
   cachedThumbnail,
   connectThumbServer,
   disconnectThumbServer,
   thumbUrl,
+  useThumbServerBase,
 } from "../lib/thumbStore";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { DebugHud } from "../components/DebugHud";
@@ -494,6 +496,8 @@ export function Photos({
   });
   // Escape belongs to the lightbox while it is open.
   const sel = useSelection(scrollRef, lightboxIdx === null);
+  // Where the canvas timeline fetches its thumbnails; until it is known, the DOM grid shows.
+  const thumbBase = useThumbServerBase();
   const { selected } = sel;
   // Whether one of the selection's actions is still working, so the bar can stand
   // down instead of taking a second click on work already in flight. The ref is what
@@ -3544,7 +3548,32 @@ export function Photos({
               </div>
             )}
 
-            {hidingKnown && <VirtualSections
+            {hidingKnown && (thumbBase ? (
+              // The timeline drawn on a canvas: the DOM grid could not keep up with a wide
+              // window's hundreds of tiles (see CanvasSections). It needs the thumbnail server.
+              <CanvasSections
+                scrollRef={scrollRef}
+                sections={virtualSections}
+                cellSize={cellSize}
+                base={thumbBase}
+                header={timelineSort.by === "name" ? undefined : (s) => (
+                  <div className="g-monthhdr">
+                    <span className="g-monthtitle">{s.key}</span>
+                    <span className="g-monthcount">
+                      {t(s.items.length === 1 ? "common.photoCount.one" : "common.photoCount.other", {
+                        count: s.items.length,
+                      })}
+                    </span>
+                  </div>
+                )}
+                selected={selected}
+                onToggle={sel.toggle}
+                onOpen={onCellClick}
+                onContext={onCellContext}
+                offlineUids={offlineUids}
+                localUids={localUids}
+              />
+            ) : <VirtualSections
               scrollRef={scrollRef}
               sections={virtualSections}
               cellSize={cellSize}
@@ -3570,7 +3599,7 @@ export function Photos({
                   localUids={localUids}
                 />
               )}
-            />}
+            />)}
           </>
         )}
         </div>
