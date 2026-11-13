@@ -337,10 +337,11 @@ const CRYPTO_CACHE_LIMIT = 20_000;
 /** How many photos' read text is kept, for going back to one of them. */
 const OCR_KEPT = 40;
 /**
- * The largest video played from the thumbnail server. It is held in the sidecar's memory
- * while it plays (at most two at once); a larger one is offered as a download instead.
+ * The largest video played from the thumbnail server. It is held whole in the sidecar's
+ * memory while it plays (at most two at once, so 600 MB at most); a larger one takes the
+ * older route, which offers it as a download.
  */
-const MAX_STREAMED_VIDEO = 1024 * 1024 * 1024;
+const MAX_STREAMED_VIDEO = 300 * 1024 * 1024;
 /** A copy's save that fails on the network is tried again after these pauses. */
 const UPLOAD_RETRY_MS = [2_000, 5_000];
 

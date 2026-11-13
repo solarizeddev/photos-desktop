@@ -31,8 +31,10 @@
  *
  * The video is still downloaded once, whole, in order and verified, into memory: the SDK's
  * own download, which hands its download slot back however it ends. What changes is that a
- * range is served the moment the bytes it covers have arrived, so playback starts after the
- * first block, a seek back is answered at once, and a seek ahead waits only for the
+ * range is served the moment the bytes it covers have arrived, and a seek back is answered
+ * at once. The SDK hands blocks over in batches (all of a short video's together, at the
+ * end), so a phone clip of a few tens of MB still waits for its download before its first
+ * frame, as before; a longer one starts while the rest arrives. A seek ahead waits for the
  * download to get there. Closing a video stops its download and lets its memory go.
  */
 
@@ -224,7 +226,7 @@ export function releaseUnusedDownloader(downloader: any, stop: AbortController):
 /** How many videos are kept open: the one playing and the one stepped back from. */
 const OPEN_KEPT = 2;
 
-/** A video nobody has read from for this long is closed. */
+/** A video nobody has read from, and with no answer open, for this long is closed. */
 const IDLE_MS = 90_000;
 
 /**
@@ -234,7 +236,7 @@ const IDLE_MS = 90_000;
  * download stops and its memory goes.
  */
 export class OpenVideos {
-  private open = new Map<string, { video: Promise<VideoSource | null>; used: number }>();
+  private open = new Map<string, { video: Promise<VideoSource | null>; used: number; reading: number }>();
   private sweep: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -251,7 +253,7 @@ export class OpenVideos {
       this.open.set(uid, known);
       return known.video;
     }
-    const entry = { video: Promise.resolve<VideoSource | null>(null), used: this.now() };
+    const entry = { video: Promise.resolve<VideoSource | null>(null), used: this.now(), reading: 0 };
     // Every piece written out counts as use, so a video still playing is never idle.
     entry.video = this.load(uid)
       .catch(() => null)
@@ -271,16 +273,27 @@ export class OpenVideos {
     return video;
   }
 
-  private keptInUse(v: VideoSource, entry: { used: number }): VideoSource {
+  /**
+   * Every piece written out counts as use, and so does an answer still open: a paused
+   * player keeps its connection and reads nothing, and closing its video then would have it
+   * downloaded again from the start when play resumes.
+   */
+  private keptInUse(v: VideoSource, entry: { used: number; reading: number }): VideoSource {
     const now = this.now;
     return {
       size: v.size,
       mime: v.mime,
       close: () => v.close?.(),
       async *read(start, end, gone) {
-        for await (const piece of v.read(start, end, gone)) {
+        entry.reading++;
+        try {
+          for await (const piece of v.read(start, end, gone)) {
+            entry.used = now();
+            yield piece;
+          }
+        } finally {
+          entry.reading--;
           entry.used = now();
-          yield piece;
         }
       },
     };
@@ -289,7 +302,9 @@ export class OpenVideos {
   /** Closes videos left idle. Called on a timer; public for tests. */
   closeIdle(): void {
     const now = this.now();
-    for (const [uid, entry] of [...this.open]) if (now - entry.used >= this.idleMs) this.drop(uid);
+    for (const [uid, entry] of [...this.open]) {
+      if (entry.reading === 0 && now - entry.used >= this.idleMs) this.drop(uid);
+    }
     if (this.open.size === 0) this.stopSweep();
   }
 

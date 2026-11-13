@@ -226,6 +226,26 @@ describe("the videos kept open", () => {
     open.clear();
   });
 
+  it("keeps a video whose answer is still open, as a paused player's is", async () => {
+    let now = 0;
+    const closed: string[] = [];
+    const open = new OpenVideos(
+      async (uid) => ({ ...videoFromBytes(FILE, "video/mp4"), close: () => closed.push(uid) }),
+      () => now,
+      1000,
+    );
+    const paused = (await open.get("paused"))!;
+    const reading = paused.read(0, FILE.length - 1, live());
+    await reading.next(); // the answer is open; the player has stopped reading
+    now = 5000;
+    open.closeIdle();
+    expect(closed).toEqual([]);
+    await reading.return(undefined); // the player goes: the answer closes
+    now = 7000;
+    open.closeIdle();
+    await vi.waitFor(() => expect(closed).toEqual(["paused"]));
+  });
+
   it("tries again for one that could not be opened", async () => {
     let opens = 0;
     const open = new OpenVideos(async () => {
