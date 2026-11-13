@@ -23,6 +23,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { rpc } from "../lib/rpc";
+import { videoStreamUrl } from "../lib/thumbStore";
 import { downloadPhotos, explorerMode } from "../lib/download";
 import { pinOffline, unpinOffline } from "../lib/offline";
 import { cachedPreview, dropPreview, loadPreview } from "../lib/previewStore";
@@ -196,6 +197,8 @@ export function Lightbox({
   const [original, setOriginal] = useState<{ uid: string; url: string | null } | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(true);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  // The video whose stream would not play, so it is fetched whole instead.
+  const [streamFailed, setStreamFailed] = useState<string | null>(null);
   const [videoState, setVideoState] = useState<"idle" | "loading" | "ready" | "toolarge" | "error">(
     "idle",
   );
@@ -321,7 +324,11 @@ export function Lightbox({
     };
   }, [uid, kind]);
 
-  // A video: fetch its bytes (kept in memory) and wrap them in a Blob to play.
+  // A video: played from the thumbnail server, which streams it a byte range at a time
+  // as the player asks, so it starts after its first blocks, seeks without fetching what
+  // it skips, and is not limited by size. Only if that cannot play it (the server is not
+  // up, or Proton does not say how large the file is) does it fall back to the older
+  // route: its bytes fetched whole through the channel and wrapped in a Blob.
   // Images skip this entirely and keep using the HD still above.
   //
   // Behind the same settle, and this is where it matters most: a video crosses the one
@@ -337,7 +344,13 @@ export function Lightbox({
     let url: string | null = null;
     let cancelled = false;
     setVideoState("loading");
+    const streamed = streamFailed === uid ? null : videoStreamUrl(uid);
     const settle = setTimeout(() => {
+      if (streamed) {
+        setVideoUrl(streamed);
+        setVideoState("ready");
+        return;
+      }
       void (async () => {
         try {
           const v = await rpc<{ base64: string; mime: string }>("getVideo", { uid });
@@ -357,7 +370,7 @@ export function Lightbox({
       clearTimeout(settle);
       if (url) URL.revokeObjectURL(url);
     };
-  }, [uid, isVideo, kind]);
+  }, [uid, isVideo, kind, streamFailed]);
 
   async function trash() {
     if (busy) return;
@@ -641,7 +654,11 @@ export function Lightbox({
         onClose();
       }}
       onRename={rename}
-      onVideoError={() => setVideoState("error")}
+      onVideoError={() => {
+        // The stream would not play: try the whole file once before saying so.
+        if (videoUrl && videoUrl === videoStreamUrl(uid) && streamFailed !== uid) setStreamFailed(uid);
+        else setVideoState("error");
+      }}
       onContextMenu={(e) => setMenuAt({ x: e.clientX, y: e.clientY })}
       onKey={(e) => {
         if (e.key === "Delete") setConfirming(true);
