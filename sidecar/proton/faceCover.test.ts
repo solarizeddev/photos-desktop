@@ -6,7 +6,7 @@
  * License version 3. See <https://www.gnu.org/licenses/>.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import sharp from "sharp";
 
 import { COVER_SIZE, FaceCovers, cutFace, faceSquare, parseFaceBox, type FaceBox } from "./faceCover.ts";
@@ -128,6 +128,85 @@ describe("the cover cache", () => {
     release.shift()!();
     await Promise.all([second, fourth]);
     expect(asked).toEqual(["a", "b", "d"]);
+  });
+
+  it("keeps a cut in line for a second ask when the first ask leaves", async () => {
+    const jpeg = await picture(400, 400, box);
+    const release: (() => void)[] = [];
+    const asked: string[] = [];
+    const covers = new FaceCovers(async (uid) => {
+      asked.push(uid);
+      await new Promise<void>((r) => release.push(r));
+      return jpeg;
+    });
+    const live = new AbortController().signal;
+    // Two cuts take both places, so the third waits in line.
+    const busy = [covers.get("a", box, live), covers.get("b", box, live)];
+    const first = new AbortController();
+    const firstAsk = covers.get("c", box, first.signal);
+    // The same cover is asked for again (a second card, or the card back on screen) before
+    // the first ask is cancelled.
+    const secondAsk = covers.get("c", box, live);
+    first.abort();
+    await vi.waitFor(() => expect(release.length).toBe(2));
+    release.shift()!();
+    await vi.waitFor(() => expect(asked).toEqual(["a", "b", "c"]));
+    await vi.waitFor(() => expect(release.length).toBe(2));
+    release.splice(0).forEach((go) => go());
+    await Promise.all(busy);
+    expect(await secondAsk).not.toBeNull();
+    expect(await firstAsk).toBe(await secondAsk);
+  });
+
+  it("starts a fresh cut for an ask that comes after the only earlier one left", async () => {
+    const jpeg = await picture(400, 400, box);
+    const release: (() => void)[] = [];
+    const covers = new FaceCovers(async () => {
+      await new Promise<void>((r) => release.push(r));
+      return jpeg;
+    });
+    const live = new AbortController().signal;
+    const busy = [covers.get("a", box, live), covers.get("b", box, live)];
+    const first = new AbortController();
+    const firstAsk = covers.get("c", box, first.signal);
+    // The card scrolls away (its request cancelled), then back (asked again).
+    first.abort();
+    const secondAsk = covers.get("c", box, live);
+    expect(await firstAsk).toBeNull();
+    await vi.waitFor(() => expect(release.length).toBe(2));
+    release.splice(0).forEach((go) => go());
+    await Promise.all(busy);
+    await vi.waitFor(() => expect(release.length).toBe(1));
+    release.splice(0).forEach((go) => go());
+    expect(await secondAsk).not.toBeNull();
+  });
+
+  it("gives up a cut in line once every ask has left, and starts afresh for a new one", async () => {
+    const jpeg = await picture(400, 400, box);
+    const release: (() => void)[] = [];
+    const asked: string[] = [];
+    const covers = new FaceCovers(async (uid) => {
+      asked.push(uid);
+      await new Promise<void>((r) => release.push(r));
+      return jpeg;
+    });
+    const live = new AbortController().signal;
+    const busy = [covers.get("a", box, live), covers.get("b", box, live)];
+    const one = new AbortController();
+    const two = new AbortController();
+    const asks = [covers.get("c", box, one.signal), covers.get("c", box, two.signal)];
+    one.abort();
+    two.abort();
+    expect(await Promise.all(asks)).toEqual([null, null]);
+    const again = covers.get("c", box, live);
+    await vi.waitFor(() => expect(release.length).toBe(2));
+    release.shift()!();
+    await vi.waitFor(() => expect(asked).toEqual(["a", "b", "c"]));
+    await vi.waitFor(() => expect(release.length).toBe(2));
+    release.splice(0).forEach((go) => go());
+    await Promise.all(busy);
+    expect(await again).not.toBeNull();
+    expect(asked).toEqual(["a", "b", "c"]);
   });
 
   it("answers null when there is no picture, and forgets everything at clear", async () => {

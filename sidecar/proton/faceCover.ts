@@ -105,7 +105,13 @@ export type CoverPicture = (uid: string) => Promise<Buffer | null>;
  */
 export class FaceCovers {
   private kept = new Map<string, Buffer>();
-  private running = new Map<string, Promise<Buffer | null>>();
+  /**
+   * Cuts under way, each with how many requests still wait on it. A cut is given up only
+   * when the last of them leaves: a card scrolled away and straight back asks again while
+   * the first ask is still in line, and that second ask must not inherit the first one's
+   * cancel.
+   */
+  private running = new Map<string, { made: Promise<Buffer | null>; askers: number; stop: AbortController }>();
   private line: { run: () => void; gone: AbortSignal }[] = [];
   private busy = 0;
   /** Bumped by `clear`, so a cut finishing after a lock is not kept. */
@@ -121,11 +127,26 @@ export class FaceCovers {
       this.kept.set(key, hit);
       return hit;
     }
-    const same = this.running.get(key);
-    if (same) return same;
     if (gone.aborted) return null;
+    // A cut everyone has already left is not joined: it is on its way out with nothing.
+    const under = this.running.get(key);
+    const run = under && !under.stop.signal.aborted ? under : this.start(uid, box, key);
+    run.askers++;
+    gone.addEventListener(
+      "abort",
+      () => {
+        if (--run.askers === 0) run.stop.abort();
+      },
+      { once: true },
+    );
+    return run.made;
+  }
+
+  /** Begins one cut, in line behind those already being made. */
+  private start(uid: string, box: FaceBox, key: string) {
+    const stop = new AbortController();
     const epoch = this.epoch;
-    const made = this.turn(gone).then(async (go) => {
+    const made = this.turn(stop.signal).then(async (go) => {
       if (!go) return null;
       try {
         const picture = await this.picture(uid);
@@ -138,11 +159,12 @@ export class FaceCovers {
         this.release();
       }
     });
-    this.running.set(key, made);
+    const run = { made, askers: 0, stop };
+    this.running.set(key, run);
     void made.finally(() => {
-      if (this.running.get(key) === made) this.running.delete(key);
+      if (this.running.get(key) === run) this.running.delete(key);
     });
-    return made;
+    return run;
   }
 
   /** Forget every cut cover: at lock, so nothing decrypted outlives the session. */
