@@ -389,12 +389,13 @@ async function handle(req: Request): Promise<unknown> {
     diag.record("rpc", req.method, Date.now() - started);
     return { id: req.id, ok: true, result };
   } catch (e) {
+    // A call the host let go of, stopped by its signal: said as such, and not counted as a
+    // failure in the diagnostics.
+    if (ctx.signal.aborted) return { id: req.id, ok: false, error: "rpc cancelled", code: "CANCELLED" };
     diag.record("rpc", req.method, Date.now() - started, false, { error: (e as Error)?.name ?? "error" });
     const message = (e as Error).message ?? String(e);
     // Open on the photos kept offline: what needs Proton says so, in the window's language.
     const offline = message === "Not signed in" && session.isOfflineOnly();
-    // A call the host let go of, stopped by its signal: said as such, not as a failure.
-    if (ctx.signal.aborted) return { id: req.id, ok: false, error: "rpc cancelled", code: "CANCELLED" };
     return { id: req.id, ok: false, error: offline ? OFFLINE_ERROR : message };
   } finally {
     endRequest(req.id ?? null);

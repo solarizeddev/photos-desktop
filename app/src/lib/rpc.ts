@@ -86,6 +86,10 @@ const TIMEOUT_MS: Record<string, number> = {
   // Opening the account: the saved session, then the account keys. Giving up early here
   // costs the user their password a second time, so it is the most generous of the lot.
   unlock: 5 * MINUTE,
+  // Waited out in full: the host always carries these out, and the window must not show the
+  // lock screen, or the signed-out one, while the call is still on its way.
+  lock: 5 * MINUTE,
+  signOut: 5 * MINUTE,
 
   // Reads every chosen photo's node for the date editor; a big selection takes a while.
   dateEditInfo: 10 * MINUTE,
@@ -110,7 +114,9 @@ function withTimeout<T>(work: Promise<T>, ms: number, method: string, onExpiry: 
  * Ordinary within one run of the app; nothing persists it and nothing outside the host's
  * own pending table ever sees it.
  */
-let nextCallId = 1;
+// A page's call numbers start at a random point, so a reloaded page never reuses the numbers
+// of calls its previous load still has out. Kept below 2^53, as the host expects.
+let nextCallId = Math.floor(Math.random() * 2 ** 31) * 2 ** 20 + 1;
 
 export type RpcOptions = {
   /**

@@ -278,6 +278,46 @@ impl PartialOrd for Ticket {
 /// calls (`sidecar_rpc`) carry none and always run.
 type CallId = u64;
 
+/// Calls that must run once asked for, whatever the window does meanwhile: locking and
+/// signing out (a lock screen shown over a session that stayed open is the one thing worse
+/// than a slow lock), unlocking, and the calls that stop or release something. The window's
+/// cancel, or its own timeout, never drops one of these from the queue or stops it.
+fn never_drop(method: &str) -> bool {
+    matches!(
+        method,
+        "lock"
+            | "signOut"
+            | "unlock"
+            | "unlockDevice"
+            | "localLockSet"
+            | "localLockClear"
+            | "protectSession"
+            | "cancelBrowserLogin"
+            | "cancelUpload"
+            | "cancelHydrate"
+            | "releaseOriginal"
+            | "stopDateEdit"
+            | "faceSweepStop"
+    )
+}
+
+/// A window's call id made unique across the app's windows. Each window (the main one, the
+/// viewer, the tray's popup) numbers its own calls, so the same number names a call in each;
+/// keyed by number alone, one window's cancel could drop or stop another's call. The window
+/// is given a small index the first time it calls, kept in the top bits; a page's numbers
+/// stay below 2^53, as a JavaScript number does.
+fn window_call_key(label: &str, call_id: u64) -> CallId {
+    static WINDOWS: std::sync::OnceLock<Mutex<std::collections::HashMap<String, u64>>> =
+        std::sync::OnceLock::new();
+    let mut windows = WINDOWS
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let next = windows.len() as u64 + 1;
+    let index = *windows.entry(label.to_string()).or_insert(next);
+    (index << 53) | (call_id & ((1u64 << 53) - 1))
+}
+
 /// What a call the frontend let go of answers with. It is not a failure and no caller
 /// reports it: the one thing that asks for a cancellable call already treats a missing
 /// answer the same as a failed one.
@@ -1787,6 +1827,7 @@ mod account_switch_tests {
 #[tauri::command]
 async fn rpc(
     app: AppHandle,
+    window: tauri::Window,
     state: State<'_, SharedSidecar>,
     method: String,
     params: serde_json::Value,
@@ -1795,6 +1836,13 @@ async fn rpc(
     if host_only(&method) {
         return Err(format!("{method} is not available here"));
     }
+    // Known by its window as well as its number; and a call that must run is not followed
+    // at all, so nothing can drop or stop it.
+    let call_id = if never_drop(&method) {
+        None
+    } else {
+        call_id.map(|id| window_call_key(window.label(), id))
+    };
     if method == "diagSave" && !diag_file_was_picked(&params) {
         return Err("choose the file to save to first".into());
     }
@@ -2221,8 +2269,12 @@ async fn set_files_drive(app: AppHandle, enabled: bool) -> Result<serde_json::Va
 /// A call this reaches before it is admitted never touches the sidecar at all; one it
 /// misses answers normally and the frontend discards the result, exactly as before.
 #[tauri::command]
-fn cancel_rpc(state: State<'_, SharedSidecar>, call_id: CallId) {
-    state.inner().abandon(call_id);
+fn cancel_rpc(window: tauri::Window, state: State<'_, SharedSidecar>, call_id: CallId) {
+    let key = window_call_key(window.label(), call_id);
+    let shared = state.inner().clone();
+    // On a thread of its own: a cancel for a call already sent writes to the sidecar, and
+    // that write can wait behind another one; the window's command thread must not.
+    std::thread::spawn(move || shared.abandon(key));
 }
 
 // ---- The viewer's in-memory original ----
@@ -3932,6 +3984,28 @@ mod gate_tests {
         assert!(!std::fs::read_to_string(&out).unwrap_or_default().contains("99"));
         drop(shared);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn calls_from_different_windows_never_share_a_key() {
+        let main = super::window_call_key("main-test", 5);
+        let viewer = super::window_call_key("viewer-test", 5);
+        assert_ne!(main, viewer);
+        assert_eq!(main, super::window_call_key("main-test", 5), "a window keeps its index");
+        assert_ne!(main, super::window_call_key("main-test", 6));
+        // The largest number a page can send keeps to its own window's range.
+        let top = (1u64 << 53) - 1;
+        assert_ne!(super::window_call_key("main-test", top), super::window_call_key("viewer-test", top));
+    }
+
+    #[test]
+    fn locking_and_signing_out_are_never_dropped() {
+        for method in ["lock", "signOut", "unlock", "releaseOriginal", "cancelUpload"] {
+            assert!(super::never_drop(method), "{method}");
+        }
+        for method in ["getPreview", "warmThumbnails", "createAlbum"] {
+            assert!(!super::never_drop(method), "{method}");
+        }
     }
 
     #[test]
