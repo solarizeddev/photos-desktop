@@ -123,6 +123,7 @@ import { isTransient, withRetry } from "./transient.ts";
 import { activeRevisionOf, nodeDurationMs, nodeLocation, nodeName, toMillis } from "./nodes.ts";
 import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
+import { FaceCovers } from "./faceCover.ts";
 import { sameAccount } from "./accountSwitch.ts";
 import { hostNotice } from "./hostCall.ts";
 import {
@@ -1143,6 +1144,7 @@ export class ProtonSession {
     labelStore.unload();
     hiddenStore.unload();
     this.thumbWaiting.clear();
+    this.faceCovers.clear();
     lockVault();
     this.offlineResume = null;
     this.retried = null;
@@ -1244,6 +1246,7 @@ export class ProtonSession {
     faceScanner.setSource(null);
     duplicateFinder.setSource(null);
     this.thumbWaiting.clear();
+    this.faceCovers.clear();
     this.timelineRun = null;
     this.session = null;
     this.photos = null;
@@ -1274,6 +1277,7 @@ export class ProtonSession {
     labelStore.unload();
     hiddenStore.unload();
     this.thumbWaiting.clear();
+    this.faceCovers.clear();
     this.legacySignIn = false;
     lockVault();
     this.removeStoredAccount();
@@ -1966,6 +1970,14 @@ export class ProtonSession {
 
   /** Uncached thumbnails asked for over the thumbnail server, gathered into one fetch. */
   private thumbWaiting = new Map<string, ((bytes: Buffer | null) => void)[]>();
+  /**
+   * People's covers cut to their faces, from the HD preview (the grid thumbnail when a
+   * photo has none, or the preview cannot be had), for the thumbnail server.
+   */
+  private faceCovers = new FaceCovers(async (uid) => {
+    const preview = await this.previewBytes(uid).catch(() => null);
+    return preview ?? thumbGet(uid, ThumbnailType.Type1) ?? null;
+  });
   private thumbFlush: ReturnType<typeof setTimeout> | null = null;
   private thumbFetching = 0;
 
@@ -1975,7 +1987,12 @@ export class ProtonSession {
    */
   async thumbServer(): Promise<{ base: string }> {
     if (!this.photos && !this.offlineOnly) throw new Error("Not signed in");
-    return { base: await startThumbServer((uid, gone) => this.thumbnailFor(uid, gone)) };
+    return {
+      base: await startThumbServer(
+        (uid, gone) => this.thumbnailFor(uid, gone),
+        (uid, box, gone) => this.faceCovers.get(uid, box, gone),
+      ),
+    };
   }
 
   /**
@@ -2130,8 +2147,14 @@ export class ProtonSession {
   /** HD preview (Type2 thumbnail) for the image viewer / lightbox. */
   async getPreview(uid: string): Promise<string | null> {
     if (!this.photos && !this.offlineOnly) throw new Error("Not signed in");
+    const bytes = await this.previewBytes(uid);
+    return bytes ? toDataUrl(bytes) : null;
+  }
+
+  /** The HD preview's bytes: from the sealed cache, else fetched and sealed for next time. */
+  private async previewBytes(uid: string): Promise<Buffer | null> {
     const cached = thumbGet(uid, ThumbnailType.Type2);
-    if (cached) return toDataUrl(cached);
+    if (cached) return cached;
     if (!this.photos) return null;
 
     // The same guard as the grid's thumbnails above, for the same reason: this is the
@@ -2145,7 +2168,7 @@ export class ProtonSession {
         if ((r as any).ok) {
           const bytes = Buffer.from((r as any).thumbnail);
           thumbPut(uid, ThumbnailType.Type2, bytes);
-          return toDataUrl(bytes);
+          return bytes;
         }
         return null;
       }
