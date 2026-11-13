@@ -191,7 +191,7 @@ export function CanvasSections({
         return out;
       },
       onScreen: () => ({ ...engine.onScreen(), width: latest.current.layout.tile }),
-      kind: () => `canvas, decoded in the ${engine.where()}`,
+      kind: () => `canvas, ${engine.where()}`,
     });
     return () => {
       unregister();
