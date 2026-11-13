@@ -39,7 +39,7 @@ function get(url: string, options: { method?: string; host?: string; range?: str
         {
           hostname: target.hostname,
           port: target.port,
-          path: target.pathname,
+          path: target.pathname + target.search,
           method: options.method ?? "GET",
           headers: {
             ...(options.host ? { Host: options.host } : {}),
@@ -283,6 +283,20 @@ describe("the loopback thumbnail server", () => {
       dropped += takeServerStats().dropped;
       expect(dropped).toBe(1);
     });
+  });
+
+  it("passes on the size a tile asks for, rounded up, and the full thumbnail without one", async () => {
+    const widths: (number | undefined)[] = [];
+    const base = await startThumbServer(async (_uid, _gone, width) => {
+      widths.push(width);
+      return PHOTO;
+    });
+    await get(base + encodeURIComponent(UID) + "?w=150");
+    await get(base + encodeURIComponent(UID) + "?w=150&a=2");
+    await get(base + encodeURIComponent(UID));
+    await get(base + encodeURIComponent(UID) + "?w=4000");
+    await get(base + encodeURIComponent(UID) + "?w=x");
+    expect(widths).toEqual([192, 192, undefined, undefined, undefined]);
   });
 
   it("stops answering at lock", async () => {

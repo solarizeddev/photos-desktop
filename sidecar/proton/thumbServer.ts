@@ -44,13 +44,14 @@ import { createServer, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { parseFaceBox, type FaceBox } from "./faceCover.ts";
 import { parseRange, type VideoSource } from "./videoStream.ts";
+import { thumbWidthFor } from "./thumbSizes.ts";
 
 /**
  * The bytes of one grid thumbnail, or null when there is none to give. `gone` fires when
  * the webview stops waiting, as it does for a tile scrolled away, so the thumbnail is not
  * fetched ahead of the ones still on screen.
  */
-export type ThumbnailSource = (uid: string, gone: AbortSignal) => Promise<Buffer | null>;
+export type ThumbnailSource = (uid: string, gone: AbortSignal, width?: number) => Promise<Buffer | null>;
 
 /** A person's cover cut to the face in `box`, for `/t/<token>/<uid>/f/<l,t,r,b>`. */
 export type FaceSource = (uid: string, box: FaceBox, gone: AbortSignal) => Promise<Buffer | null>;
@@ -178,8 +179,12 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
   if (req.headers.host !== `127.0.0.1:${port}`) return refuse(403);
 
   // `/t/<token>/<uid>`, `/t/<token>/<uid>/f/<l,t,r,b>` for a cover cut to a face, or
-  // `/t/<token>/<uid>/v` for a video to play.
-  const parts = (req.url ?? "").split("?")[0].split("/");
+  // `/t/<token>/<uid>/v` for a video to play. On a picture, `?w=<px>` asks for it cut down to
+  // a tile that size (see thumbSizes); anything else in the query only makes the webview
+  // load it anew.
+  const [path, query = ""] = (req.url ?? "").split("?", 2);
+  const parts = path.split("/");
+  const width = thumbWidthFor(Number(new URLSearchParams(query).get("w") ?? NaN)) ?? undefined;
   const face = parts.length === 6 && parts[4] === "f";
   const video = parts.length === 5 && parts[4] === "v";
   if ((parts.length !== 4 && !face && !video) || parts[0] !== "" || parts[1] !== "t") return refuse(404);
@@ -216,7 +221,7 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
   });
   if (video) return serveVideo(uid, req, res, head, gone.signal, refuse);
   try {
-    const bytes = box && faces ? await faces(uid, box, gone.signal) : await source(uid, gone.signal);
+    const bytes = box && faces ? await faces(uid, box, gone.signal) : await source(uid, gone.signal, width);
     if (gone.signal.aborted) return;
     if (!bytes) {
       ended.missing++;

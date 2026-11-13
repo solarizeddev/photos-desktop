@@ -127,6 +127,7 @@ import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
 import { FaceCovers } from "./faceCover.ts";
 import { OpenVideos, downloadVideo, videoFromBytes, type VideoSource } from "./videoStream.ts";
 import { openDownloader } from "./downloadSlots.ts";
+import { SmallThumbs } from "./thumbSizes.ts";
 import { sameAccount } from "./accountSwitch.ts";
 import { hostNotice } from "./hostCall.ts";
 import {
@@ -1164,6 +1165,7 @@ export class ProtonSession {
     this.faceCovers.clear();
     this.trash.changed();
     this.videos.clear();
+    this.smallThumbs.clear();
     lockVault();
     this.offlineResume = null;
     this.retried = null;
@@ -1268,6 +1270,7 @@ export class ProtonSession {
     this.faceCovers.clear();
     this.trash.changed();
     this.videos.clear();
+    this.smallThumbs.clear();
     this.timelineRun = null;
     this.session = null;
     this.photos = null;
@@ -1301,6 +1304,7 @@ export class ProtonSession {
     this.faceCovers.clear();
     this.trash.changed();
     this.videos.clear();
+    this.smallThumbs.clear();
     this.legacySignIn = false;
     lockVault();
     this.removeStoredAccount();
@@ -2010,6 +2014,8 @@ export class ProtonSession {
   private trash = new TrashListing();
   /** Videos the window is playing, for the thumbnail server: see `videoSource`. */
   private videos = new OpenVideos((uid) => this.videoSource(uid));
+  /** Grid thumbnails cut down to the size the grid shows them: see `thumbSizes`. */
+  private smallThumbs = new SmallThumbs();
   private thumbFlush: ReturnType<typeof setTimeout> | null = null;
   private thumbFetching = 0;
 
@@ -2021,7 +2027,10 @@ export class ProtonSession {
     if (!this.photos && !this.offlineOnly) throw new Error("Not signed in");
     return {
       base: await startThumbServer(
-        (uid, gone) => this.thumbnailFor(uid, gone),
+        (uid, gone, width) =>
+          width
+            ? this.smallThumbs.get(uid, width, () => this.thumbnailFor(uid, gone))
+            : this.thumbnailFor(uid, gone),
         (uid, box, gone) => this.faceCovers.get(uid, box, gone),
         (uid) => this.videos.get(uid),
       ),
