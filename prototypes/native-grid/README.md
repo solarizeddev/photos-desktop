@@ -47,6 +47,12 @@ gets there, before anything in the app is changed:
 | `pool` | the same tiles as plain DOM: a fixed set of elements, each placed by a transform, handed from the tiles that scroll away to those that scroll in; one screen built either side (the app builds two); pictures fetched by the page, aborted when their tile is handed on, and decoded (`img.decode()`) before shown | recycling, as Android's RecyclerView and iOS's collection views do: no element made or taken down while scrolling, no React. WebKit never stops an `<img>`'s download when its `src` changes, and decodes a small on-screen picture on the main thread while painting; this grid does neither |
 | `canvas` | the view is one `<canvas>`, drawn on each scroll step; thumbnails fetched and decoded into `ImageBitmap`s in a worker, and fetches for tiles more than two screens away called off | drawing tiles the way a native grid does: no element per tile at all, no decode on the main thread |
 
+`appcanvas` (not in the default run; `--web-grids appcanvas`) is the app's own canvas
+timeline, `CanvasSections` from app/src, mounted as the Photos view mounts it: the way to
+try the real thing under the same script, here or under Xvfb. That is how a WebKitGTK 2.52
+web-process crash in its thumbnail worker was reproduced and fixed. If the web process
+dies, the WebKit side now says so and why, instead of waiting out its time limit.
+
 `pool` and `canvas` ask for no thumbnail while the list moves faster than four screens a
 second, and ask for what is on screen once it slows (Google Photos' web grid and Glide do
 this during a fling), so their flings show more blank tiles by design. `canvas` draws no

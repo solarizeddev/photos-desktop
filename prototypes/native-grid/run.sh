@@ -26,7 +26,7 @@ set -- ${PASS[@]+"${PASS[@]}"}
 IFS=, read -r -a GRID_LIST <<< "$GRIDS"
 [ ${#GRID_LIST[@]} -gt 0 ] || { echo "run.sh: --web-grids needs at least one of app, pool, canvas" >&2; exit 2; }
 for g in "${GRID_LIST[@]}"; do
-  case "$g" in app|pool|canvas) ;; *) printf 'run.sh: unknown grid %s (app, pool or canvas)\n' "$g" >&2; exit 2 ;; esac
+  case "$g" in app|pool|canvas|appcanvas) ;; *) printf 'run.sh: unknown grid %s (app, pool or canvas)\n' "$g" >&2; exit 2 ;; esac
 done
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 APP="$HERE/../../app"

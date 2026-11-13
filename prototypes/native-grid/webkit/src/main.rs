@@ -86,6 +86,11 @@ fn main() {
         "backend": gtk::gdk::Display::default().map(|d| d.type_().name().to_string()),
         "hardware_acceleration": format!("{:?}", settings.hardware_acceleration_policy()),
     });
+    // A web process that dies leaves a frozen window and no report: say so, and why.
+    view.connect_web_process_terminated(|_, reason| {
+        eprintln!("[webkit] the web process ended: {reason:?}");
+        std::process::exit(4);
+    });
     window.add(&view);
     window.connect_delete_event(|_, _| {
         gtk::main_quit();

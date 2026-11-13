@@ -12,6 +12,8 @@ import { connectThumbServer } from "@app/lib/thumbStore";
 import type { MountedGrid, Probe } from "./grids/layout";
 import { mountPool } from "./grids/pool";
 import { mountCanvas } from "./grids/canvas";
+import { CanvasSections } from "@app/components/CanvasSections";
+import { drawnGridIn } from "@app/lib/gridRegistry";
 
 type Phase = { name: string; kind: "idle" | "linear" | "fling"; v?: number; tau?: number; ms: number };
 /** `grid`: "app" (the app's own components), "pool" (reused DOM tiles) or "canvas". */
@@ -55,6 +57,64 @@ function App({ cfg }: { cfg: Config }) {
       />
     </div>
   );
+}
+
+/** The app's own canvas timeline (CanvasSections), mounted as the Photos view mounts it. */
+function AppCanvas({ cfg }: { cfg: Config }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const sections = useMemo(() => {
+    const out = [];
+    let i = 0;
+    let m = 0;
+    while (i < cfg.n) {
+      const c = cfg.sections ? Math.min(cfg.n - i, 150 + ((m * 977) % 700)) : cfg.n;
+      out.push({ key: "Month " + m, items: Array.from({ length: c }, (_, k) => ({ uid: "u" + (i + k), tags: [] as number[] })) });
+      i += c;
+      m++;
+    }
+    return out;
+  }, [cfg]);
+  const selected = useMemo(() => new Set<string>(), []);
+  return (
+    <div className="g-scroll" ref={scrollRef}>
+      <CanvasSections
+        scrollRef={scrollRef}
+        sections={sections}
+        cellSize={cfg.cell}
+        base={location.origin + "/t/tok/"}
+        selected={selected}
+        showBadges={false}
+        header={cfg.sections ? (s) => (
+          <div className="g-monthhdr">
+            <span className="g-monthtitle">{s.key}</span>
+            <span className="g-monthcount">{s.items.length} photos</span>
+          </div>
+        ) : undefined}
+      />
+    </div>
+  );
+}
+
+async function mountAppCanvas(cfg: Config, extra: Record<string, unknown>): Promise<MountedGrid> {
+  createRoot(document.getElementById("root")!).render(<AppCanvas cfg={cfg} />);
+  let sc: HTMLElement | null = null;
+  for (let n = 0; !(sc = document.querySelector(".g-scroll")) || !drawnGridIn(sc); n++) {
+    if (n % 120 === 0) log(`waiting: scroll=${!!sc} grid=${!!document.querySelector(".g-canvasgrid")} canvas=${!!document.querySelector(".g-canvasgrid-canvas")} root=${document.getElementById("root")!.innerHTML.slice(0, 200)}`);
+    await frame();
+  }
+  const scroller = sc;
+  const grid = drawnGridIn(scroller)!;
+  return {
+    scroller,
+    get gridWidth() {
+      return (scroller.querySelector(".g-canvasgrid") as HTMLElement | null)?.clientWidth ?? 0;
+    },
+    probe(): Probe {
+      const { tiles, shown, width } = grid.onScreen();
+      extra.decode_in = grid.kind();
+      return { vis: tiles, blank: tiles - shown, columns: 0, tile: [Math.round(width), Math.round(width / 0.85)], built: tiles };
+    },
+  };
 }
 
 const frame = () => new Promise<number>((r) => requestAnimationFrame(r));
@@ -108,11 +168,14 @@ async function run() {
     const root = document.getElementById("root")!;
     g = grid === "pool" ? mountPool(root, cfg, base) : mountCanvas(root, cfg, base, (env) => Object.assign(extra, env));
     await frame();
+  } else if (grid === "appcanvas") {
+    g = await mountAppCanvas(cfg, extra);
   } else {
     await connectThumbServer();
     g = await mountApp(cfg);
   }
   const sc = g.scroller;
+  log(`mounted ${grid}`);
 
   const data = cfg.phases.map((p) => ({ name: p.name, dts: [] as number[], probes: 0, probesBlank: 0, blankSum: 0, visSum: 0 }));
   const env = { columns: 0, tile_drawn: [0, 0], hit_end: false, cells_built_max: 0 };
@@ -123,6 +186,7 @@ async function run() {
     const p = cfg.phases[i];
     const d = data[i];
     fetch("/mark?p=" + p.name);
+    log(`phase ${p.name} ${JSON.stringify(g.probe())}`);
     const t0 = last;
     for (;;) {
       await frame();
