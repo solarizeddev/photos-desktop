@@ -324,6 +324,9 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   renamePhoto: (p) => session.renamePhoto(p.uid, p.name),
   trashPhotos: (p) => session.trashPhotos(p.uids),
   listTrashed: () => session.listTrashed(),
+  // The same listing, read ahead for a Trash view not yet open: its own name so the host
+  // runs it in the background lane rather than in front of what the window is waiting on.
+  listTrashedAhead: () => session.listTrashed(true),
   hiddenState: () => session.hiddenState(),
   hiddenSet: (p) =>
     session.hiddenSet(p?.kind === "albums" ? "albums" : "photos", uidList(p?.uids), p?.hidden !== false),
