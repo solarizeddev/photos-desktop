@@ -156,7 +156,7 @@ import { useLang, useT } from "../lib/i18n";
 import { isWindows } from "../lib/platform";
 import { onThisDay, seasons } from "../lib/memories";
 import { dropPreview, prefetchAfter } from "../lib/previewStore";
-import { unwarmedBatches } from "../lib/warmBatches";
+import { unwarmedBatches, warmWholeBatch } from "../lib/warmBatches";
 import "../styles/Photos.css";
 
 /** Each category's mark in the filter menu, where there is one to draw. */
@@ -649,9 +649,15 @@ export function Photos({
           await new Promise((r) => setTimeout(r, 300));
         }
         if (stop.signal.aborted) break;
+        // The sidecar fetches only a couple of missing thumbnails per call and counts
+        // what the batch now has cached, so a batch is asked for again until all of it is
+        // ready, and remembered only then. One that stops getting further (a photo with
+        // no thumbnail, a stalled fetch) is left for a later pass to try again.
         try {
-          await rpc("warmThumbnails", { uids: batch }, { signal: stop.signal });
-          for (const uid of batch) warmedRef.current.add(uid);
+          const whole = await warmWholeBatch(batch, (uids) =>
+            rpc<{ ready: number }>("warmThumbnails", { uids }, { signal: stop.signal }),
+          );
+          if (whole) for (const uid of batch) warmedRef.current.add(uid);
         } catch {
           /* keep warming the rest; a batch let go of is warmed by the next pass */
         }

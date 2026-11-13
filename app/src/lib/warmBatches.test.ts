@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { unwarmedBatches } from "./warmBatches";
+import { unwarmedBatches, warmWholeBatch } from "./warmBatches";
 
 describe("the thumbnail warmer's batches", () => {
   it("goes through the library in order, a batch at a time", () => {
@@ -29,5 +29,41 @@ describe("the thumbnail warmer's batches", () => {
 
   it("gives nothing once everything is warm", () => {
     expect([...unwarmedBatches(["a"], new Set(["a"]), 4)]).toEqual([]);
+  });
+});
+
+describe("warming one batch", () => {
+  /** A sidecar that fetches `perCall` more of the batch each time it is asked. */
+  function sidecar(perCall: number, ceiling = Infinity) {
+    let have = 0;
+    let asks = 0;
+    const warm = async (uids: readonly string[]) => {
+      asks++;
+      have = Math.min(uids.length, ceiling, have + perCall);
+      return { ready: have };
+    };
+    return { warm, asks: () => asks };
+  }
+
+  it("asks again until the whole batch is ready", async () => {
+    const s = sidecar(2);
+    expect(await warmWholeBatch(["a", "b", "c", "d"], s.warm)).toBe(true);
+    expect(s.asks()).toBe(2);
+  });
+
+  it("is not whole when a photo never gets a thumbnail, and stops asking", async () => {
+    const s = sidecar(2, 3);
+    expect(await warmWholeBatch(["a", "b", "c", "d"], s.warm)).toBe(false);
+    expect(s.asks()).toBe(3);
+  });
+
+  it("asks at most a few times", async () => {
+    const s = sidecar(1);
+    expect(await warmWholeBatch(["a", "b", "c", "d", "e", "f"], s.warm, 4)).toBe(false);
+    expect(s.asks()).toBe(4);
+  });
+
+  it("passes a rejected ask on, so a batch let go of is not counted", async () => {
+    await expect(warmWholeBatch(["a"], () => Promise.reject(new Error("abandoned")))).rejects.toThrow("abandoned");
   });
 });

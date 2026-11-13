@@ -23,3 +23,24 @@ export function* unwarmedBatches(uids: readonly string[], warmed: ReadonlySet<st
   }
   if (batch.length > 0) yield batch;
 }
+
+/**
+ * Warms one batch, asking `warm` again while it reports fewer than the whole batch ready
+ * (the sidecar fetches only a couple of missing thumbnails per call), and stopping once a
+ * call gets no further. True only when the whole batch is ready, which is when the caller
+ * may remember it as warm.
+ */
+export async function warmWholeBatch(
+  batch: readonly string[],
+  warm: (uids: readonly string[]) => Promise<{ ready: number }>,
+  maxAsks = 4,
+): Promise<boolean> {
+  let ready = -1;
+  for (let ask = 0; ask < maxAsks; ask++) {
+    const got = await warm(batch);
+    if (got.ready >= batch.length) return true;
+    if (got.ready <= ready) return false;
+    ready = got.ready;
+  }
+  return false;
+}
