@@ -188,7 +188,8 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   getVideo: (p) => session.getVideo(p.uid),
   startSaveOriginals: (p) => session.startSaveOriginals(p.uids, p.destDir),
   saveStatus: () => session.saveStatus(),
-  listForMount: (p) => session.listForMount(p.offset ?? 0, p.limit ?? 50),
+  listForMount: (p) => session.listForMount(p.offset ?? 0, p.limit ?? 50, p.fromTimeline === true),
+  mountTimelineReady: () => session.mountTimelineReady(),
   hydrateFile: (p) => session.hydrateFile(p.uid, typeof p.dir === "string" ? p.dir : undefined),
   // The same download for the "keep every photo" pass, on a lane that yields to the window.
   hydrateFileBg: (p) => session.hydrateFile(p.uid, typeof p.dir === "string" ? p.dir : undefined),
