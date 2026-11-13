@@ -61,7 +61,7 @@ const FAST_SCREENS_S = 4;
 export class CanvasTimeline {
   private ctx: CanvasRenderingContext2D;
   private dpr = window.devicePixelRatio || 1;
-  private palette: Palette = readPalette();
+  private palette: Palette;
   private sprites: Sprites | null = null;
   private loader: TileLoader | null = null;
   private data: TimelineData | null = null;
@@ -77,6 +77,8 @@ export class CanvasTimeline {
   private bufTop = 0;
   private lastTop = 0;
   private hover = -1;
+  /** Where the list starts in the scroll area's content, read once per scroll step. */
+  private offset = 0;
 
   private view = new TileRange();
   private strip = new TileRange();
@@ -91,6 +93,8 @@ export class CanvasTimeline {
   private onScroll = () => this.scrolled();
   private sized: ResizeObserver;
   private themed: MutationObserver;
+  private ratio: MediaQueryList | null = null;
+  private onRatio = () => this.measure(true);
   private gone = false;
 
   constructor(
@@ -103,23 +107,55 @@ export class CanvasTimeline {
     private onSpan: (from: number, to: number) => void,
     /** The list moved under the pointer. */
     private onMoved: () => void,
+    /** The list stopped moving: what is under the pointer is worth looking at again. */
+    private onStill: () => void,
   ) {
     this.ctx = canvas.getContext("2d", { alpha: false })!;
+    this.palette = readPalette(scroller);
     this.speed = new ScrollSpeed(1, () => this.settled());
     scroller.addEventListener("scroll", this.onScroll, { passive: true });
     this.sized = new ResizeObserver(() => this.measure());
     this.sized.observe(scroller);
-    // A theme change restyles the page, and the canvas has to be painted again for it.
+    // A theme change restyles the page, and the canvas has to be painted again for it. The
+    // accent and the AMOLED black are set as inline styles on the root, hence "style".
     this.themed = new MutationObserver(() => {
-      this.palette = readPalette();
+      this.palette = readPalette(scroller);
       this.redrawAll();
     });
-    this.themed.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "class"] });
-    void sprite(this.dpr, this.palette).then((s) => {
-      if (this.gone) return;
-      this.sprites = s;
+    this.themed.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "class", "style"] });
+    this.watchRatio();
+    this.loadSprites();
+  }
+
+  /** The marks as pictures at the current pixel ratio; any made before are let go. */
+  private loadSprites(): void {
+    const dpr = this.dpr;
+    void this.sprite(dpr, this.palette).then((made) => {
+      if (this.gone || dpr !== this.dpr) {
+        for (const b of Object.values(made)) b.close();
+        return;
+      }
+      for (const old of Object.values(this.sprites ?? {})) old.close();
+      this.sprites = made;
       this.redrawAll();
     });
+  }
+
+  /** A window moved to a screen of another pixel ratio is drawn again at that ratio. */
+  private watchRatio(): void {
+    this.ratio?.removeEventListener("change", this.onRatio);
+    this.ratio = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    this.ratio.addEventListener("change", this.onRatio);
+  }
+
+  /** The tile size in device pixels and the thumbnail size, from the layout and the ratio. */
+  private sizeLoader(): void {
+    const l = this.data?.layout;
+    if (!l) return;
+    this.px = thumbPxFor(l.tile, this.dpr);
+    const size = { w: this.d(l.tile), h: this.d(l.rowH), r: this.d(TILE_RADIUS) };
+    if (this.loader) this.loader.setSize(size);
+    else this.loader = new TileLoader((uid) => this.arrived(uid), size);
   }
 
   /** What to draw: called on every change of layout, photos, selection or marks. */
@@ -133,23 +169,34 @@ export class CanvasTimeline {
       for (const s of data.sections) for (const item of s.items) this.indexOf.set(item.uid, i++);
     }
     const l = data.layout;
-    const tileW = this.d(l.tile);
-    const tileH = this.d(l.rowH);
-    const size = { w: tileW, h: tileH, r: this.d(TILE_RADIUS) };
-    const px = thumbPxFor(l.tile, this.dpr);
-    if (!this.loader) {
-      const first = data.sections.find((s) => s.items.length > 0)?.items[0];
-      if (first) {
-        this.px = px;
-        this.loader = new TileLoader((uid) => this.arrived(uid), thumbUrlFor(this.base, first.uid, px, 0), size);
-      }
-    } else {
-      this.px = px;
-      this.loader.setSize(size);
-    }
+    this.sizeLoader();
+    this.offset = this.readOffset();
     if (!was || was.layout.width !== l.width || was.layout.height !== l.height) this.measure(true);
-    else this.redrawAll();
+    else if (this.onlySelectionChanged(was, data)) {
+      // A selection changed (as it does on every move of the rubber band): only the tiles
+      // that changed are drawn again, unless every tile's play icon comes or goes with it.
+      for (const uid of was.selected) if (!data.selected.has(uid)) this.redrawUid(uid);
+      for (const uid of data.selected) if (!was.selected.has(uid)) this.redrawUid(uid);
+    } else this.redrawAll();
     this.pump();
+  }
+
+  private onlySelectionChanged(was: TimelineData, now: TimelineData): boolean {
+    return (
+      was.layout === now.layout &&
+      was.sections === now.sections &&
+      was.offline === now.offline &&
+      was.local === now.local &&
+      was.showBadges === now.showBadges &&
+      was.selected.size > 0 === now.selected.size > 0
+    );
+  }
+
+  private redrawUid(uid: string): void {
+    const index = this.indexOf.get(uid);
+    if (index === undefined) return;
+    this.redraw.add(index);
+    this.schedule();
   }
 
   /** The tile under the pointer (its index in the list), drawn a little smaller; -1 for none. */
@@ -183,6 +230,7 @@ export class CanvasTimeline {
     this.sized.disconnect();
     this.themed.disconnect();
     this.speed.stop();
+    this.ratio?.removeEventListener("change", this.onRatio);
     cancelAnimationFrame(this.frame);
     for (const stop of this.asking.values()) stop();
     this.asking.clear();
@@ -198,10 +246,14 @@ export class CanvasTimeline {
     return Math.round(css * this.dpr);
   }
 
-  /** Where the view's top is in the list (CSS px): the list need not start at the scroll area's top. */
+  /** Where the list starts in the scroll area's content: other things may sit above it. */
+  private readOffset(): number {
+    return this.wrap.getBoundingClientRect().top - this.scroller.getBoundingClientRect().top + this.scroller.scrollTop;
+  }
+
+  /** Where the view's top is in the list (CSS px), from the offset last read. */
   private viewTop(): number {
-    const offset = this.wrap.getBoundingClientRect().top - this.scroller.getBoundingClientRect().top + this.scroller.scrollTop;
-    return this.scroller.scrollTop - offset;
+    return this.scroller.scrollTop - this.offset;
   }
 
   private uidAt(s: number, k: number): string {
@@ -216,14 +268,12 @@ export class CanvasTimeline {
     const dpr = window.devicePixelRatio || 1;
     if (!force && viewH === this.viewH && dpr === this.dpr && this.canvas.width === this.d(l.width)) return;
     this.viewH = viewH;
+    this.offset = this.readOffset();
     if (dpr !== this.dpr) {
       this.dpr = dpr;
-      void this.sprite(dpr, this.palette).then((s) => {
-        if (this.gone) return s && Object.values(s).forEach((b) => b.close());
-        for (const old of Object.values(this.sprites ?? {})) old.close();
-        this.sprites = s;
-        this.redrawAll();
-      });
+      this.watchRatio();
+      this.loadSprites();
+      this.sizeLoader();
     }
     this.speed.setFast(viewH * FAST_SCREENS_S);
     this.margin = Math.max(0, Math.min(viewH, Math.floor((MAX_CANVAS / dpr - viewH) / 2)));
@@ -267,13 +317,16 @@ export class CanvasTimeline {
     const d = this.data;
     if (!d) return;
     const top = this.viewTop();
-    const lowest = Math.max(0, d.layout.height - this.bufH);
+    const lowest = Math.max(0, Math.floor((d.layout.height - this.bufH) * this.dpr) / this.dpr);
     const want = Math.min(lowest, Math.max(0, Math.round((top - this.margin) * this.dpr) / this.dpr));
     const above = top - this.bufTop;
     const below = this.bufTop + this.bufH - (top + this.viewH);
     const nearEdge = (above < this.margin / 2 && this.bufTop > 0) || (below < this.margin / 2 && this.bufTop < lowest);
     if (!force && !nearEdge && above >= 0 && below >= 0) return;
     const shift = want - this.bufTop;
+    // Above the list's start, in the padding below its end, or a list shorter than the
+    // view: nowhere better to put the canvas, and nothing new to draw.
+    if (!force && shift === 0) return;
     if (force || Math.abs(shift) >= this.bufH) {
       this.bufTop = want;
       this.drawSpan(this.bufTop, this.bufTop + this.bufH);
@@ -287,6 +340,7 @@ export class CanvasTimeline {
     this.canvas.style.transform = `translateY(${this.bufTop}px)`;
     this.onSpan(this.bufTop, this.bufTop + this.bufH);
     this.askMarks();
+    this.trim();
   }
 
   /** Draws everything between `from` and `to` (list px) into the canvas. Headers are the page's. */
@@ -368,6 +422,7 @@ export class CanvasTimeline {
   // ---- scrolling
 
   private scrolled(): void {
+    this.offset = this.readOffset();
     const top = this.viewTop();
     this.speed.step(top);
     if (this.hover >= 0) {
@@ -383,6 +438,7 @@ export class CanvasTimeline {
   private settled(): void {
     this.pump();
     this.askMarks();
+    this.onStill();
   }
 
   // ---- thumbnails
@@ -421,24 +477,33 @@ export class CanvasTimeline {
 
   private ask(s: number, k: number): void {
     const uid = this.uidAt(s, k);
-    this.loader!.want(uid, thumbUrlFor(this.base, uid, this.px, 0));
+    this.loader!.want(uid, () => thumbUrlFor(this.base, uid, this.px, 0));
   }
 
-  /** Calls off fetches for tiles that went far from the view, and lets old thumbnails go. */
+  /** Calls off fetches for tiles that went far from the view. */
   private prune(top: number): void {
     const loader = this.loader;
     const d = this.data;
     if (!loader || !d) return;
     const lo = top - this.viewH * KEEP;
     const hi = top + this.viewH * (1 + KEEP);
-    const near = (uid: string) => {
+    // Cancelling takes the key out of the set being walked, which a Set allows.
+    for (const uid of loader.inFlight()) {
       const y = this.yOf(uid);
-      return y !== null && y + d.layout.rowH >= lo && y <= hi;
-    };
-    for (const uid of [...loader.inFlight()]) if (!near(uid)) loader.cancel(uid);
+      if (y === null || y + d.layout.rowH < lo || y > hi) loader.cancel(uid);
+    }
+  }
+
+  /** Lets the oldest thumbnails go once over budget, but none in or a screen around the canvas. Once per move of the canvas. */
+  private trim(): void {
+    const loader = this.loader;
+    const d = this.data;
+    if (!loader || !d || !loader.overBudget()) return;
+    const lo = this.bufTop - this.viewH;
+    const hi = this.bufTop + this.bufH + this.viewH;
     loader.trim((uid) => {
       const y = this.yOf(uid);
-      return y !== null && y + d.layout.rowH >= this.bufTop - this.viewH && y <= this.bufTop + this.bufH + this.viewH;
+      return y !== null && y + d.layout.rowH >= lo && y <= hi;
     });
   }
 
@@ -458,7 +523,12 @@ export class CanvasTimeline {
    */
   private askMarks(): void {
     const d = this.data;
-    if (!d || !d.showBadges) return;
+    if (!d) return;
+    if (!d.showBadges) {
+      for (const stop of this.asking.values()) stop();
+      this.asking.clear();
+      return;
+    }
     const l = d.layout;
     const tier = badgeTier(l.tile);
     const wanted = new Set<string>();

@@ -24,12 +24,21 @@ export type Sprites = Record<"play" | "offline" | "cloud" | "heart" | "check" | 
 
 export type Palette = { bg: string; bg2: string; accent: string; synced: string; font: string };
 
-/** The page's colours and font, as the stylesheet has them now (they follow the theme). */
-export function readPalette(): Palette {
+/**
+ * The page's colours and font, as the stylesheet has them now (they follow the theme). The
+ * background is what the list really sits on: the first painted background around it, so
+ * the canvas matches the page and the sidebar layout's panel alike.
+ */
+export function readPalette(around?: Element): Palette {
   const css = getComputedStyle(document.documentElement);
   const get = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback;
+  let bg = "";
+  for (let el: Element | null = around ?? null; el && !bg; el = el.parentElement) {
+    const c = getComputedStyle(el).backgroundColor;
+    if (c && c !== "transparent" && !/rgba\([^)]*,\s*0\)$/.test(c)) bg = c;
+  }
   return {
-    bg: get("--bg", "#111"),
+    bg: bg || getComputedStyle(document.body).backgroundColor || get("--bg0", "#090909"),
     bg2: get("--bg2", "#1a1a1a"),
     accent: get("--accent", "#8b7cff"),
     synced: get("--status-synced", "#30d158"),

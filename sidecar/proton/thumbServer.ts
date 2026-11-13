@@ -48,8 +48,9 @@ import { parseRange, type VideoSource } from "./videoStream.ts";
 import { thumbWidthFor } from "./thumbSizes.ts";
 
 /**
- * The origins the app's own window runs at: Tauri's on Linux and macOS, on Windows, and the
- * dev server's. The canvas timeline fetches thumbnails from a worker (see the window's
+ * The origins the app's own window runs at: Tauri's on Linux and macOS, and on Windows. Not
+ * the dev server's: any other local server on that port could then read thumbnails, and in
+ * development the grid makes do with its page fallback. The canvas timeline fetches thumbnails from a worker (see the window's
  * tileWorker) rather than through <img>, and a fetch across origins may read the answer only
  * if the server says its origin may. Only these are told so; every other origin reads
  * nothing, as before, and still needs the token to ask at all.
@@ -58,7 +59,6 @@ export const APP_ORIGINS: ReadonlySet<string> = new Set([
   "tauri://localhost",
   "http://tauri.localhost",
   "https://tauri.localhost",
-  "http://localhost:1420",
 ]);
 
 /** The CORS headers for a request from `origin`: none unless it is the app's window. */

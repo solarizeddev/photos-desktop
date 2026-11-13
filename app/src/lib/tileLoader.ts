@@ -17,8 +17,10 @@ import { bench, benchCount } from "./benchProbe";
  * aborts their fetch. Kept up to a memory budget, oldest first out, and every bitmap let go
  * of is closed so its memory goes at once, not at the next collection.
  *
- * If the worker cannot do it (no module workers, or the thumbnail server refuses it), the
- * page does: an <img> decoded off the main thread with `decode()` and cut the same way.
+ * If the worker cannot reach the server at all (it cannot be made, or the server does not
+ * let its origin read), the page does it instead: an <img>, decoded off the main thread with
+ * `decode()`, cut the same way. That is decided by the first answers, not by a test up
+ * front, so a slow first thumbnail holds nothing up.
  */
 
 /** Fetches at once: the six connections the engine holds per host, and two in line. */
@@ -38,34 +40,33 @@ type Entry = { bitmap: ImageBitmap; w: number; h: number; bytes: number };
 export class TileLoader {
   private kept = new Map<string, Entry>();
   private bytes = 0;
-  private asked = new Set<string>();
+  /** The fetches under way, and the address each was asked from. */
+  private asked = new Map<string, string>();
   private failed = new Map<string, { tries: number; until: number }>();
   private size: Cut = { w: 1, h: 1, r: 0 };
   private worker: Worker | null = null;
-  private mode: "starting" | "worker" | "page" = "starting";
-  private waiting: { key: string; url: string }[] = [];
+  private mode: "worker" | "page" = "worker";
+  /** Whether the worker has brought a thumbnail yet: until it has, failing to reach the server means it never will. */
+  private workerProven = false;
   private page = new Map<string, HTMLImageElement>();
   private closed = false;
-  /** How the thumbnails are made, once it is known: for the log and the measurement. */
-  where = "starting";
+  /** How the thumbnails are made: for the log and the measurement. */
+  where = "worker";
   /** Whether the thumbnails come with their corners rounded; if not, the grid clips them. */
   rounded = false;
 
   constructor(
     /** A thumbnail is ready to draw (or will not come: then `bitmap` returns nothing). */
     private onArrive: (key: string) => void,
-    /** A thumbnail address to try the worker on before trusting it. */
-    probeUrl: string,
     size: Cut,
   ) {
     this.size = size;
     try {
       this.worker = new Worker(new URL("./tileWorker.ts", import.meta.url), { type: "module" });
       this.worker.onmessage = (e) => this.fromWorker(e.data);
-      this.worker.onerror = () => this.settle("page");
-      this.worker.postMessage({ kind: "probe", url: probeUrl, ...size });
+      this.worker.onerror = () => this.toPage("page (the worker failed)");
     } catch {
-      this.settle("page");
+      this.toPage("page (no worker)");
     }
   }
 
@@ -92,34 +93,35 @@ export class TileLoader {
 
   /** The keys being fetched: the grid calls off those that scrolled far away. */
   inFlight(): Iterable<string> {
-    return this.asked;
+    return this.asked.keys();
   }
 
-  /** Asks for `key` from `url` if it is needed and not already coming. False if not asked. */
-  want(key: string, url: string): boolean {
+  /**
+   * Asks for `key` if it is needed, not already coming, and not failing; `url` is only
+   * worked out then. False if not asked.
+   */
+  want(key: string, url: () => string): boolean {
     if (this.closed || this.asked.has(key) || !this.needs(key)) return false;
     const f = this.failed.get(key);
     if (f && (f.tries >= RETRIES || performance.now() < f.until)) return false;
-    this.asked.add(key);
-    if (bench.on) benchCount("fresh");
-    if (this.mode === "starting") this.waiting.push({ key, url });
-    else if (this.mode === "worker") this.worker!.postMessage({ kind: "load", key, url, ...this.size });
-    else this.onPage(key, url);
+    this.start(key, url());
     return true;
   }
 
   /** Calls off a fetch under way. */
   cancel(key: string): void {
     if (!this.asked.delete(key)) return;
-    if (this.mode === "starting") {
-      const at = this.waiting.findIndex((w) => w.key === key);
-      if (at >= 0) this.waiting.splice(at, 1);
-    } else if (this.mode === "worker") this.worker!.postMessage({ kind: "cancel", key });
+    if (this.mode === "worker") this.worker?.postMessage({ kind: "cancel", key });
     else {
       const img = this.page.get(key);
       this.page.delete(key);
       img?.removeAttribute("src");
     }
+  }
+
+  /** Whether the budget is spent. */
+  overBudget(): boolean {
+    return this.bytes > BUDGET;
   }
 
   /**
@@ -139,10 +141,16 @@ export class TileLoader {
   close(): void {
     this.closed = true;
     for (const [key, e] of this.kept) this.drop(key, e);
-    for (const key of [...this.asked]) this.cancel(key);
+    for (const key of [...this.asked.keys()]) this.cancel(key);
     this.worker?.terminate();
     this.worker = null;
-    this.waiting = [];
+  }
+
+  private start(key: string, url: string): void {
+    this.asked.set(key, url);
+    if (bench.on) benchCount("fresh");
+    if (this.mode === "worker") this.worker!.postMessage({ kind: "load", key, url, ...this.size });
+    else this.onPage(key, url);
   }
 
   private drop(key: string, e: Entry): void {
@@ -178,28 +186,35 @@ export class TileLoader {
     this.onArrive(key);
   }
 
-  private fromWorker(m: { kind: string; key?: string; bitmap?: ImageBitmap; w?: number; h?: number; ok?: boolean; cut?: boolean; round?: boolean }): void {
-    if (m.kind === "ready") {
-      this.rounded = !!(m.ok && m.round);
-      this.settle(m.ok ? "worker" : "page", m.ok ? `worker${m.cut ? "" : ", scaled here"}${m.round ? "" : ", square"}` : undefined);
+  private fromWorker(m: { kind: string; key?: string; bitmap?: ImageBitmap; w?: number; h?: number; round?: boolean; unreachable?: boolean }): void {
+    if (this.mode !== "worker") {
+      m.bitmap?.close();
+      return;
+    }
+    if (m.kind === "caps") {
+      this.rounded = !!m.round;
+      this.where = m.round ? "worker" : "worker, clipped here";
     } else if (m.kind === "done") {
+      this.workerProven = true;
       this.arrived(m.key!, { bitmap: m.bitmap!, w: m.w!, h: m.h! });
     } else if (m.kind === "failed") {
-      this.arrived(m.key!, null);
+      if (m.unreachable && !this.workerProven) this.toPage("page (the worker could not reach the server)");
+      else this.arrived(m.key!, null);
     }
   }
 
-  private settle(to: "worker" | "page", where?: string): void {
-    if (this.mode !== "starting") return;
-    this.mode = to;
-    this.where = where ?? to;
-    if (to === "page") {
-      this.worker?.terminate();
-      this.worker = null;
-    }
-    for (const w of this.waiting.splice(0)) {
-      this.asked.delete(w.key);
-      this.want(w.key, w.url);
+  /** Carries on without the worker: everything it was fetching is asked again on the page. */
+  private toPage(where: string): void {
+    if (this.mode === "page") return;
+    this.mode = "page";
+    this.where = where;
+    this.rounded = false;
+    this.worker?.terminate();
+    this.worker = null;
+    if (this.closed) return;
+    for (const [key, url] of [...this.asked]) {
+      this.asked.delete(key);
+      this.start(key, url);
     }
   }
 
@@ -210,25 +225,30 @@ export class TileLoader {
     this.page.set(key, img);
     const size = this.size;
     img.src = url;
-    img
-      .decode()
-      .then(async () => {
-        if (this.page.get(key) !== img) return;
-        this.page.delete(key);
+    const mine = () => this.page.get(key) === img;
+    void (async () => {
+      let bitmap: ImageBitmap | null = null;
+      try {
+        await img.decode();
+        if (!mine()) return;
         const k = Math.max(size.w / img.naturalWidth, size.h / img.naturalHeight);
         const sw = size.w / k;
         const sh = size.h / k;
-        const bitmap = await createImageBitmap(img, (img.naturalWidth - sw) / 2, (img.naturalHeight - sh) / 2, sw, sh, {
+        bitmap = await createImageBitmap(img, (img.naturalWidth - sw) / 2, (img.naturalHeight - sh) / 2, sw, sh, {
           resizeWidth: size.w,
           resizeHeight: size.h,
           resizeQuality: "medium",
         });
-        this.arrived(key, { bitmap, w: size.w, h: size.h });
-      })
-      .catch(() => {
-        if (this.page.get(key) !== img) return;
-        this.page.delete(key);
-        this.arrived(key, null);
-      });
+      } catch {
+        bitmap = null;
+      }
+      // Called off meanwhile: whatever was made goes.
+      if (!mine()) {
+        bitmap?.close();
+        return;
+      }
+      this.page.delete(key);
+      this.arrived(key, bitmap ? { bitmap, w: size.w, h: size.h } : null);
+    })();
   }
 }

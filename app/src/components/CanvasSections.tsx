@@ -89,9 +89,12 @@ export function CanvasSections({
   const [headerHeight, setHeaderHeight] = useState(50);
   const [span, setSpan] = useState({ from: 0, to: 0 });
   const [hover, setHover] = useState<{ s: number; k: number } | null>(null);
+  /** Where the pointer last was over the list, so the tile under it is found again once a scroll stops. */
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
+  const trackRef = useRef<(x: number, y: number) => void>(() => {});
 
   // The layout changes with the photos' counts, not with every new array of them.
-  const shape = sections.map((s) => s.items.length).join(",");
+  const shape = sections.map((s) => `${s.key}:${s.items.length}`).join("|");
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const counts = useMemo(() => sections.map((s) => s.items.length), [shape]);
   const head = header ? headerHeight : 0;
@@ -132,10 +135,14 @@ export function CanvasSections({
     lastLayout.current = { layout, shape };
     const scroller = scrollRef.current;
     const wrap = wrapRef.current;
-    if (!was || !scroller || !wrap || was.shape !== shape || width === 0) return;
+    // Nothing to keep before the first real layout (the first commit has no width), or
+    // when the list changed rather than its layout.
+    if (!was || !scroller || !wrap || was.shape !== shape || width === 0 || was.layout.width === 0) return;
     if (was.layout.columns === layout.columns && Math.abs(was.layout.tile - layout.tile) < 0.5 && was.layout.header === layout.header) return;
     const offset = wrap.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
     const top = scroller.scrollTop - offset;
+    // The list's top is still on screen: what is above it stays where it is.
+    if (top <= 0) return;
     const next = viewTopFor(layout, anchorAt(was.layout, top));
     if (Math.abs(next - top) >= 1) scroller.scrollTop += next - top;
   }, [layout, shape, width, scrollRef]);
@@ -155,6 +162,10 @@ export function CanvasSections({
       spritesFor,
       (from, to) => setSpan((s) => (s.from === from && s.to === to ? s : { from, to })),
       () => setHover(null),
+      () => {
+        const p = pointerRef.current;
+        if (p) trackRef.current(p.x, p.y);
+      },
     );
     engineRef.current = engine;
     const now = latest.current;
@@ -202,14 +213,22 @@ export function CanvasSections({
     if (bench.on && benchFrom) benchSpan("vs_ms", benchFrom);
   });
 
+  /** The tile at a point of the window, or null over a gap, a header or nothing. */
+  const tileUnder = (clientX: number, clientY: number) => {
+    const wrap = wrapRef.current;
+    if (!wrap) return null;
+    const box = wrap.getBoundingClientRect();
+    const at = tileAt(latest.current.layout, clientX - box.left, clientY - box.top);
+    const uid = at ? latest.current.sections[at.s]?.items[at.k]?.uid : undefined;
+    return at && uid ? { ...at, uid } : null;
+  };
   /** The tile under the pointer, from where the pointer is over the list. */
   const track = (clientX: number, clientY: number) => {
-    const wrap = wrapRef.current;
-    if (!wrap) return;
-    const box = wrap.getBoundingClientRect();
-    const at = tileAt(layout, clientX - box.left, clientY - box.top);
-    setHover((h) => (at?.s === h?.s && at?.k === h?.k ? h : at));
+    pointerRef.current = { x: clientX, y: clientY };
+    const at = tileUnder(clientX, clientY);
+    setHover((h) => (at?.s === h?.s && at?.k === h?.k ? h : at ? { s: at.s, k: at.k } : null));
   };
+  trackRef.current = track;
 
   // The month headers in the stretch the canvas covers.
   const headers: ReactNode[] = [];
@@ -238,7 +257,25 @@ export function CanvasSections({
       // the place kept above, so this list keeps it out.
       style={{ height: layout.height, overflowAnchor: "none" }}
       onMouseMove={(e) => track(e.clientX, e.clientY)}
-      onMouseLeave={() => setHover(null)}
+      onMouseLeave={() => {
+        pointerRef.current = null;
+        setHover(null);
+      }}
+      // Clicks are found by where they land, not by the element under the pointer, which
+      // after a scroll may not have caught up with the tile now there.
+      onClick={(e) => {
+        const at = tileUnder(e.clientX, e.clientY);
+        if (at) latest.current.onOpen?.(at.uid, e);
+      }}
+      onContextMenu={(e) => {
+        const at = tileUnder(e.clientX, e.clientY);
+        if (!at || !latest.current.onContext) return;
+        e.preventDefault();
+        // This photo's menu is the answer to this right-click, so the shell's document
+        // listener must not also answer it with its own.
+        e.stopPropagation();
+        latest.current.onContext(at.uid, e);
+      }}
     >
       <canvas ref={canvasRef} className="g-canvasgrid-canvas" aria-hidden />
       {headers}
@@ -249,17 +286,6 @@ export function CanvasSections({
         <div
           className={`g-hovercell${isSelected ? " sel" : ""}`}
           style={{ left: hoverAt.x, top: hoverAt.y, width: layout.tile, height: layout.rowH }}
-          onClick={(e) => latest.current.onOpen?.(item.uid, e)}
-          onContextMenu={
-            onContext &&
-            ((e) => {
-              e.preventDefault();
-              // This photo's menu is the answer to this right-click, so the shell's
-              // document listener must not also answer it with its own.
-              e.stopPropagation();
-              latest.current.onContext?.(item.uid, e);
-            })
-          }
         >
           {onToggle && (
             <span

@@ -21,7 +21,6 @@
 
 type Cut = { w: number; h: number; r: number };
 type In =
-  | ({ kind: "probe"; url: string } & Cut)
   | ({ kind: "load"; key: string; url: string } & Cut)
   | { kind: "cancel"; key: string };
 
@@ -64,6 +63,9 @@ async function cut(blob: Blob, { w, h, r }: Cut): Promise<ImageBitmap> {
   return canvas.transferToImageBitmap();
 }
 
+// What this worker can do, said once at start: whether it rounds corners itself.
+scope.postMessage({ kind: "caps", round: canRound });
+
 scope.onmessage = async (e: MessageEvent<In>) => {
   const m = e.data;
   if (m.kind === "cancel") {
@@ -71,35 +73,19 @@ scope.onmessage = async (e: MessageEvent<In>) => {
     running.delete(m.key);
     return;
   }
-  if (m.kind === "probe") {
-    // The worker can be trusted once a fetch to the server is answered at all: that is what
-    // a missing CORS header or a refused connection would stop. A thumbnail that is not
-    // there (404) still says the road is open; one that is decodes as a test of the rest.
-    let res: Response;
-    try {
-      res = await fetch(m.url);
-    } catch (err) {
-      scope.postMessage({ kind: "ready", ok: false, error: String(err) });
-      return;
-    }
-    let fits = false;
-    if (res.ok) {
-      try {
-        const b = await cut(await res.blob(), m);
-        fits = b.width === m.w && b.height === m.h;
-        b.close();
-      } catch {
-        /* a picture that will not decode says nothing about the worker */
-      }
-    }
-    scope.postMessage({ kind: "ready", ok: true, cut: canResize && fits, round: canRound });
-    return;
-  }
   const stop = new AbortController();
   running.get(m.key)?.abort();
   running.set(m.key, stop);
   try {
-    const res = await fetch(m.url, { signal: stop.signal });
+    let res: Response;
+    try {
+      res = await fetch(m.url, { signal: stop.signal });
+    } catch (err) {
+      // No answer at all: the server refused this worker (no CORS for its origin) or is
+      // gone. The page decides whether to carry on without the worker.
+      if (!stop.signal.aborted) scope.postMessage({ kind: "failed", key: m.key, unreachable: true });
+      return;
+    }
     if (!res.ok) throw new Error(String(res.status));
     const blob = await res.blob();
     if (stop.signal.aborted) return;
