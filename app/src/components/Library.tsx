@@ -145,10 +145,14 @@ function ThumbFaceCover({ thumb, box }: { thumb: string; box: FaceBox | null }) 
     style = { position: "absolute", width: `${width}%`, height: `${height}%`, left: `${left}%`, top: `${topPct}%`, objectFit: "fill" };
   }
   return (
+    // Lazy, as the cut over it is: a page of people mounts every card, and an eager picture
+    // here fetched and decoded every person's grid thumbnail, on screen or not (8000 in one
+    // visit to People in the profile).
     <img
       src={src}
       alt=""
       draggable={false}
+      loading="lazy"
       style={style}
       onLoad={(e) => {
         const img = e.currentTarget;
@@ -210,7 +214,7 @@ function EntryCard({
             <FaceCover uid={entry.cover} thumb={cover} box={entry.box} />
           </span>
         ) : (
-          <img className="lib-cardimg" src={cover} alt="" draggable={false} />
+          <img className="lib-cardimg" src={cover} alt="" draggable={false} loading="lazy" />
         )
       ) : null}
       <span className="lib-cardtext">
