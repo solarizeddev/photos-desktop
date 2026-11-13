@@ -52,6 +52,9 @@ OTHER_TAG = re.compile(r"^\[\d\d:\d\d:\d\d\] \[(\w+)\] \[(\w+)\]")
 STUCK_LINE = re.compile(
     r"^\[(\d\d):(\d\d):(\d\d)\] \[host\] \[rpc\] (\w+) stuck lane=(fg|bg) (?:waiting=(\d+)|running=(\d+) waited=(\d+))")
 QUEUE_LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[host\] \[rpc\] queue (stuck=\d+ .*)$")
+THUMBS_LINE = re.compile(
+    r"^\[(\d\d):(\d\d):(\d\d)\] \[sidecar\] \[thumbs\] open=(\d+) oldest=(\d+) served=(\d+) "
+    r"missing=(\d+) failed=(\d+) dropped=(\d+)")
 SLOTS_LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[sidecar\] \[slots\] in_use=(\d+) oldest=(\d+)")
 
 STEPS = [
@@ -419,6 +422,8 @@ def main():
     stuck_lines, slot_lines = [], []
     stuck_by = defaultdict(lambda: defaultdict(int))   # phase -> "method lane state" -> worst ms
     slots_by = defaultdict(lambda: [0, 0])             # phase -> [most in use, oldest ms]
+    thumbs_by = defaultdict(lambda: [0, 0, 0, 0, 0, 0])  # phase -> [max open, oldest ms, served, missing, failed, dropped]
+    thumb_lines = []
 
     def when(h, mi, s):
         sec = (int(h) * 3600 + int(mi) * 60 + int(s)
@@ -457,6 +462,17 @@ def main():
                     h, mi, s, rest = m.groups()
                     sec, phase = when(h, mi, s)
                     stuck_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} queue {rest}")
+                    continue
+                m = THUMBS_LINE.match(line)
+                if m:
+                    h, mi, s, *nums = m.groups()
+                    sec, phase = when(h, mi, s)
+                    o, oldest, served, missing, failed, dropped = map(int, nums)
+                    t = thumbs_by[phase]
+                    t[0], t[1] = max(t[0], o), max(t[1], oldest)
+                    t[2] += served; t[3] += missing; t[4] += failed; t[5] += dropped
+                    thumb_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} open={o} oldest={oldest // 1000} s "
+                                       f"served={served} missing={missing} failed={failed} dropped={dropped}")
                     continue
                 m = SLOTS_LINE.match(line)
                 if m:
@@ -517,6 +533,14 @@ def main():
         if name in slots_by:
             most, oldest = slots_by[name]
             summary.append(f"{name:16} in_use max={most}  oldest={oldest / 1000:.0f} s")
+    summary.append("\n== Thumbnail server (pictures only): most open, oldest, and totals per step")
+    if not thumbs_by:
+        summary.append("no lines (or this build does not log them)")
+    for name, _, _, _ in phases:
+        if name in thumbs_by:
+            o, oldest, served, missing, failed, dropped = thumbs_by[name]
+            summary.append(f"{name:16} open max={o:4d}  oldest={oldest / 1000:5.1f} s  served={served}  "
+                           f"missing={missing}  failed={failed}  dropped={dropped}")
     summary.append(f"\n== Slow calls logged by the app (>= 1 s): {len(rpc_lines)}")
     summary += rpc_lines[:400]
     if not log_path:
@@ -529,6 +553,8 @@ def main():
         f.write("\n".join(stuck_lines) + "\n")
     with open(os.path.join(out_dir, "slots.txt"), "w") as f:
         f.write("\n".join(slot_lines) + "\n")
+    with open(os.path.join(out_dir, "thumbs.txt"), "w") as f:
+        f.write("\n".join(thumb_lines) + "\n")
     with open(os.path.join(out_dir, "meta.json"), "w") as f:
         json.dump({
             "system": system_info(args.app_id),
