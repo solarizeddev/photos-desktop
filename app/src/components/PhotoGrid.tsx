@@ -20,9 +20,19 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import { isVideo as classifyVideo, TAG } from "../lib/tags";
 import { cachedThumbnail, requestThumbnail, useThumbServerBase } from "../lib/thumbStore";
+import { keepTileImage, takeTileImage } from "../lib/tileImages";
 import { cachedDuration, formatVideoTime, requestDuration } from "../lib/durations";
 import { cachedMediaType, requestMediaType } from "../lib/mediaTypes";
 import { useT } from "../lib/i18n";
@@ -100,29 +110,102 @@ function typeBadgeOf(tags: number[] | undefined): { icon: ReactNode; key: string
 }
 
 /**
- * One observer for every tile on screen rather than one each: a library of thousands
- * built thousands of them whenever the grid came back in full, such as when a filter was
- * cleared, and that was a visible stall. The margin keeps about two screens ahead, so a
- * tile is usually filled before it scrolls in.
+ * One observer for every tile in a scroll area rather than one each: a library of
+ * thousands built thousands of them whenever the grid came back in full, such as when a
+ * filter was cleared, and that was a visible stall. The margin keeps about two screens
+ * ahead, so a tile is usually filled before it scrolls in.
+ *
+ * The observer watches from the scroll area the tile is in, not from the window. A margin
+ * only widens the box of the thing watched from, and a tile outside its scroll area's own
+ * box is clipped by that area before the window's margin is ever looked at. Watched from
+ * the window, the margin did nothing: a tile counted as near only once it was on screen,
+ * and as gone the moment it left, so a tile that fetches its own thumbnail let it go and
+ * asked for it again on every pass across the screen's edge.
  */
 const nearScreen = new Map<Element, (visible: boolean) => void>();
-let nearScreenObserver: IntersectionObserver | null = null;
+const observers = new WeakMap<Element, IntersectionObserver>();
+let windowObserver: IntersectionObserver | null = null;
+/** The scroll area around a grid, by the grid: one look per grid, not one per tile. */
+const scrollAreas = new WeakMap<Element, Element | null>();
+
+function scrollAreaOf(el: Element): Element | null {
+  const grid = el.parentElement;
+  if (!grid) return null;
+  const known = scrollAreas.get(grid);
+  if (known !== undefined) return known;
+  let area: Element | null = null;
+  for (
+    let at: Element | null = grid;
+    at && at !== document.body && at !== document.documentElement;
+    at = at.parentElement
+  ) {
+    const overflow = getComputedStyle(at).overflowY;
+    if (overflow === "auto" || overflow === "scroll" || overflow === "overlay") {
+      area = at;
+      break;
+    }
+  }
+  scrollAreas.set(grid, area);
+  return area;
+}
+
+function observerFor(area: Element | null): IntersectionObserver {
+  const existing = area ? observers.get(area) : windowObserver;
+  if (existing) return existing;
+  const created = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) nearScreen.get(entry.target)?.(entry.isIntersecting);
+    },
+    { root: area, rootMargin: "1200px" },
+  );
+  if (area) observers.set(area, created);
+  else windowObserver = created;
+  return created;
+}
 
 function watchNearScreen(el: Element, onChange: (visible: boolean) => void): () => void {
-  if (!nearScreenObserver) {
-    nearScreenObserver = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) nearScreen.get(entry.target)?.(entry.isIntersecting);
-      },
-      { rootMargin: "1200px" },
-    );
-  }
+  const observer = observerFor(scrollAreaOf(el));
   nearScreen.set(el, onChange);
-  nearScreenObserver.observe(el);
+  observer.observe(el);
   return () => {
     nearScreen.delete(el);
-    nearScreenObserver?.unobserve(el);
+    observer.unobserve(el);
   };
+}
+
+/**
+ * Shows a tile's picture now that it has loaded. One that arrives while its tile is on
+ * screen fades in rather than popping over the empty tile; one that arrives ahead of the
+ * screen, which is most of them during a scroll, is simply there. Fading those too ran
+ * a transition for every thumbnail that loaded, some hundred a second with nobody to see
+ * them, and the webview spent more of a scroll on that than on anything else.
+ *
+ * Done once a frame for everything that loaded in it: where each one is gets read first
+ * and only then is anything changed, so the page is laid out once for all of them and not
+ * once for each.
+ */
+const justLoaded: HTMLImageElement[] = [];
+let showFrame = 0;
+
+function showLoaded(img: HTMLImageElement): void {
+  if (img.dataset.ok) return;
+  justLoaded.push(img);
+  if (!showFrame) showFrame = requestAnimationFrame(showJustLoaded);
+}
+
+function showJustLoaded(): void {
+  showFrame = 0;
+  const batch = justLoaded.splice(0);
+  const height = window.innerHeight;
+  const onScreen = batch.map((img) => {
+    if (!img.isConnected) return false;
+    const box = img.getBoundingClientRect();
+    return box.bottom > 0 && box.top < height;
+  });
+  batch.forEach((img, i) => {
+    if (onScreen[i]) img.dataset.fade = "1";
+    img.dataset.ok = "1";
+  });
 }
 
 type CellProps = {
@@ -147,8 +230,14 @@ type CellProps = {
   renderOverlay?: (item: GridItem) => ReactNode;
 };
 
-/** One photo tile: thumbnail, hover select dot, corner badges, optional name. */
-export function PhotoCell({
+/**
+ * One photo tile: thumbnail, hover select dot, corner badges, optional name.
+ *
+ * Drawn again only when something of its own changed. The grid around it is drawn again
+ * whenever rows come or go during a scroll, and without this every tile already on screen
+ * was worked out again each time, for nothing.
+ */
+export const PhotoCell = memo(function PhotoCell({
   item,
   thumb,
   selected,
@@ -181,6 +270,38 @@ export function PhotoCell({
       ? serverBase + encodeURIComponent(item.uid) + (attempt ? `?a=${attempt}` : "")
       : null;
   const fetchesOwn = lazy && !served;
+  // A served tile's picture is an image element of its own rather than one drawn here, so
+  // that it can outlive the tile: handed over when the tile is taken down and taken back
+  // when it is built again, already loaded (see `tileImages`). Before the first paint, so
+  // a picture that is already there is in the tile's first frame.
+  const picRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const slot = picRef.current;
+    if (!served || !slot) return;
+    const img = takeTileImage(served);
+    const onLoad = () => showLoaded(img);
+    const onError = () => {
+      img.remove();
+      if (attempt < 3) {
+        retryTimer.current = setTimeout(() => setAttempt(attempt + 1), 1500 * (attempt + 1));
+      }
+    };
+    // One kept from before is shown as it was, with nothing left to fade.
+    if (img.complete && img.naturalWidth > 0) img.dataset.ok = "1";
+    img.addEventListener("load", onLoad);
+    img.addEventListener("error", onError);
+    slot.appendChild(img);
+    return () => {
+      clearTimeout(retryTimer.current);
+      img.removeEventListener("load", onLoad);
+      img.removeEventListener("error", onError);
+      img.remove();
+      delete img.dataset.fade;
+      keepTileImage(served, img);
+    };
+    // `attempt` is part of `served`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [served]);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   // A tile scrolled away lets go of its request, so the server is not left fetching it
@@ -306,7 +427,7 @@ export function PhotoCell({
   const showType = !!typeBadge && allow("type");
   const showFavorite = isFavorite && allow("favorite");
 
-  const src = served ?? (lazy ? self : thumb);
+  const src = lazy ? self : thumb;
   // A thumbnail that will not decode shows the empty tile, not the browser's broken image.
   const [broken, setBroken] = useState<string | null>(null);
   return (
@@ -327,10 +448,12 @@ export function PhotoCell({
         })
       }
     >
-      {src && broken !== src ? (
+      {served ? (
+        <div className="g-cell-pic" ref={picRef} />
+      ) : src && broken !== src ? (
         // Eager: the list only builds the rows near the screen, so the browser's own lazy
         // loading only added a wait. A picture already decoded shows at once; one still
-        // arriving fades in rather than popping over the empty tile.
+        // arriving fades in rather than popping over the empty tile (see `showLoaded`).
         <img
           src={src}
           decoding="async"
@@ -340,15 +463,8 @@ export function PhotoCell({
             imgRef.current = img;
             if (img && img.complete && img.naturalWidth > 0) img.dataset.ok = "1";
           }}
-          onLoad={(e) => {
-            e.currentTarget.dataset.ok = "1";
-          }}
-          onError={() => {
-            if (src === served && attempt < 3) {
-              retryTimer.current = setTimeout(() => setAttempt(attempt + 1), 1500 * (attempt + 1));
-            }
-            setBroken(src);
-          }}
+          onLoad={(e) => showLoaded(e.currentTarget)}
+          onError={() => setBroken(src)}
         />
       ) : (
         <div className={`g-cell-ph${loading ? " g-cell-loading" : ""}`} />
@@ -410,7 +526,7 @@ export function PhotoCell({
       {showName && item.name && <div className="g-cell-name">{item.name}</div>}
     </div>
   );
-}
+});
 
 type GridProps = Omit<CellProps, "item" | "thumb" | "selected" | "tier" | "selectionMode"> & {
   items: GridItem[];
@@ -458,6 +574,17 @@ export function PhotoGrid({
   }, [cellSize]);
   const selectionMode = (selected?.size ?? 0) > 0;
 
+  // The callers' handlers are new functions on each of their renders, which would have
+  // every tile drawn again with them. Each tile gets one that never changes and calls the
+  // latest; whether there is one at all still follows the caller, since that is what puts
+  // the select dot and the menu on a tile.
+  const { onToggle, onOpen, onContext, ...rest } = cell;
+  const latest = useRef({ onToggle, onOpen, onContext });
+  latest.current = { onToggle, onOpen, onContext };
+  const toggle = useCallback((uid: string, e: MouseEvent) => latest.current.onToggle?.(uid, e), []);
+  const open = useCallback((uid: string, e: MouseEvent) => latest.current.onOpen?.(uid, e), []);
+  const context = useCallback((uid: string, e: MouseEvent) => latest.current.onContext?.(uid, e), []);
+
   return (
     <div className="g-grid" style={gridStyle(cellSize)} ref={ref}>
       {items.map((item) => (
@@ -470,7 +597,10 @@ export function PhotoGrid({
           offline={!!offlineUids?.has(item.uid)}
           local={!!localUids?.has(item.uid)}
           tier={tier}
-          {...cell}
+          onToggle={onToggle && toggle}
+          onOpen={onOpen && open}
+          onContext={onContext && context}
+          {...rest}
         />
       ))}
     </div>
