@@ -333,6 +333,12 @@ const TIMELINE_CEILING = 1_000_000;
 const CRYPTO_CACHE_LIMIT = 20_000;
 /** How many photos' read text is kept, for going back to one of them. */
 const OCR_KEPT = 40;
+/** A read waits this long for a newer one to start before it fetches its photo. */
+const OCR_SETTLE_MS = 250;
+/** Photo fetches for reads at once: the newest never waits on a single stale one. */
+const OCR_FETCHES_AT_ONCE = 2;
+/** A read's fetch that has not answered in this long is given up. */
+const OCR_FETCH_GIVE_UP_MS = 3 * 60 * 1000;
 /** A copy's save that fails on the network is tried again after these pauses. */
 const UPLOAD_RETRY_MS = [2_000, 5_000];
 
@@ -2924,12 +2930,19 @@ export class ProtonSession {
   /** The last photos read, by what was read, so going back to one shows its text at once. */
   private ocrRead = new Map<string, OcrJob["result"]>();
   /**
-   * The photo fetches of reads, one after another. A read only fetches once every read
-   * started before it has fetched, and not at all if a newer read has started by then:
-   * stepping through the viewer used to start a download per photo, all at once, and
-   * hold every original in memory together.
+   * The photo fetches of reads. Stepping through the viewer used to start a download per
+   * photo, all at once, and hold every original in memory together. Now a read waits a
+   * moment and fetches only if no newer read has started by then, at most
+   * OCR_FETCHES_AT_ONCE fetch at once, and a read of a photo already being fetched shares
+   * that fetch.
    */
-  private ocrFetching: Promise<unknown> = Promise.resolve();
+  private ocrFetchesRunning = 0;
+  private ocrFetchWaiters: (() => void)[] = [];
+  private ocrFetchesByKey = new Map<string, Promise<Buffer | null>>();
+  /** How long a read waits for a newer one before it fetches (tests shorten it). */
+  ocrSettleMs = OCR_SETTLE_MS;
+  /** How long a fetch may hold its place before the next read is let past it. */
+  ocrFetchGiveUpMs = OCR_FETCH_GIVE_UP_MS;
 
   /**
    * Starts reading the text in a photo of the library (its full-resolution original, or its
@@ -2956,21 +2969,8 @@ export class ProtonSession {
     // Only the newest read is worth anything: the reader stops an older one at its next
     // step anyway, so one still waiting to fetch its photo gives up before it does.
     const superseded = () => id !== this.ocrNext;
-    const turn = this.ocrFetching;
-    let fetched!: () => void;
-    this.ocrFetching = new Promise<void>((done) => (fetched = done));
     void (async () => {
-      let bytes: Buffer | null = null;
-      try {
-        await turn;
-        if (superseded()) {
-          job.state = "failed";
-          return;
-        }
-        bytes = await this.ocrBytes(source);
-      } finally {
-        fetched();
-      }
+      const bytes = await this.ocrFetch(key, source, superseded);
       if (!bytes || superseded()) {
         job.state = "failed";
         return;
@@ -2993,6 +2993,54 @@ export class ProtonSession {
       process.stderr.write(`[ocr] read failed: ${(e as Error)?.name ?? "error"}\n`);
     });
     return { id };
+  }
+
+  /**
+   * The bytes for a read, or null when a newer read passed it before it fetched or its
+   * fetch gave up. A fetch of the same photo under way is shared rather than repeated.
+   */
+  private async ocrFetch(
+    key: string,
+    source: { uid?: string; path?: string },
+    superseded: () => boolean,
+  ): Promise<Buffer | null> {
+    const sharing = this.ocrFetchesByKey.get(key);
+    if (sharing) return sharing;
+    await new Promise((r) => setTimeout(r, this.ocrSettleMs));
+    if (superseded()) return null;
+    while (this.ocrFetchesRunning >= OCR_FETCHES_AT_ONCE) {
+      await new Promise<void>((r) => this.ocrFetchWaiters.push(r));
+      if (superseded()) return null;
+    }
+    const shared = this.ocrFetchesByKey.get(key);
+    if (shared) return shared;
+
+    this.ocrFetchesRunning++;
+    let freed = false;
+    const free = () => {
+      if (freed) return;
+      freed = true;
+      this.ocrFetchesRunning--;
+      for (const wake of this.ocrFetchWaiters.splice(0)) wake();
+    };
+    const fetching = this.ocrBytes(source).catch(() => null);
+    this.ocrFetchesByKey.set(key, fetching);
+    // A download that never settles must not hold its place for good: past the give-up
+    // time the next read is let through, and this one answers nothing.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const gaveUp = new Promise<null>((r) => {
+      timer = setTimeout(() => {
+        free();
+        if (this.ocrFetchesByKey.get(key) === fetching) this.ocrFetchesByKey.delete(key);
+        r(null);
+      }, this.ocrFetchGiveUpMs);
+    });
+    void fetching.finally(() => {
+      clearTimeout(timer);
+      free();
+      if (this.ocrFetchesByKey.get(key) === fetching) this.ocrFetchesByKey.delete(key);
+    });
+    return Promise.race([fetching, gaveUp]);
   }
 
   /** The bytes a read is made from: a picture file, or the photo's original. */

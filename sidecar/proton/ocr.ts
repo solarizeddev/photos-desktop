@@ -131,7 +131,7 @@ function closeSessions(): void {
  * the gain; the runtime's default of one per core (58 threads and 14 cores busy on a 16-core
  * machine) left the window and the sidecar's own work starved while a read ran.
  */
-const OCR_THREADS = Math.max(1, Math.min(4, availableParallelism() - 1));
+const OCR_THREADS = Math.max(2, Math.min(4, availableParallelism() - 1));
 
 /**
  * On the processor: the reader's input width changes with every run, which the graphics card

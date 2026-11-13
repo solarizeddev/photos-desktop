@@ -18,70 +18,91 @@ vi.mock("./ocr.ts", async (importOriginal) => ({
 import { ProtonSession } from "./session.ts";
 
 /** A session whose photo fetches wait until the test lets each one finish. */
-function withFetches() {
+function withFetches(giveUpMs = 60_000) {
   const session = new ProtonSession();
+  session.ocrSettleMs = 5;
+  session.ocrFetchGiveUpMs = giveUpMs;
   const fetching: { uid: string; finish: () => void }[] = [];
   (session as any).ocrBytes = (source: { uid: string }) =>
     new Promise<Buffer>((resolve) => fetching.push({ uid: source.uid, finish: () => resolve(Buffer.from([1])) }));
   return { session, fetching };
 }
 
-const settle = () => new Promise((r) => setTimeout(r, 0));
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const uids = (f: { uid: string }[]) => f.map((x) => x.uid);
 
 describe("reading text as the viewer steps through photos", () => {
-  it("fetches one photo at a time, and never one a newer read has passed", async () => {
+  it("fetches only the newest of reads started together", async () => {
     const { session, fetching } = withFetches();
-
-    const a = session.ocrStart({ uid: "a" }).id;
-    await settle();
-    expect(fetching.map((f) => f.uid)).toEqual(["a"]);
-    const b = session.ocrStart({ uid: "b" }).id;
-    const c = session.ocrStart({ uid: "c" }).id;
-    await settle();
-    expect(fetching.map((f) => f.uid)).toEqual(["a"]);
-
-    fetching[0].finish();
-    await settle();
-    await settle();
-    // b was passed by c while it waited: it is never fetched, and c goes next.
-    expect(fetching.map((f) => f.uid)).toEqual(["a", "c"]);
-    expect(session.ocrResult(a)?.state).toBe("failed");
-    expect(session.ocrResult(b)?.state).toBe("failed");
-
-    fetching[1].finish();
-    await vi.waitFor(() => expect(session.ocrResult(c)?.state).toBe("done"));
-  });
-
-  it("fetches nothing for reads passed before their turn came", async () => {
-    const { session, fetching } = withFetches();
-
     const a = session.ocrStart({ uid: "a" }).id;
     session.ocrStart({ uid: "b" });
     const c = session.ocrStart({ uid: "c" }).id;
-    await settle();
-    expect(fetching.map((f) => f.uid)).toEqual(["c"]);
+    await pause(30);
+    expect(uids(fetching)).toEqual(["c"]);
     expect(session.ocrResult(a)?.state).toBe("failed");
     fetching[0].finish();
     await vi.waitFor(() => expect(session.ocrResult(c)?.state).toBe("done"));
   });
 
-  it("reads the newest photo once the fetch ahead of it is done", async () => {
+  it("does not make a newer read wait for a stale fetch", async () => {
     const { session, fetching } = withFetches();
-
     const a = session.ocrStart({ uid: "a" }).id;
-    await settle();
-    fetching[0].finish();
-    await vi.waitFor(() => expect(session.ocrResult(a)?.state).toBe("done"));
-
+    await vi.waitFor(() => expect(uids(fetching)).toEqual(["a"]));
     const b = session.ocrStart({ uid: "b" }).id;
-    await settle();
-    expect(fetching.map((f) => f.uid)).toEqual(["a", "b"]);
+    await vi.waitFor(() => expect(uids(fetching)).toEqual(["a", "b"]));
     fetching[1].finish();
     await vi.waitFor(() => expect(session.ocrResult(b)?.state).toBe("done"));
+    fetching[0].finish();
+    await vi.waitFor(() => expect(session.ocrResult(a)?.state).toBe("failed"));
   });
 
-  it("lets the next fetch go when one fails", async () => {
+  it("shares a fetch of the same photo under way", async () => {
+    const { session, fetching } = withFetches();
+    session.ocrStart({ uid: "a" });
+    await vi.waitFor(() => expect(uids(fetching)).toEqual(["a"]));
+    // Copy text pressed while the read ahead of the same photo is still fetching it.
+    const again = session.ocrStart({ uid: "a" }).id;
+    await pause(30);
+    expect(uids(fetching)).toEqual(["a"]);
+    fetching[0].finish();
+    await vi.waitFor(() => expect(session.ocrResult(again)?.state).toBe("done"));
+  });
+
+  it("runs at most two fetches, and a read waiting for a place gives up if passed", async () => {
+    const { session, fetching } = withFetches();
+    session.ocrStart({ uid: "a" });
+    await vi.waitFor(() => expect(uids(fetching)).toEqual(["a"]));
+    session.ocrStart({ uid: "b" });
+    await vi.waitFor(() => expect(uids(fetching)).toEqual(["a", "b"]));
+    const c = session.ocrStart({ uid: "c" }).id;
+    await pause(30);
+    expect(uids(fetching)).toEqual(["a", "b"]);
+    const d = session.ocrStart({ uid: "d" }).id;
+    await pause(30);
+    fetching[0].finish();
+    await vi.waitFor(() => expect(uids(fetching)).toEqual(["a", "b", "d"]));
+    expect(session.ocrResult(c)?.state).toBe("failed");
+    fetching[2].finish();
+    await vi.waitFor(() => expect(session.ocrResult(d)?.state).toBe("done"));
+  });
+
+  it("lets the next read through when a fetch never answers", async () => {
+    const { session, fetching } = withFetches(50);
+    const a = session.ocrStart({ uid: "a" }).id;
+    await vi.waitFor(() => expect(uids(fetching)).toEqual(["a"]));
+    session.ocrStart({ uid: "b" });
+    await vi.waitFor(() => expect(uids(fetching)).toEqual(["a", "b"]));
+    const c = session.ocrStart({ uid: "c" }).id;
+    // a and b hang; once they give up, c fetches.
+    await vi.waitFor(() => expect(uids(fetching)).toEqual(["a", "b", "c"]));
+    expect(session.ocrResult(a)?.state).toBe("failed");
+    fetching[2].finish();
+    await vi.waitFor(() => expect(session.ocrResult(c)?.state).toBe("done"));
+  });
+
+  it("answers failed, and frees its place, when a fetch throws", async () => {
     const session = new ProtonSession();
+    session.ocrSettleMs = 1;
     let calls = 0;
     (session as any).ocrBytes = async () => {
       calls++;
