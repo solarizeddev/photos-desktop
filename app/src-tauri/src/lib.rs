@@ -584,6 +584,132 @@ struct SidecarGate {
     /// it can never hold more than the calls actually outstanding, however many cancels
     /// arrive late.
     pending: Mutex<std::collections::HashMap<CallId, bool>>,
+    /// Every call from arriving to answering, for the watchdog: see `Flights`.
+    flights: Flights,
+}
+
+/// How long a call may wait or run before the watchdog names it.
+const STUCK_RPC_MS: u128 = 5_000;
+/// How often the watchdog looks, and so how often it names a call still stuck.
+const WATCHDOG_EVERY: Duration = Duration::from_secs(5);
+/// The most calls the watchdog names in one look; the rest are counted.
+const WATCHDOG_NAMES: usize = 8;
+
+/// One call between arriving and answering.
+struct Flight {
+    method: String,
+    background: bool,
+    since: Instant,
+    /// When it was let onto its lane, if it has been.
+    admitted: Option<Instant>,
+}
+
+/// Every call from arriving to answering.
+///
+/// The slow-call log names a call only once it answers, so a call that never answers was
+/// never named: a video stuck on its loading note, and every call queued behind it on its
+/// lane, left no line at all. This is what lets the watchdog name them while they are stuck.
+struct Flights {
+    next: std::sync::atomic::AtomicU64,
+    open: Mutex<std::collections::HashMap<u64, Flight>>,
+}
+
+/// Keeps one call in `Flights` for exactly as long as it is outstanding, however it ends.
+struct FlightGuard<'a> {
+    flights: &'a Flights,
+    id: u64,
+}
+
+impl Flights {
+    fn new() -> Self {
+        Flights {
+            next: std::sync::atomic::AtomicU64::new(0),
+            open: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn start(&self, method: &str) -> FlightGuard<'_> {
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let flight = Flight {
+            method: method.to_string(),
+            background: is_background(priority_for(method)),
+            since: Instant::now(),
+            admitted: None,
+        };
+        self.open.lock().unwrap().insert(id, flight);
+        FlightGuard { flights: self, id }
+    }
+
+    /// The watchdog's lines for calls outstanding at least `min_ms` at `now`: the oldest
+    /// first, `WATCHDOG_NAMES` of them by name, and one line counting all of them by lane
+    /// whenever any is stuck. Only the method name is logged, never params: it is not user
+    /// data.
+    fn stuck_report(&self, now: Instant, min_ms: u128) -> Vec<String> {
+        let open = self.open.lock().unwrap();
+        let mut stuck: Vec<&Flight> = open
+            .values()
+            .filter(|f| now.saturating_duration_since(f.since).as_millis() >= min_ms)
+            .collect();
+        if stuck.is_empty() {
+            return Vec::new();
+        }
+        stuck.sort_by_key(|f| f.since);
+        let mut lines: Vec<String> = stuck
+            .iter()
+            .take(WATCHDOG_NAMES)
+            .map(|f| {
+                let lane = if f.background { "bg" } else { "fg" };
+                let age = now.saturating_duration_since(f.since).as_millis();
+                match f.admitted {
+                    None => format!("[rpc] {} stuck lane={lane} waiting={age}", f.method),
+                    Some(at) => {
+                        let waited = at.saturating_duration_since(f.since).as_millis();
+                        let running = now.saturating_duration_since(at).as_millis();
+                        format!("[rpc] {} stuck lane={lane} running={running} waited={waited}", f.method)
+                    }
+                }
+            })
+            .collect();
+        let count = |bg: bool, admitted: bool| {
+            open.values().filter(|f| f.background == bg && f.admitted.is_some() == admitted).count()
+        };
+        lines.push(format!(
+            "[rpc] queue stuck={} fg_running={} fg_waiting={} bg_running={} bg_waiting={}",
+            stuck.len(),
+            count(false, true),
+            count(false, false),
+            count(true, true),
+            count(true, false),
+        ));
+        lines
+    }
+}
+
+impl FlightGuard<'_> {
+    /// The call has been let onto its lane.
+    fn admitted(&self) {
+        if let Some(f) = self.flights.open.lock().unwrap().get_mut(&self.id) {
+            f.admitted = Some(Instant::now());
+        }
+    }
+}
+
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        self.flights.open.lock().unwrap().remove(&self.id);
+    }
+}
+
+/// Names every call stuck past `STUCK_RPC_MS`, every `WATCHDOG_EVERY`, in the app's log,
+/// for as long as the app runs.
+fn start_rpc_watchdog(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(WATCHDOG_EVERY);
+        let shared = app.state::<SharedSidecar>().inner().clone();
+        for line in shared.flights.stuck_report(Instant::now(), STUCK_RPC_MS) {
+            note(&app, &line);
+        }
+    });
 }
 
 /// Keeps one call in `pending` for exactly as long as it is outstanding. Tied to a drop
@@ -606,6 +732,7 @@ impl SidecarGate {
             sidecar: Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(0),
             pending: Mutex::new(std::collections::HashMap::new()),
+            flights: Flights::new(),
         }
     }
 
@@ -722,9 +849,13 @@ impl SidecarGate {
             Tracked { shared: self, id }
         });
 
+        let flight = self.flights.start(&method);
         let wait_start = Instant::now();
         let permit = self.admit(&method, call_id);
         let wait_ms = wait_start.elapsed().as_millis();
+        if permit.is_some() {
+            flight.admitted();
+        }
         self.run_admitted(app, method, params, wait_ms, permit)
     }
 
@@ -1614,12 +1745,17 @@ async fn rpc(
     // covers, a run through the viewer) queues as futures. A blocking-pool thread is
     // taken only once the call is admitted, for the write and the wait for its answer,
     // so at most one per lane is ever held, however long the queue.
+    // Followed from here until it answers, so the watchdog can name it while it is stuck.
+    let flight = shared.flights.start(&method);
     let wait_start = Instant::now();
     let permit = shared
         .admit_async(&method, call_id)
         .await
         .map(|p| p.into_owned(shared.clone()));
     let wait_ms = wait_start.elapsed().as_millis();
+    if permit.is_some() {
+        flight.admitted();
+    }
     let runner = shared.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         runner.run_admitted(&app, method, params, wait_ms, permit)
@@ -3316,6 +3452,8 @@ pub fn run() {
             // An update installed while this app still ran set the files it held aside (`.pfp-old`); this
             // process no longer uses them, so they go now rather than at the next update.
             std::thread::spawn(sweep_update_leftovers);
+            // Names in the log any call stuck waiting for its lane or for its answer.
+            start_rpc_watchdog(app.handle().clone());
             // The file a cold launch was asked to open. The single-instance callback
             // above never runs for the first process, and this never runs for a second
             // one, so both are needed and neither is a duplicate of the other. This one
@@ -3545,6 +3683,38 @@ mod gate_tests {
     fn the_trash_read_ahead_never_holds_up_the_window() {
         assert!(super::is_background(super::priority_for("listTrashedAhead")));
         assert!(!super::is_background(super::priority_for("listTrashed")));
+    }
+
+    #[test]
+    fn the_watchdog_names_calls_stuck_waiting_or_running_and_counts_the_lanes() {
+        let flights = super::Flights::new();
+        let quick = flights.start("getPreview");
+        let waiting = flights.start("semanticSearch");
+        let running = flights.start("getVideo");
+        running.admitted();
+        let behind = flights.start("warmThumbnails");
+        let later = Instant::now() + Duration::from_secs(10);
+        // Nothing is stuck yet.
+        assert!(flights.stuck_report(Instant::now(), 5_000).is_empty());
+        drop(quick);
+        let report = flights.stuck_report(later, 5_000);
+        assert_eq!(report.len(), 4, "{report:?}");
+        assert!(report[0].starts_with("[rpc] semanticSearch stuck lane=fg waiting="), "{report:?}");
+        assert!(report[1].starts_with("[rpc] getVideo stuck lane=fg running="), "{report:?}");
+        assert!(report[2].starts_with("[rpc] warmThumbnails stuck lane=bg waiting="), "{report:?}");
+        assert_eq!(report[3], "[rpc] queue stuck=3 fg_running=1 fg_waiting=1 bg_running=0 bg_waiting=1");
+        drop((waiting, running, behind));
+        assert!(flights.stuck_report(later, 5_000).is_empty(), "every call left with its guard");
+    }
+
+    #[test]
+    fn the_watchdog_names_only_so_many_and_counts_the_rest() {
+        let flights = super::Flights::new();
+        let guards: Vec<_> = (0..20).map(|_| flights.start("getPreview")).collect();
+        let report = flights.stuck_report(Instant::now() + Duration::from_secs(6), 5_000);
+        assert_eq!(report.len(), super::WATCHDOG_NAMES + 1);
+        assert!(report.last().unwrap().starts_with("[rpc] queue stuck=20 "));
+        drop(guards);
     }
 
     #[test]
