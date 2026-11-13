@@ -175,6 +175,19 @@ describe("the loopback thumbnail server", () => {
       expect((await get(plain + encodeURIComponent(UID) + "/v")).status).toBe(404);
     });
 
+    it("cuts the connection when the video turns out shorter than it said", async () => {
+      const short: VideoSource = {
+        size: 1000,
+        mime: "video/mp4",
+        async *read() {
+          yield Buffer.alloc(600);
+          throw new Error("video shorter than stated");
+        },
+      };
+      const base = await startThumbServer(source, async () => short);
+      await expect(get(base + encodeURIComponent(UID) + "/v")).rejects.toThrow();
+    });
+
     it("stops reading when the player hangs up", async () => {
       let read = 0;
       let stopped: AbortSignal | null = null;

@@ -124,7 +124,7 @@ import { isTransient, withRetry } from "./transient.ts";
 import { activeRevisionOf, nodeDurationMs, nodeLocation, nodeName, toMillis } from "./nodes.ts";
 import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
-import { OpenVideos, videoFromBytes, videoFromDownloader, type VideoSource } from "./videoStream.ts";
+import { OpenVideos, downloadVideo, releaseUnusedDownloader, videoFromBytes, type VideoSource } from "./videoStream.ts";
 import { sameAccount } from "./accountSwitch.ts";
 import { hostNotice } from "./hostCall.ts";
 import {
@@ -336,6 +336,11 @@ const TIMELINE_CEILING = 1_000_000;
 const CRYPTO_CACHE_LIMIT = 20_000;
 /** How many photos' read text is kept, for going back to one of them. */
 const OCR_KEPT = 40;
+/**
+ * The largest video played from the thumbnail server. It is held in the sidecar's memory
+ * while it plays (at most two at once); a larger one is offered as a download instead.
+ */
+const MAX_STREAMED_VIDEO = 1024 * 1024 * 1024;
 /** A copy's save that fails on the network is tried again after these pauses. */
 const UPLOAD_RETRY_MS = [2_000, 5_000];
 
@@ -2191,10 +2196,17 @@ export class ProtonSession {
     const node = await this.photos.getNode(uid);
     const mime = (node as any)?.mediaType || "video/mp4";
     if (!String(mime).startsWith("video/")) return null;
-    const downloader = await this.photos.getFileDownloader(uid);
+    // The downloader holds one of the SDK's few download slots from here until a download
+    // of it ends: every way out below either downloads (whose end gives it back) or gives
+    // it back without downloading.
+    const stop = new AbortController();
+    const downloader = await this.photos.getFileDownloader(uid, stop.signal);
     const size = downloader.getClaimedSizeInBytes?.() ?? 0;
-    if (!size) return null;
-    return videoFromDownloader(downloader, size, mime);
+    if (!size || size > MAX_STREAMED_VIDEO) {
+      releaseUnusedDownloader(downloader, stop);
+      return null;
+    }
+    return downloadVideo(downloader, size, mime, stop);
   }
 
   async getVideo(uid: string): Promise<VideoBytes> {

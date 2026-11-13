@@ -656,8 +656,13 @@ export function Lightbox({
       onRename={rename}
       onVideoError={() => {
         // The stream would not play: try the whole file once before saying so.
-        if (videoUrl && videoUrl === videoStreamUrl(uid) && streamFailed !== uid) setStreamFailed(uid);
-        else setVideoState("error");
+        if (videoUrl && videoUrl === videoStreamUrl(uid) && streamFailed !== uid) {
+          // Let go of the stream at once, so a second error from it cannot show before the
+          // whole file is in.
+          setVideoUrl(null);
+          setVideoState("loading");
+          setStreamFailed(uid);
+        } else setVideoState("error");
       }}
       onContextMenu={(e) => setMenuAt({ x: e.clientX, y: e.clientY })}
       onKey={(e) => {
