@@ -39,7 +39,7 @@ Scroll measurement (a build that has it)
 
 Options
   --app-id ID     Flatpak app id (default eu.akoos.photos)
-  --idle SECONDS  length of the final idle step (default 120; 20 with --bench)
+  --idle SECONDS  length of the final idle step (default 30; 20 with --bench)
   --bench         record the app's own scroll measurement instead of the manual steps
 """
 
@@ -458,7 +458,7 @@ def main():
     ap.add_argument("--auto", type=int, help=argparse.SUPPRESS)  # testing: seconds per step, no prompts
     args = ap.parse_args()
     if args.idle is None:
-        args.idle = 20 if args.bench else 120
+        args.idle = 20 if args.bench else 30
     steps = bench_steps(args.app_id) if args.bench else STEPS
 
     if not sys.platform.startswith("linux"):
