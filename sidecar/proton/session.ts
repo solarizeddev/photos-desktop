@@ -2120,6 +2120,7 @@ export class ProtonSession {
   async getThumbnails(
     uids: string[],
     fetchLimit = THUMBNAIL_FETCH_PER_CALL,
+    signal?: AbortSignal,
   ): Promise<{ uid: string; dataUrl: string | null }[]> {
     if (!this.photos && this.offlineOnly) {
       return uids.map((uid) => {
@@ -2146,7 +2147,8 @@ export class ProtonSession {
     // this needs no new handling there and the next pass asks for them again.
     try {
       for await (const r of withStallGuard(
-        this.photos.iterateThumbnails(missing, ThumbnailType.Type1),
+        // Stopped by the SDK itself when the window lets go of the call.
+        this.photos.iterateThumbnails(missing, ThumbnailType.Type1, signal),
         THUMBNAIL_STALL_MS,
         "iterateThumbnails",
       )) {
@@ -2172,22 +2174,22 @@ export class ProtonSession {
    * answers only how many are now there: the warmer never draws them, so nothing is
    * worth sending back over the channel.
    */
-  async warmThumbnails(uids: string[]): Promise<{ ready: number }> {
-    const rows = await this.getThumbnails(uids, THUMBNAIL_WARM_PER_CALL);
+  async warmThumbnails(uids: string[], signal?: AbortSignal): Promise<{ ready: number }> {
+    const rows = await this.getThumbnails(uids, THUMBNAIL_WARM_PER_CALL, signal);
     // Only what is now cached: a fetch that failed, or a uid this call did not get to, is
     // not ready, so the window asks for it again rather than counting it warm.
     return { ready: rows.filter((r) => r.dataUrl !== null).length };
   }
 
   /** HD preview (Type2 thumbnail) for the image viewer / lightbox. */
-  async getPreview(uid: string): Promise<string | null> {
+  async getPreview(uid: string, signal?: AbortSignal): Promise<string | null> {
     if (!this.photos && !this.offlineOnly) throw new Error("Not signed in");
-    const bytes = await this.previewBytes(uid);
+    const bytes = await this.previewBytes(uid, signal);
     return bytes ? toDataUrl(bytes) : null;
   }
 
   /** The HD preview's bytes: from the sealed cache, else fetched and sealed for next time. */
-  private async previewBytes(uid: string): Promise<Buffer | null> {
+  private async previewBytes(uid: string, signal?: AbortSignal): Promise<Buffer | null> {
     const cached = thumbGet(uid, ThumbnailType.Type2);
     if (cached) return cached;
     if (!this.photos) return null;
@@ -2196,7 +2198,7 @@ export class ProtonSession {
     // identical SDK call, and the viewer holds the channel while it runs.
     try {
       for await (const r of withStallGuard(
-        this.photos.iterateThumbnails([uid], ThumbnailType.Type2),
+        this.photos.iterateThumbnails([uid], ThumbnailType.Type2, signal),
         THUMBNAIL_STALL_MS,
         "iterateThumbnails",
       )) {

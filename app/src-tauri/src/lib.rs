@@ -586,6 +586,11 @@ struct SidecarGate {
     /// it can never hold more than the calls actually outstanding, however many cancels
     /// arrive late.
     pending: Mutex<std::collections::HashMap<CallId, bool>>,
+    /// Every cancellable call that has been written to the sidecar and not yet answered:
+    /// the sidecar it went to (by generation) and the request id it went as. What lets a
+    /// call let go of after it was written still reach the sidecar, as a `{"cancel": id}`
+    /// line, so the work itself stops rather than only its answer being thrown away.
+    sent: Mutex<std::collections::HashMap<CallId, (u64, u64)>>,
     /// Every call from arriving to answering, for the watchdog: see `Flights`.
     flights: Flights,
 }
@@ -766,6 +771,7 @@ impl SidecarGate {
             sidecar: Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(0),
             pending: Mutex::new(std::collections::HashMap::new()),
+            sent: Mutex::new(std::collections::HashMap::new()),
             flights: Flights::new(),
         }
     }
@@ -801,6 +807,18 @@ impl SidecarGate {
         // here too is what keeps the two from ever being taken in opposite orders.
         if found {
             self.gate.wake_all();
+            // Already written to the sidecar: tell it, so the work stops there too.
+            self.send_cancel(id);
+        }
+    }
+
+    /// Writes `{"cancel": <request id>}` to the sidecar a call was sent to, if it was sent
+    /// and has not answered. The `sent` lock is let go before the sidecar's is taken, the
+    /// reverse of nothing: `io` takes them one after the other, never one inside the other.
+    fn send_cancel(&self, id: CallId) {
+        let target = self.sent.lock().unwrap().get(&id).copied();
+        if let Some((generation, request)) = target {
+            self.post(generation, &format!("{{\"cancel\":{request}}}\n"));
         }
     }
 
@@ -890,7 +908,7 @@ impl SidecarGate {
         if permit.is_some() {
             flight.admitted();
         }
-        self.run_admitted(app, method, params, wait_ms, permit)
+        self.run_admitted(app, method, params, call_id, wait_ms, permit)
     }
 
     /// The rest of a call once its wait is over: answer a call given up on while it
@@ -900,6 +918,7 @@ impl SidecarGate {
         app: &AppHandle,
         method: String,
         params: serde_json::Value,
+        call_id: Option<CallId>,
         wait_ms: u128,
         permit: Option<P>,
     ) -> Result<serde_json::Value, String> {
@@ -913,7 +932,7 @@ impl SidecarGate {
         };
 
         let hold_start = Instant::now();
-        let result = self.io(app, &method, params);
+        let result = self.io(app, &method, params, call_id);
         let hold_ms = hold_start.elapsed().as_millis();
 
         // Release the channel BEFORE logging, so the log write never extends the hold
@@ -936,9 +955,10 @@ impl SidecarGate {
         app: &AppHandle,
         method: &str,
         params: serde_json::Value,
+        call_id: Option<CallId>,
     ) -> Result<serde_json::Value, String> {
         // Send, under the lock: spawn if needed, register the waiter, write the line.
-        let (generation, rx) = {
+        let (generation, request, rx) = {
             let mut guard = self
                 .sidecar
                 .lock()
@@ -959,7 +979,7 @@ impl SidecarGate {
             let sc = guard.as_mut().unwrap();
             let generation = sc.generation;
             match send_request(sc, method, params) {
-                Ok(rx) => (generation, rx),
+                Ok((request, rx)) => (generation, request, rx),
                 Err(e) => {
                     // The write failed, so this sidecar is suspect: drop it while the lock
                     // is already held and let the next call spawn a fresh one.
@@ -968,6 +988,24 @@ impl SidecarGate {
                 }
             }
         };
+
+        // A cancellable call is followed while it is out, so a cancel can still reach the
+        // sidecar; and one let go of while it was being written is cancelled straight away.
+        struct Sent<'a>(&'a SidecarGate, Option<CallId>);
+        impl Drop for Sent<'_> {
+            fn drop(&mut self) {
+                if let Some(id) = self.1 {
+                    self.0.sent.lock().unwrap().remove(&id);
+                }
+            }
+        }
+        let _sent = Sent(self, call_id);
+        if let Some(id) = call_id {
+            self.sent.lock().unwrap().insert(id, (generation, request));
+            if self.is_abandoned(id) {
+                self.send_cancel(id);
+            }
+        }
 
         // Wait, with no lock held, so the other lane's call is free to run alongside this.
         let deadline = Instant::now() + deadline_for(method);
@@ -1523,7 +1561,7 @@ fn spawn_sidecar(app: &AppHandle, generation: u64) -> Result<Sidecar, String> {
     // keep its (vault-encrypted) caches and session. This one round trip is synchronous:
     // it runs before the sidecar is reachable by any other caller.
     let init = secure_store::sidecar_init_params(app)?;
-    let rx = send_request(&mut sc, "__init", init)?;
+    let (_, rx) = send_request(&mut sc, "__init", init)?;
     recv_response(&rx, Instant::now() + deadline_for("__init"), "__init")?;
     Ok(sc)
 }
@@ -1576,7 +1614,7 @@ fn send_request(
     sc: &mut Sidecar,
     method: &str,
     params: serde_json::Value,
-) -> Result<Receiver<serde_json::Value>, String> {
+) -> Result<(u64, Receiver<serde_json::Value>), String> {
     let id = sc.next_id;
     sc.next_id += 1;
     // A one-slot channel: exactly one response ever arrives for an id.
@@ -1602,7 +1640,7 @@ fn send_request(
         sc.router.lock().unwrap().remove(&id);
         return Err(format!("flush to sidecar failed: {e}"));
     }
-    Ok(rx)
+    Ok((id, rx))
 }
 
 /// Wait for one request's response, up to its deadline. The reader matches on id and drops
@@ -1793,7 +1831,7 @@ async fn rpc(
     }
     let runner = shared.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        runner.run_admitted(&app, method, params, wait_ms, permit)
+        runner.run_admitted(&app, method, params, call_id, wait_ms, permit)
     })
     .await
     .map_err(|e| format!("sidecar task failed: {e}"))?;
@@ -3774,6 +3812,73 @@ mod gate_tests {
         assert_eq!(report.len(), super::WATCHDOG_NAMES + 1);
         assert!(report.last().unwrap().starts_with("[rpc] queue stuck=20 "));
         drop(guards);
+    }
+
+    /// A stand-in sidecar: a shell that writes every line it is sent to `out`.
+    #[cfg(unix)]
+    fn recording_sidecar(out: &std::path::Path, generation: u64) -> super::Sidecar {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("cat > '{}'", out.display()))
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        super::Sidecar {
+            child,
+            stdin,
+            next_id: 7,
+            router: Default::default(),
+            generation,
+        }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_text(path: &std::path::Path, want: &str) -> String {
+        for _ in 0..200 {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            if text.contains(want) {
+                return text;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    // A call let go of after it was written reaches the sidecar as a cancel naming the
+    // request id it went as, so the work stops there and not only its answer is dropped.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancel_after_sending_reaches_the_sidecar() {
+        let dir = std::env::temp_dir().join(format!("pfp-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("lines");
+        let shared = super::SidecarGate::new();
+        *shared.sidecar.lock().unwrap() = Some(recording_sidecar(&out, 3));
+        let (request, _rx) = {
+            let mut guard = shared.sidecar.lock().unwrap();
+            super::send_request(guard.as_mut().unwrap(), "getPreview", serde_json::json!({})).unwrap()
+        };
+        shared.track(42);
+        shared.sent.lock().unwrap().insert(42, (3, request));
+        shared.abandon(42);
+        let text = wait_for_text(&out, "cancel");
+        assert!(text.contains(&format!("{{\"cancel\":{request}}}")), "{text}");
+        // A call that was never sent, or has answered, sends nothing.
+        shared.sent.lock().unwrap().remove(&42);
+        shared.track(43);
+        shared.abandon(43);
+        thread::sleep(Duration::from_millis(50));
+        let after = std::fs::read_to_string(&out).unwrap_or_default();
+        assert_eq!(after.matches("cancel").count(), 1, "{after}");
+        // Nor to a sidecar replaced since: the cancel names a request of the old one.
+        shared.track(44);
+        shared.sent.lock().unwrap().insert(44, (2, 99));
+        shared.abandon(44);
+        thread::sleep(Duration::from_millis(50));
+        assert!(!std::fs::read_to_string(&out).unwrap_or_default().contains("99"));
+        drop(shared);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
