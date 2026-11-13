@@ -2155,7 +2155,9 @@ export class ProtonSession {
    */
   async warmThumbnails(uids: string[]): Promise<{ ready: number }> {
     const rows = await this.getThumbnails(uids, THUMBNAIL_WARM_PER_CALL);
-    return { ready: rows.length };
+    // Only what is now cached: a fetch that failed, or a uid this call did not get to, is
+    // not ready, so the window asks for it again rather than counting it warm.
+    return { ready: rows.filter((r) => r.dataUrl !== null).length };
   }
 
   /** HD preview (Type2 thumbnail) for the image viewer / lightbox. */
