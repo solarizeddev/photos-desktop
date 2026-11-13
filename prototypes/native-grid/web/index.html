@@ -1,0 +1,35 @@
+<!doctype html>
+<html data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <title>native-grid: WebKitGTK baseline</title>
+    <script>
+      // The app talks to its host through Tauri's invoke. Here the page is on its own, so the
+      // few calls the grid makes are answered in place: where the thumbnail server is (this
+      // page's own server), and each tile's media type, a batch at a time after a short wait
+      // as the sidecar would. Everything else the grid does is the app's own code.
+      window.__TAURI_INTERNALS__ = {
+        invoke: async (cmd, args) => {
+          if (cmd !== "rpc") return null;
+          if (args.method === "thumbServer") return { ok: true, result: { base: location.origin + "/t/tok/" } };
+          if (args.method === "getMediaTypes") {
+            await new Promise((r) => setTimeout(r, 15));
+            return { ok: true, result: args.params.uids.map((uid) => ({ uid, mediaType: "image/jpeg" })) };
+          }
+          return { ok: true, result: [] };
+        },
+        transformCallback: () => 0,
+      };
+    </script>
+    <style>
+      html, body, #root { margin: 0; height: 100%; background: #111; overflow: hidden; }
+      /* The app's own .g-scroll rules apply (side padding, the scroll bar's gutter); this only
+         gives it the window's height, which the app's layout around it would. */
+      .g-scroll { height: 100vh; box-sizing: border-box; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

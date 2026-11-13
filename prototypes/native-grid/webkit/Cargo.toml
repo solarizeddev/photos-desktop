@@ -1,0 +1,12 @@
+[package]
+name = "ng-webkit"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# The versions the app itself is locked to (app/src-tauri/Cargo.lock, through wry).
+[dependencies]
+ng-common = { path = "../common" }
+gtk = "0.18"
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
+serde_json = "1"
