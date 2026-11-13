@@ -190,7 +190,9 @@ fn classified(method: &str) -> Option<Priority> {
         // trashed photo: tens of seconds on a large trash, which on the foreground lane
         // held up every call the window made behind it. Opening Trash reads it as
         // `listTrashed`, in the foreground, and the sidecar shares the one read.
-        | "listTrashedAhead" => Priority::Background,
+        | "listTrashedAhead"
+        // Whether the drive's listing can take the window's timeline yet: a flag, instant.
+        | "mountTimelineReady" => Priority::Background,
 
         // What a page on screen is drawing: its thumbnails and its lists. These fall
         // through to `UserAction` below, named here so no one moves them back under the
@@ -1703,6 +1705,7 @@ fn host_only(method: &str) -> bool {
                 | "cancelHydrate"
                 | "readOriginalBytes"
                 | "listForMount"
+                | "mountTimelineReady"
                 | "listAlbumsForMount"
                 | "listExtrasForMount"
                 | "startDropUpload"
