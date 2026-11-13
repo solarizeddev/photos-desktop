@@ -131,9 +131,18 @@ export class TrashListing {
     private now: () => number = Date.now,
   ) {}
 
-  get(load: () => Promise<TrashItem[]>): Promise<TrashItem[]> {
+  /**
+   * The trash: a read under way is joined, and a finished one is taken while it is fresh,
+   * unless `joinOnly`, for a caller that promises the trash as it is now (the Trash view on
+   * arrival): it shares a read still running but never takes a finished one.
+   */
+  get(load: () => Promise<TrashItem[]>, joinOnly = false): Promise<TrashItem[]> {
     const read = this.read;
-    if (read && read.generation === this.generation && (read.at === null || this.now() - read.at < this.freshMs)) {
+    const usable =
+      read &&
+      read.generation === this.generation &&
+      (read.at === null || (!joinOnly && this.now() - read.at < this.freshMs));
+    if (usable) {
       return read.rows;
     }
     const mine: { rows: Promise<TrashItem[]>; generation: number; at: number | null } = {

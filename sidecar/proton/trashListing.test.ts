@@ -61,6 +61,20 @@ describe("the shared trash listing", () => {
     await Promise.all([before, after]);
   });
 
+  it("lets a caller that wants the trash as it is now join a read but not take a finished one", async () => {
+    const listing = new TrashListing();
+    const src = counting();
+    const running = listing.get(src.load);
+    const joined = listing.get(src.load, true);
+    src.finish();
+    await Promise.all([running, joined]);
+    expect(src.reads()).toBe(1);
+    const fresh = listing.get(src.load, true);
+    src.finish();
+    await fresh;
+    expect(src.reads()).toBe(2);
+  });
+
   it("does not keep a failed read", async () => {
     const listing = new TrashListing();
     await expect(listing.get(() => Promise.reject(new Error("network")))).rejects.toThrow("network");

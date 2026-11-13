@@ -1241,7 +1241,7 @@ fn deadline_for(method: &str) -> Duration {
         // making steady progress. Each walk is stopped inside the sidecar as soon as
         // the SDK goes a minute without an answer, so a long ceiling here never lets a
         // stuck one hang; a short one would throw away the signed-in session mid-walk.
-        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" => TRANSFER,
+        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" | "listTrashedAhead" => TRANSFER,
         // The people and labels the phone saved to Drive: whole files, read over the network.
         "getDriveCollections" | "sharedBackupLoad" => TRANSFER,
         _ => REPLY,
@@ -3685,6 +3685,8 @@ mod log_tests {
         // The whole-library sweeps come in by priority tier, not by a second list.
         assert_eq!(priority_for("listForMount"), Priority::Enumerate);
         assert_eq!(deadline_for("listForMount"), long);
+        assert_eq!(deadline_for("listTrashed"), long, "a large trash must not cost the session");
+        assert_eq!(deadline_for("listTrashedAhead"), long, "nor the same walk read ahead");
         assert!(deadline_for("getPreview") < long);
         assert!(deadline_for("aMethodAddedLater") < long, "an unknown method waits the short one");
     }

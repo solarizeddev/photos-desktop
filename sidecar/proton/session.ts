@@ -3046,10 +3046,15 @@ export class ProtonSession {
 
   // ---- Trash (SDK: iterateTrashedNodeUids / restoreNodes / deleteNodes / emptyTrash) ----
 
-  async listTrashed(): Promise<TrashItem[]> {
+  /**
+   * The trash. `ahead` is the window reading it before Trash is opened, which may take a
+   * read a few seconds old; without it the read is the trash as it is now (one still under
+   * way is shared, as it started after anything this app changed).
+   */
+  async listTrashed(ahead = false): Promise<TrashItem[]> {
     if (!this.photos) throw new Error("Not signed in");
     const photos = this.photos;
-    return this.trash.get(() => readTrash(photos));
+    return this.trash.get(() => readTrash(photos), !ahead);
   }
 
   async restorePhotos(uids: string[]): Promise<TrashResult[]> {
