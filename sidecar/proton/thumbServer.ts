@@ -41,6 +41,7 @@
 
 import { createServer, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { parseFaceBox, type FaceBox } from "./faceCover.ts";
 
 /**
  * The bytes of one grid thumbnail, or null when there is none to give. `gone` fires when
@@ -49,6 +50,9 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
  */
 export type ThumbnailSource = (uid: string, gone: AbortSignal) => Promise<Buffer | null>;
 
+/** A person's cover cut to the face in `box`, for `/t/<token>/<uid>/f/<l,t,r,b>`. */
+export type FaceSource = (uid: string, box: FaceBox, gone: AbortSignal) => Promise<Buffer | null>;
+
 /** A node uid: base64url halves joined by a tilde. Anything else is refused unread. */
 const UID_SHAPE = /^[A-Za-z0-9_=~-]{1,256}$/;
 
@@ -56,13 +60,15 @@ let server: Server | null = null;
 let port = 0;
 let token: Buffer | null = null;
 let source: ThumbnailSource | null = null;
+let faces: FaceSource | null = null;
 
 /**
  * Starts serving (or keeps serving) and mints a fresh token, so a URL from before the
  * last lock is dead. Returns the base the window appends a uid to.
  */
-export async function startThumbServer(from: ThumbnailSource): Promise<string> {
+export async function startThumbServer(from: ThumbnailSource, faceFrom?: FaceSource): Promise<string> {
   source = from;
+  faces = faceFrom ?? null;
   token = randomBytes(32);
   if (!server) {
     const created = createServer((req, res) => void handle(req, res));
@@ -81,6 +87,7 @@ export async function startThumbServer(from: ThumbnailSource): Promise<string> {
 export async function stopThumbServer(): Promise<void> {
   token = null;
   source = null;
+  faces = null;
   const running = server;
   server = null;
   port = 0;
@@ -98,9 +105,10 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
   if (req.method !== "GET") return refuse(405);
   if (req.headers.host !== `127.0.0.1:${port}`) return refuse(403);
 
-  // `/t/<token>/<uid>`, nothing else.
+  // `/t/<token>/<uid>`, or `/t/<token>/<uid>/f/<l,t,r,b>` for a cover cut to a face.
   const parts = (req.url ?? "").split("?")[0].split("/");
-  if (parts.length !== 4 || parts[0] !== "" || parts[1] !== "t") return refuse(404);
+  const face = parts.length === 6 && parts[4] === "f";
+  if ((parts.length !== 4 && !face) || parts[0] !== "" || parts[1] !== "t") return refuse(404);
   const given = Buffer.from(parts[2], "base64url");
   const current = token;
   if (!current || given.length !== current.length || !timingSafeEqual(given, current)) {
@@ -113,13 +121,15 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
     return refuse(400);
   }
   if (!UID_SHAPE.test(uid) || !source) return refuse(404);
+  const box = face ? parseFaceBox(parts[5]) : null;
+  if (face && (!box || !faces)) return refuse(404);
 
   const gone = new AbortController();
   res.on("close", () => {
     if (!res.writableFinished) gone.abort();
   });
   try {
-    const bytes = await source(uid, gone.signal);
+    const bytes = box && faces ? await faces(uid, box, gone.signal) : await source(uid, gone.signal);
     if (gone.signal.aborted) return;
     if (!bytes) return refuse(404);
     res.writeHead(200, {

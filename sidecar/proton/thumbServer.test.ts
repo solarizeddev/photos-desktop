@@ -121,6 +121,36 @@ describe("the loopback thumbnail server", () => {
     await vi.waitFor(() => expect(seen!.aborted).toBe(true));
   });
 
+  it("serves a cover cut to a face, with the same token and no-store", async () => {
+    const CUT = Buffer.from([0xff, 0xd8, 9, 9]);
+    const asked: unknown[] = [];
+    const base = await startThumbServer(source, async (uid, box) => {
+      asked.push([uid, box]);
+      return CUT;
+    });
+
+    const res = await get(base + encodeURIComponent(UID) + "/f/0.1,0.2,0.3,0.4");
+
+    expect(res.status).toBe(200);
+    expect(res.body.equals(CUT)).toBe(true);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(asked).toEqual([[UID, [0.1, 0.2, 0.3, 0.4]]]);
+  });
+
+  it("refuses a face cover with a bad box, a wrong token, or no face source", async () => {
+    const faces = async () => Buffer.from([1]);
+    const base = await startThumbServer(source, faces);
+    const wrong = base.replace(/\/t\/[^/]+\//, `/t/${Buffer.alloc(32, 7).toString("base64url")}/`);
+
+    expect((await get(base + encodeURIComponent(UID) + "/f/0.5,0.2,0.3,0.4")).status).toBe(404);
+    expect((await get(base + encodeURIComponent(UID) + "/f/x")).status).toBe(404);
+    expect((await get(base + encodeURIComponent(UID) + "/g/0.1,0.2,0.3,0.4")).status).toBe(404);
+    expect((await get(wrong + encodeURIComponent(UID) + "/f/0.1,0.2,0.3,0.4")).status).toBe(403);
+
+    const plain = await startThumbServer(source);
+    expect((await get(plain + encodeURIComponent(UID) + "/f/0.1,0.2,0.3,0.4")).status).toBe(404);
+  });
+
   it("stops answering at lock", async () => {
     const base = await startThumbServer(source);
     await stopThumbServer();
