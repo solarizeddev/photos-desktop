@@ -455,6 +455,42 @@ describe("a video read range by range from Proton", () => {
     expect(reads).toBeLessThan(10);
   });
 
+  it("reads nothing for a place the player left while it waited, and serves the newest first", async () => {
+    const { stream, log } = seekable(64 * MB);
+    const video = new SeekingVideo(64 * MB, "video/mp4", stream, () => {});
+    const first = collect(video.read(0, 100, new AbortController().signal));
+    // Two places asked for while the one stream is busy; the player leaves the first.
+    const left = new AbortController();
+    const skipped = collect(video.read(40 * MB, 40 * MB + 10, left.signal));
+    const wanted = collect(video.read(52 * MB, 52 * MB + 10, new AbortController().signal));
+    left.abort();
+    expect((await skipped).length).toBe(0);
+    expect((await wanted)[0]).toBe((52 * MB) & 0xff);
+    await first;
+    expect(log.seeks).not.toContain(40 * MB);
+    video.close();
+  });
+
+  it("serves a live ask whose block the asks before it gave up on", async () => {
+    const { stream } = seekable(64 * MB);
+    const video = new SeekingVideo(64 * MB, "video/mp4", stream, () => {});
+    const busy = collect(video.read(0, 100, new AbortController().signal));
+    const leaving = [new AbortController(), new AbortController(), new AbortController()];
+    const gaveUp = leaving.map((c, i) => collect(video.read(40 * MB + i * 1000, 40 * MB + i * 1000 + 10, c.signal)));
+    const live = collect(video.read(40 * MB + 5000, 40 * MB + 5010, new AbortController().signal));
+    for (const c of leaving) {
+      c.abort();
+      await new Promise((r) => setTimeout(r, 2));
+    }
+    await Promise.all(gaveUp);
+    const bytes = await live;
+    expect(bytes.length).toBe(11);
+    expect(bytes[0]).toBe((40 * MB + 5000) & 0xff);
+    await busy;
+    expect(video.broken()).toBe(false);
+    video.close();
+  });
+
   it("lets a lane added after it closed go at once", () => {
     const video = new SeekingVideo(20 * MB, "video/mp4", seekable(20 * MB).stream, () => {});
     video.close();

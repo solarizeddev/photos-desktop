@@ -45,6 +45,7 @@ import { createServer, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { parseFaceBox, type FaceBox } from "./faceCover.ts";
 import { parseRange, type VideoSource } from "./videoStream.ts";
+import { diag } from "./diag.ts";
 import { thumbWidthFor } from "./thumbSizes.ts";
 
 /**
@@ -288,6 +289,8 @@ async function serveVideo(
   if (!video || video.size <= 0) return refuse(404);
   const range = parseRange(req.headers.range, video.size);
   if (range === "unsatisfiable") {
+    const asked = /^bytes=(\d+)/.exec(String(req.headers.range ?? ""));
+    diag.log("drive", "video_range_refused", { size: video.size, from: asked ? Number(asked[1]) : -1 });
     res.writeHead(416, { "Content-Range": `bytes */${video.size}`, "Cache-Control": "no-store" });
     res.end();
     return;
@@ -328,10 +331,13 @@ async function serveVideo(
     // Fewer bytes than were promised: ending the answer normally would leave the player
     // waiting for the rest for ever. Cutting the connection makes it give up, and the
     // viewer falls back.
-    if (sent < length) res.destroy();
-    else res.end();
+    if (sent < length) {
+      diag.log("drive", "video_cut", { start, sent, length });
+      res.destroy();
+    } else res.end();
   } catch {
     // The headers are out: all that can be said now is that the answer stops short.
+    diag.log("drive", "video_cut", { start, sent, length, failed: 1 });
     res.destroy();
   }
 }
