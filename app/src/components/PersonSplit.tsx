@@ -99,6 +99,12 @@ export function PersonSplit({
   const [applied, setApplied] = useState<Applied | null>(null);
   const [busy, setBusy] = useState(false);
   const [reviewed, setReviewed] = useState<Set<string>>(new Set());
+  // The faces shown to answer stay where they are while answered: each answer works the split
+  // out again, and lists that followed it moved the faces under the pointer. A page of the
+  // review, and the preview's least-sure faces, change only when asked for.
+  const [reviewPage, setReviewPage] = useState<Plan["unsure"] | null>(null);
+  const [strips, setStrips] = useState<{ a: SplitFace[]; b: SplitFace[] } | null>(null);
+  const stripsTouched = useRef(false);
   // Whether the faces another device named as the other person count as examples of them.
   const [useElsewhere, setUseElsewhere] = useState<boolean | null>(null);
 
@@ -170,7 +176,8 @@ export function PersonSplit({
           setPlanning(false);
         },
         (e) => {
-          if (planned.current !== ticket) return;
+          // A preview given up for a newer one is not an error: the newer one answers.
+          if (planned.current !== ticket || String(e).includes("superseded")) return;
           setError(String(e));
           setPlanning(false);
         },
@@ -181,6 +188,29 @@ export function PersonSplit({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, picksKey, personId, otherName]);
 
+  // The preview's least-sure faces follow the split until one of them is clicked; then they
+  // stay until "show others".
+  useEffect(() => {
+    if (plan && (!strips || !stripsTouched.current)) setStrips({ a: plan.leastSureA, b: plan.leastSureB });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plan]);
+
+  /** The next page of unsure faces to answer: neither answered nor skipped, nor on this page. */
+  const nextReviewPage = () => {
+    if (!plan) return [];
+    const onPage = new Set((reviewPage ?? []).map((f) => f.faceId));
+    return plan.unsure.filter((f) => !picks.has(f.faceId) && !reviewed.has(f.faceId) && !onPage.has(f.faceId)).slice(0, REVIEW_PAGE);
+  };
+  useEffect(() => {
+    // Back in the preview from elsewhere, its least-sure faces follow the split again.
+    if (step !== "preview") stripsTouched.current = false;
+    else if (plan) setStrips({ a: plan.leastSureA, b: plan.leastSureB });
+    if (step !== "review") setReviewPage(null);
+    else if (reviewPage === null && plan) setReviewPage(nextReviewPage());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, plan]);
+
+  // Pictures for exactly the faces on screen, and the review's next page ahead of time.
   const shown = useMemo(() => {
     const faces: SplitFace[] = [];
     if (start) {
@@ -188,9 +218,14 @@ export function PersonSplit({
       faces.push(...start.contrast);
       for (const e of start.elsewhere) faces.push(...e.sample);
     }
-    if (plan) faces.push(...plan.leastSureA, ...plan.leastSureB, ...plan.unsure.slice(0, REVIEW_PAGE * 3));
+    if (reviewPage) faces.push(...reviewPage);
+    if (strips && step === "preview") faces.push(...strips.a, ...strips.b);
+    if (plan && step === "review") {
+      const onPage = new Set((reviewPage ?? []).map((f) => f.faceId));
+      faces.push(...plan.unsure.filter((f) => !onPage.has(f.faceId) && !picks.has(f.faceId) && !reviewed.has(f.faceId)).slice(0, REVIEW_PAGE));
+    }
     return faces;
-  }, [start, plan]);
+  }, [start, strips, reviewPage, plan, step, picks, reviewed]);
   const thumbs = useThumbnails(useMemo(() => [...new Set(shown.map((f) => f.uid))], [shown]));
 
   const choose = (faceId: string, side: Side | null) =>
@@ -263,7 +298,15 @@ export function PersonSplit({
     </span>
   );
 
+  // Said whenever the split is being worked out again, so a wait never looks like nothing.
+  const working = (
+    <span className={`ps-working${planning ? " on" : ""}`} role="status" aria-live="polite">
+      {planning ? t("faces.split.working") : ""}
+    </span>
+  );
+
   const unsureLeft = plan ? plan.unsure.filter((f) => !picks.has(f.faceId) && !reviewed.has(f.faceId)) : [];
+  const pageAnswered = (reviewPage ?? []).every((f) => picks.has(f.faceId) || reviewed.has(f.faceId));
 
   return (
     // Closed by a press on the backdrop itself, not by a click: a click that began in a field
@@ -423,6 +466,7 @@ export function PersonSplit({
 
         {step === "preview" && (
           <div className="ps-body">
+            {plan && working}
             {!plan ? (
               <p className="cf-msg">{t("faces.split.planning")}</p>
             ) : (
@@ -475,8 +519,18 @@ export function PersonSplit({
                   <section className="ps-section">
                     <h4 className="ps-h a">{t("faces.split.leastSure", { name: here })}</h4>
                     <div className="ps-strip wrap">
-                      {plan.leastSureA.map((f) => (
-                        <button key={f.faceId} className="ps-move" title={t("faces.split.moveTo", { name: otherName })} aria-label={t("faces.split.moveTo", { name: otherName })} onClick={() => choose(f.faceId, "b")}>
+                      {(strips?.a ?? []).map((f) => (
+                        <button
+                          key={f.faceId}
+                          className="ps-move"
+                          title={t("faces.split.moveTo", { name: otherName })}
+                          aria-label={t("faces.split.moveTo", { name: otherName })}
+                          disabled={planning && !stripsTouched.current}
+                          onClick={() => {
+                            stripsTouched.current = true;
+                            choose(f.faceId, picks.get(f.faceId) === "b" ? null : "b");
+                          }}
+                        >
                           {face(f, picks.get(f.faceId) ?? "a")}
                         </button>
                       ))}
@@ -485,15 +539,37 @@ export function PersonSplit({
                   <section className="ps-section">
                     <h4 className="ps-h b">{t("faces.split.leastSure", { name: otherName })}</h4>
                     <div className="ps-strip wrap">
-                      {plan.leastSureB.map((f) => (
-                        <button key={f.faceId} className="ps-move" title={t("faces.split.moveTo", { name: here })} aria-label={t("faces.split.moveTo", { name: here })} onClick={() => choose(f.faceId, "a")}>
+                      {(strips?.b ?? []).map((f) => (
+                        <button
+                          key={f.faceId}
+                          className="ps-move"
+                          title={t("faces.split.moveTo", { name: here })}
+                          aria-label={t("faces.split.moveTo", { name: here })}
+                          disabled={planning && !stripsTouched.current}
+                          onClick={() => {
+                            stripsTouched.current = true;
+                            choose(f.faceId, picks.get(f.faceId) === "a" ? null : "a");
+                          }}
+                        >
                           {face(f, picks.get(f.faceId) ?? "b")}
                         </button>
                       ))}
                     </div>
                   </section>
                 </div>
-                <p className="ps-note">{t("faces.split.wrongOne")}</p>
+                <p className="ps-note">
+                  {t("faces.split.wrongOne")}{" "}
+                  <button
+                    className="ps-skip"
+                    disabled={planning}
+                    onClick={() => {
+                      stripsTouched.current = false;
+                      setStrips({ a: plan.leastSureA, b: plan.leastSureB });
+                    }}
+                  >
+                    {t("faces.split.otherFaces")}
+                  </button>
+                </p>
               </>
             )}
             <div className="ps-actions">
@@ -514,11 +590,16 @@ export function PersonSplit({
 
         {step === "review" && plan && (
           <div className="ps-body">
-            <h4 className="ps-h">{t("faces.split.reviewTitle")}</h4>
+            <h4 className="ps-h">
+              {t("faces.split.reviewTitle")} {working}
+            </h4>
             <p className="ps-note">{t("faces.split.reviewHint")}</p>
             <div className="ps-grid">
-              {unsureLeft.slice(0, REVIEW_PAGE).map((f) => (
-                <div key={f.faceId} className="ps-cell">
+              {(reviewPage ?? []).map((f) => (
+                <div
+                  key={f.faceId}
+                  className={`ps-cell${picks.get(f.faceId) ? ` ${picks.get(f.faceId)}` : ""}${reviewed.has(f.faceId) ? " skipped" : ""}`}
+                >
                   {face(f)}
                   {f.year && <span className="ps-year">{f.year}</span>}
                   {f.lean !== "none" && (
@@ -527,16 +608,36 @@ export function PersonSplit({
                     </span>
                   )}
                   {sideButtons(f.faceId)}
-                  <button className="ps-skip" onClick={() => setReviewed((r) => new Set(r).add(f.faceId))}>
-                    {t("faces.split.skip")}
+                  <button
+                    className="ps-skip"
+                    aria-pressed={reviewed.has(f.faceId)}
+                    onClick={() =>
+                      setReviewed((r) => {
+                        const next = new Set(r);
+                        if (next.has(f.faceId)) next.delete(f.faceId);
+                        else next.add(f.faceId);
+                        return next;
+                      })
+                    }
+                  >
+                    {t(reviewed.has(f.faceId) ? "faces.split.skipped" : "faces.split.skip")}
                   </button>
                 </div>
               ))}
             </div>
-            {unsureLeft.length === 0 && <p className="cf-msg">{t("faces.split.reviewDone")}</p>}
+            {reviewPage !== null && pageAnswered && unsureLeft.length === 0 && !planning && (
+              <p className="cf-msg">{t("faces.split.reviewDone")}</p>
+            )}
             <div className="ps-actions">
               <button className="cf-btn" onClick={() => setStep("preview")}>
                 {t("faces.split.back")}
+              </button>
+              <button
+                className={`cf-btn${pageAnswered && nextReviewPage().length > 0 ? " primary" : ""}`}
+                disabled={planning || nextReviewPage().length === 0}
+                onClick={() => setReviewPage(nextReviewPage())}
+              >
+                {t("faces.split.nextFaces")}
               </button>
               <button className="cf-btn primary" disabled={planning || busy} onClick={() => void apply()}>
                 {t("faces.split.apply")}

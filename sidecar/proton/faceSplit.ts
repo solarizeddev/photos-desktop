@@ -496,8 +496,28 @@ export async function planSplit(
   otherName: string,
   picked: { a: string[]; b: string[] },
   times: PhotoTimes = NO_TIMES,
+  stale: () => boolean = newPlanTicket(),
 ): Promise<SplitPlan> {
-  return (await label(store, personId, otherName, picked, times)).plan;
+  return (await label(store, personId, otherName, picked, times, stale)).plan;
+}
+
+/** Previews asked for, so an older one still being worked out gives way to the newest. */
+let planTickets = 0;
+
+/**
+ * A preview's place in line: true once a newer one has been asked for, when this one stops at
+ * its next pause. Taken as the request arrives, before anything it waits on.
+ */
+export function newPlanTicket(): () => boolean {
+  const ticket = ++planTickets;
+  return () => planTickets !== ticket;
+}
+
+/** A preview given up for a newer one. */
+export class SplitSuperseded extends Error {
+  constructor() {
+    super("superseded by a newer preview");
+  }
 }
 
 async function label(
@@ -506,6 +526,7 @@ async function label(
   otherName: string,
   picked: { a: string[]; b: string[] },
   times: PhotoTimes,
+  stale?: () => boolean,
 ): Promise<Labelled> {
   const p = store.people;
   const person = personOf(p, personId);
@@ -667,7 +688,15 @@ async function label(
     return got;
   };
   /** Whether the nearest examples agree, or null when there are none of each to ask. */
+  // A face's nearest examples are the same in every round: asked once.
+  const votes = new Map<string, { forA: number; of: number } | null>();
   const nearestAgree = (f: FaceRecord, towardA: boolean): boolean | null => {
+    let vote = votes.get(f.id);
+    if (vote === undefined) votes.set(f.id, (vote = nearestVote(f)));
+    if (!vote) return null;
+    return towardA ? vote.forA * 2 > vote.of : vote.forA * 2 < vote.of;
+  };
+  const nearestVote = (f: FaceRecord): { forA: number; of: number } | null => {
     const { voters, k } = votersAt(yearOfFace.get(f.id)!);
     if (k < 1) return null;
     const best: { s: number; a: boolean }[] = [];
@@ -681,8 +710,7 @@ async function label(
         best.sort((x, y) => x.s - y.s);
       }
     }
-    const forA = best.filter((b) => b.a).length;
-    return towardA ? forA * 2 > best.length : forA * 2 < best.length;
+    return { forA: best.filter((b) => b.a).length, of: best.length };
   };
 
   // Each side refined with the faces that lean clearly its way, in their own year. With dates,
@@ -693,7 +721,15 @@ async function label(
     const now = new Map<string, "a" | "b">();
     let changed = 0;
     keptYears = new Set();
+    let worked = 0;
     for (const [year, list] of restByYear) {
+      // The sidecar answers the window between years: pictures and clicks are not held up.
+      worked += list.length;
+      if (worked > 256) {
+        worked = 0;
+        await yieldNow();
+        if (stale?.()) throw new SplitSuperseded();
+      }
       // A year neither side has sorted faces in yet is sorted as a whole from the year next to
       // it (see `sortYear`); one that has, a face at a time.
       const own =
@@ -735,6 +771,7 @@ async function label(
     sidesNow = { a: sa, b: sb };
     toward = towardMemo(sa, sb);
     await yieldNow();
+    if (stale?.()) throw new SplitSuperseded();
     if (dated && round >= ROUNDS - 1 && settled) break;
   }
 
@@ -764,7 +801,10 @@ async function label(
       sides.set(f.id, m > 0 ? "a" : "b");
       if (far) reached++;
     }
-    if ((++done & 0xff) === 0) await yieldNow();
+    if ((++done & 0xff) === 0) {
+      await yieldNow();
+      if (stale?.()) throw new SplitSuperseded();
+    }
   }
   for (const f of [...aSeeds, ...bSeeds]) margins.set(f.id, margin(f) ?? 0);
 
