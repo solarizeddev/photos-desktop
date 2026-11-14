@@ -3502,7 +3502,67 @@ mod update_leftover_tests {
     }
 }
 
+/// GStreamer's GPU decoders for H.264 and HEVC (VA-API, the older VA-API plugin, NVDEC),
+/// ranked below the software ones (1, not off: still used where there is no software one).
+#[cfg(target_os = "linux")]
+const SOFTWARE_VIDEO_RANKS: &str = "vah264dec:1,vah265dec:1,vaapih264dec:1,vaapih265dec:1,\
+nvh264dec:1,nvh265dec:1,nvh264sldec:1,nvh265sldec:1";
+
+/// The file whose presence turns software video decoding on (Settings, Linux). A plain file
+/// rather than a setting: it is read before the window exists, before the keyring is open.
+const SOFTWARE_VIDEO_FLAG: &str = "video-software-decode";
+
+/// The app's data folder as Tauri resolves it on Linux, worked out before Tauri runs.
+#[cfg(target_os = "linux")]
+fn early_data_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))?;
+    Some(base.join("eu.akoos.photos.desktop"))
+}
+
+/// The ranks to run with: ours, then any the person set themselves, which win.
+#[cfg(target_os = "linux")]
+fn video_ranks(own: Option<&str>) -> String {
+    match own {
+        Some(theirs) if !theirs.trim().is_empty() => format!("{SOFTWARE_VIDEO_RANKS},{theirs}"),
+        _ => SOFTWARE_VIDEO_RANKS.to_string(),
+    }
+}
+
+/// Whether video is decoded in software (Settings).
+#[tauri::command]
+fn video_software_decode(app: AppHandle) -> bool {
+    secure_store::app_dir(&app).map(|d| d.join(SOFTWARE_VIDEO_FLAG).exists()).unwrap_or(false)
+}
+
+/// Turns software video decoding on or off; it takes effect at the next start.
+#[tauri::command]
+fn set_video_software_decode(app: AppHandle, on: bool) -> Result<(), String> {
+    let path = secure_store::app_dir(&app)?.join(SOFTWARE_VIDEO_FLAG);
+    if on {
+        std::fs::write(&path, b"1").map_err(|e| e.to_string())
+    } else {
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+            _ => Ok(()),
+        }
+    }
+}
+
 pub fn run() {
+    // On Linux the window plays video through GStreamer. With some GPUs its hardware decoder
+    // fails to decode at the new place after a seek in 4K phone videos, which software
+    // decoding plays and seeks in. Settings has a switch for that: with it on, the GPU
+    // decoders rank below the software ones. Set before anything starts, so the web process
+    // inherits it.
+    #[cfg(target_os = "linux")]
+    if early_data_dir().is_some_and(|d| d.join(SOFTWARE_VIDEO_FLAG).exists()) {
+        let own = std::env::var("GST_PLUGIN_FEATURE_RANK").ok();
+        std::env::set_var("GST_PLUGIN_FEATURE_RANK", video_ranks(own.as_deref()));
+    }
+
     // Keep the WebView2 profile inside the app's own data folder so, on an
     // installed build, everything (session, caches, WebView data) lives under the
     // single install folder and the uninstaller wipes it all together.
@@ -3573,6 +3633,8 @@ pub fn run() {
             scroll_bench,
             bench_note,
             screen_note,
+            video_software_decode,
+            set_video_software_decode,
             launch_at_login,
             set_launch_at_login,
             hide_tray_popup,
@@ -3869,6 +3931,16 @@ mod gate_tests {
             }
         }
         out
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn software_video_ranks_leave_the_persons_own_last() {
+        use super::video_ranks;
+        assert!(video_ranks(None).starts_with("vah264dec:1,"));
+        assert!(!video_ranks(None).contains(' '));
+        assert!(video_ranks(Some("")).ends_with("nvh265sldec:1"));
+        assert!(video_ranks(Some("avdec_h264:0")).ends_with(",avdec_h264:0"));
     }
 
     #[test]
