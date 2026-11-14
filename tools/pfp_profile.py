@@ -37,8 +37,14 @@ Scroll measurement (a build that has it)
      minute (down, back up, a fast fling, a rest). The script goes on when it is done.
   4. Upload the .tar.gz it prints at the end.
 
+People page
+  python3 pfp_profile.py --people
+  opens People, scrolls it, and opens it again: which process (the window, or the sidecar)
+  and which of its threads take the CPU, step by step.
+
 Options
   --app-id ID     Flatpak app id (default eu.akoos.photos)
+  --people        measure only the People page
   --idle SECONDS  length of the final idle step (default 30; 20 with --bench)
   --bench         record the app's own scroll measurement instead of the manual steps
 """
@@ -97,6 +103,27 @@ STEPS = [
      "Search for something by content (for example: beach) and wait for results.\n"
      "   Press Enter when results are shown, or s + Enter to skip."),
 ]
+
+
+def people_steps():
+    """The steps of a --people run: where the People page's time and CPU go."""
+    return [
+        ("launch",
+         "Press Enter, THEN start the app.\n"
+         "   Press Enter again as soon as its window shows anything (lock screen or photos)."),
+        ("unlock_to_ready",
+         "Unlock / sign in if asked, and wait until the timeline is filled with thumbnails.\n"
+         "   Press Enter when the first screen of photos is fully drawn."),
+        ("people_open",
+         "Open Albums > People and wait, without scrolling, until every face circle\n"
+         "   on screen is drawn. Press Enter then."),
+        ("people_scroll",
+         "Scroll slowly down through the whole page (people and 'Sin agrupar') to the end,\n"
+         "   then back to the top. Press Enter when done."),
+        ("people_again",
+         "Go to Photos, then back to People, and wait until the circles on screen are drawn.\n"
+         "   Press Enter then."),
+    ]
 
 
 def bench_steps(app_id):
@@ -456,13 +483,15 @@ def main():
                     help="ask about the library, the build and what feels slow, for the record")
     ap.add_argument("--bench", action="store_true",
                     help="record the app's own scroll measurement (start the app with PFP_SCROLL_BENCH=1)")
+    ap.add_argument("--people", action="store_true",
+                    help="measure only opening and scrolling the People page")
     ap.add_argument("--log", help=argparse.SUPPRESS)         # testing: the app log to read
     ap.add_argument("--match", help=argparse.SUPPRESS)       # testing: match processes by name
     ap.add_argument("--auto", type=int, help=argparse.SUPPRESS)  # testing: seconds per step, no prompts
     args = ap.parse_args()
     if args.idle is None:
         args.idle = 20 if args.bench else 30
-    steps = bench_steps(args.app_id) if args.bench else STEPS
+    steps = bench_steps(args.app_id) if args.bench else people_steps() if args.people else STEPS
 
     if not sys.platform.startswith("linux"):
         sys.exit("This script reads /proc and only works on Linux.")
@@ -479,7 +508,7 @@ def main():
 
     answers = {}
     if not args.auto:
-        print(f"Photos for Proton desktop profiler. About {'3' if args.bench else '10'} minutes. "
+        print(f"Photos for Proton desktop profiler. About {'3' if args.bench or args.people else '10'} minutes. "
               "Nothing personal is recorded.\n")
     # The questions about the library are asked only with --ask: the measurement itself says
     # what they used to, and a run that repeats one before is quicker without them.
