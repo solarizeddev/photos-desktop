@@ -611,6 +611,9 @@ export function LocalPeoplePage({
  * The faces in no group worth naming, each on its own: picked a few at a time and named, put
  * with someone already named, or left out as not a person.
  */
+/** Faces in no group shown at once, and added each time more are asked for. */
+const LOOSE_PAGE = 120;
+
 function LooseFaces({
   loose,
   names,
@@ -624,15 +627,20 @@ function LooseFaces({
 }) {
   const t = useT();
   const [picked, setPicked] = useState<Set<string>>(new Set());
-  const thumbs = useThumbnails(useMemo(() => loose.faces.map((f) => f.uid), [loose]));
-  // Only faces still listed stay picked.
+  // A page at a time: the whole list drawn at once (600 faces) made scrolling People cost
+  // the window most of a core, for faces seldom looked at down there.
+  const [shown, setShown] = useState(LOOSE_PAGE);
+  const faces = useMemo(() => loose.faces.slice(0, shown), [loose, shown]);
+  const thumbs = useThumbnails(useMemo(() => faces.map((f) => f.uid), [faces]));
+  // Only faces still shown stay picked: one pushed below the page by new faces is not named
+  // unseen with the rest.
   useEffect(() => {
     setPicked((p) => {
-      const ids = new Set(loose.faces.map((f) => f.faceId));
+      const ids = new Set(faces.map((f) => f.faceId));
       const kept = [...p].filter((id) => ids.has(id));
       return kept.length === p.size ? p : new Set(kept);
     });
-  }, [loose]);
+  }, [faces]);
   const toggle = (id: string) =>
     setPicked((p) => {
       const next = new Set(p);
@@ -644,8 +652,8 @@ function LooseFaces({
     <section className="lib-section">
       <h2 className="lib-subhead">{t("faces.looseTitle")}</h2>
       <p className="lib-note scan">
-        {loose.total > loose.faces.length
-          ? t("faces.looseMore", { shown: loose.faces.length, total: loose.total })
+        {loose.total > faces.length
+          ? t("faces.looseMore", { shown: faces.length, total: loose.total })
           : t("faces.looseHint")}
       </p>
       {picked.size > 0 && (
@@ -666,7 +674,7 @@ function LooseFaces({
         </div>
       )}
       <div className="lib-loosegrid">
-        {loose.faces.map((f) => (
+        {faces.map((f) => (
           <button
             key={f.faceId}
             className={`lib-findcell${picked.has(f.faceId) ? " selected" : ""}`}
@@ -684,6 +692,11 @@ function LooseFaces({
           </button>
         ))}
       </div>
+      {loose.faces.length > shown && (
+        <button className="lib-seemore" onClick={() => setShown((n) => n + LOOSE_PAGE)}>
+          {t("faces.looseShowMore", { count: Math.min(LOOSE_PAGE, loose.faces.length - shown) })}
+        </button>
+      )}
     </section>
   );
 }
