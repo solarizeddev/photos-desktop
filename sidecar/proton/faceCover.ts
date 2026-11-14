@@ -57,6 +57,9 @@ const AT_ONCE = 2;
  */
 const THUMB_ENOUGH = 0.8;
 
+/** How many covers are cut from thumbnails at once: each is quick, but a page asks for hundreds. */
+const THUMB_AT_ONCE = 3;
+
 /** Where cut covers are kept between runs (sealed, as the thumbnails are). */
 export type CoverDisk = { get(key: string): Buffer | null; put(key: string, cut: Buffer): void };
 
@@ -237,13 +240,51 @@ export class FaceCovers {
     if (!this.more.thumbnail || side >= COVER_SIZE) return null;
     const bytes = await this.more.thumbnail(uid, gone);
     if (!bytes || gone.aborted) return null;
-    const meta = await sharp(bytes, { failOn: "none" }).metadata();
-    if (!meta.width || !meta.height) return null;
-    const turned = (meta.orientation ?? 1) >= 5;
-    const { size } = faceSquare(box, turned ? meta.height : meta.width, turned ? meta.width : meta.height);
-    if (size < side * THUMB_ENOUGH) return null;
-    return cutFace(bytes, box, side);
+    // A few at a time, in order, so a page of faces does not take every core at once.
+    if (!(await this.thumbSlot(gone))) return null;
+    try {
+      const meta = await sharp(bytes, { failOn: "none" }).metadata();
+      if (!meta.width || !meta.height) return null;
+      const turned = (meta.orientation ?? 1) >= 5;
+      const { size } = faceSquare(box, turned ? meta.height : meta.width, turned ? meta.width : meta.height);
+      if (size < side * THUMB_ENOUGH) return null;
+      return await cutFace(bytes, box, side);
+    } finally {
+      this.thumbFree();
+    }
   }
+
+  /** A turn at cutting from a thumbnail: false if the ask is given up while it waits. */
+  private thumbSlot(gone: AbortSignal): Promise<boolean> {
+    if (gone.aborted) return Promise.resolve(false);
+    if (this.thumbBusy < THUMB_AT_ONCE) {
+      this.thumbBusy++;
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      const waiter = { resolve };
+      this.thumbLine.push(waiter);
+      gone.addEventListener(
+        "abort",
+        () => {
+          const at = this.thumbLine.indexOf(waiter);
+          if (at < 0) return;
+          this.thumbLine.splice(at, 1);
+          resolve(false);
+        },
+        { once: true },
+      );
+    });
+  }
+
+  /** Hands the turn straight to the next in line, or frees it. */
+  private thumbFree(): void {
+    const next = this.thumbLine.shift();
+    if (next) next.resolve(true);
+    else this.thumbBusy--;
+  }
+  private thumbBusy = 0;
+  private thumbLine: { resolve: (go: boolean) => void }[] = [];
 
   /** Forget every cut cover: at lock, so nothing decrypted outlives the session. */
   clear(): void {

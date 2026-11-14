@@ -20,7 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { CheckIcon, ChevronRightIcon } from "./icons";
 import { FaceNamer } from "./FaceNamer";
@@ -93,6 +93,65 @@ const FACE_ZOOM_OUT = 1.4;
 /** The least, near an edge: as the thumbnail server's FACE_ZOOM_OUT_MIN. */
 const FACE_ZOOM_OUT_MIN = 1.2;
 
+/**
+ * Calls `onNear` once `el` comes within a screen of the view, through one observer for each
+ * scrolling area (shared by every face in it); returns the way to stop watching. Watched
+ * against the area that scrolls, not the window: a margin around the window does not reach
+ * past a scrolling area's edge, which clips what is in it.
+ */
+const nearWatch = new Map<Element, () => void>();
+const nearObservers = new Map<Element | null, { observer: IntersectionObserver; watched: number }>();
+function scrollingAreaOf(el: Element): Element | null {
+  for (let at = el.parentElement; at; at = at.parentElement) {
+    const { overflowY } = getComputedStyle(at);
+    if (overflowY === "auto" || overflowY === "scroll") return at;
+  }
+  return null;
+}
+function whenNear(el: Element, onNear: () => void): () => void {
+  if (typeof IntersectionObserver === "undefined") {
+    onNear();
+    return () => {};
+  }
+  const root = scrollingAreaOf(el);
+  let area = nearObservers.get(root);
+  if (!area) {
+    const made: { observer: IntersectionObserver; watched: number } = {
+      observer: new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            const call = nearWatch.get(entry.target);
+            if (call) stop(entry.target);
+            call?.();
+          }
+        },
+        { root, rootMargin: "100% 0px" },
+      ),
+      watched: 0,
+    };
+    nearObservers.set(root, made);
+    area = made;
+  }
+  const watching = area;
+  // Stops watching `target`; an area with nothing left to watch lets its observer go.
+  function stop(target: Element) {
+    if (!nearWatch.delete(target)) return;
+    watching.observer.unobserve(target);
+    if (--watching.watched === 0 && nearObservers.get(root) === watching) {
+      watching.observer.disconnect();
+      nearObservers.delete(root);
+    }
+  }
+  nearWatch.set(el, onNear);
+  watching.watched++;
+  watching.observer.observe(el);
+  return () => stop(el);
+}
+
+/** How long a face's cut may take before the grid thumbnail stands in for it. */
+const STAND_IN_AFTER_MS = 350;
+
 /** A person's cover cut to their face: a square FACE_ZOOM_OUT times the face. */
 export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box: FaceBox | null }) {
   // A face is a small part of its photo, so the grid thumbnail blurs when cut down to it.
@@ -100,41 +159,52 @@ export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box
   // the window decodes a small square rather than a 1920 px preview per person, and a
   // cover off screen is never asked for (the image loads lazily).
   const base = useThumbServerBase();
-  // The circle's size on screen, so a small one is cut small (from the grid thumbnail): it is
-  // measured once, from the box it fills.
+  // The circle's size on screen, so a small one is cut small (from the grid thumbnail), and
+  // whether it is near the screen at all: a circle far off asks for nothing, so a page of
+  // hundreds of faces costs what is in view.
   const [px, setPx] = useState<number | null>(null);
-  const measure = useCallback((el: HTMLSpanElement | null) => {
+  const [near, setNear] = useState(false);
+  const probe = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    const el = probe.current;
     const frame = el?.parentElement;
-    if (!frame) return;
+    if (!el || !frame) return;
     const side = Math.max(frame.clientWidth, frame.clientHeight);
     // Not laid out (hidden as it mounted): the largest cut, as before sizes were asked.
     setPx(side > 0 ? Math.ceil(side * (window.devicePixelRatio || 1)) : 1e6);
+    return whenNear(el, () => setNear(true));
   }, []);
   const cut = base && box && px ? faceCoverUrl(base, uid, box, px) : null;
   const [cutFailed, setCutFailed] = useState<string | null>(null);
   const [cutShown, setCutShown] = useState<string | null>(null);
-  // The same three places every time, so measuring or the cut arriving never remounts the
-  // stand-in under it: the grid thumbnail cut to the face, the sharp cut, and the probe.
-  const usable = cut && cutFailed !== cut ? cut : null;
+  const usable = near && cut && cutFailed !== cut ? cut : null;
   const ready = !!usable && cutShown === usable;
+  // The stand-in (the grid thumbnail cut to the face in the window) only for a cut that is
+  // slow to come, or that cannot be had: one kept from before arrives at once.
+  const [late, setLate] = useState<string | null>(null);
+  useEffect(() => {
+    if (!usable || ready) return;
+    const timer = setTimeout(() => setLate(usable), STAND_IN_AFTER_MS);
+    return () => clearTimeout(timer);
+  }, [usable, ready]);
+  const noCut = !box || (!!base && !!cut && cutFailed === cut) || base === null;
+  const standIn = near && (noCut || (!ready && late === usable));
+  // The same three places every time, so nothing under the cut is remounted as it arrives.
   return (
     <>
-      {!ready && <ThumbFaceCover key="thumb" thumb={thumb} box={box} />}
+      {standIn && <ThumbFaceCover key="thumb" thumb={thumb} box={box} />}
       {usable && (
         <img
           key="cut"
           src={usable}
           alt=""
           draggable={false}
-          loading="lazy"
           style={ready ? undefined : { opacity: 0 }}
           onLoad={() => setCutShown(usable)}
           onError={() => setCutFailed(usable)}
         />
       )}
-      {px === null && (
-        <span key="probe" ref={measure} aria-hidden style={{ position: "absolute", inset: 0, pointerEvents: "none" }} />
-      )}
+      <span key="probe" ref={probe} aria-hidden style={{ position: "absolute", inset: 0, pointerEvents: "none" }} />
     </>
   );
 }
