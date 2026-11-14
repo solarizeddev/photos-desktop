@@ -62,6 +62,11 @@ export function zoomCentre(c0: Xy, c1: Xy, scale: number): (s: number) => Xy {
 /** The parts of Leaflet 1.9.4's map this takes over or calls. */
 type Inner = L.Map & {
   _zoom: number;
+  /** Leaflet's own "a zoom is under way": its tile layers then wait for the zoom's end before
+   * fetching for the view of the moment, and size their fetch for the zoom it goes to. */
+  _animatingZoom?: boolean;
+  _animateToZoom?: number;
+  _animateToCenter?: L.LatLng;
   _move(center: L.LatLng, zoom: number, data?: object): unknown;
   _moveStart(zoomChanged: boolean, noMoveStart: boolean): unknown;
   _moveEnd(zoomChanged: boolean): unknown;
@@ -70,6 +75,22 @@ type Inner = L.Map & {
   _limitZoom(zoom: number): number;
   _tryAnimatedZoom(center: L.LatLng, zoom: number, options?: L.ZoomOptions & { noMoveStart?: boolean }): boolean;
 };
+
+/** The parts of a Leaflet 1.9.4 tile layer the zoom steers. */
+type Tiles = {
+  _setView(center: L.LatLng, zoom: number, noPrune?: boolean, noUpdate?: boolean): void;
+  _setZoomTransforms(center: L.LatLng, zoom: number): void;
+  _pruneTiles(): void;
+  _retainChildren(x: number, y: number, z: number, maxZoom: number): void;
+  _tileZoom?: number;
+  _clampZoom(zoom: number): number;
+  _updateLevels(): void;
+};
+
+const isTiles = (layer: unknown): layer is Tiles =>
+  typeof (layer as Tiles | null)?._setView === "function" &&
+  typeof (layer as Tiles)._setZoomTransforms === "function" &&
+  typeof (layer as Tiles)._pruneTiles === "function";
 
 type Wheel = {
   _delta: number;
@@ -100,9 +121,85 @@ export function smoothZoom(map: L.Map): void {
   let cut: Run | null = null;
   /** Inside `setView`, whose `_stop` comes just before the next zoom. */
   let taking = false;
+  /** The zoom each tile layer has fetched for. */
+  const fetched = new WeakMap<Tiles, Run>();
+
+  /** Tells the tile layers whether a zoom is under way, as Leaflet's own zoom did. */
+  const zooming = (r: Run | null) => {
+    m._animatingZoom = !!r;
+    if (r) {
+      m._animateToZoom = r.z1;
+      m._animateToCenter = r.center;
+    }
+  };
+
+  /**
+   * A tile layer, steered through each zoom: at its start it fetches the tiles of the zoom it
+   * is going to, for the view it will end on, as Leaflet's own zoom did; at each step they
+   * are only scaled. Fetched one level at a time as the zoom passed each, a zoom out of three
+   * or four levels showed the bare page round the old view, shrinking, for a second or more.
+   * The old view's tiles stay under the new until the zoom has ended.
+   */
+  const steer = (layer: Tiles) => {
+    if ((layer as { _smoothZoom?: boolean })._smoothZoom) return;
+    (layer as { _smoothZoom?: boolean })._smoothZoom = true;
+    const setView = layer._setView;
+    const prune = layer._pruneTiles;
+    layer._setView = function (this: Tiles, center, zoom, noPrune, noUpdate) {
+      const r = run;
+      if (!r) return setView.call(this, center, zoom, noPrune, noUpdate);
+      if (fetched.get(this) !== r) {
+        fetched.set(this, r);
+        // The level for the zoom it goes to is made first, at the map's real zoom: a level
+        // places itself from the map's zoom as it is made, and made at the zoom faked below it
+        // sat millions of pixels off, off the pins by a pixel or two near the street level.
+        this._tileZoom = this._clampZoom(Math.round(r.z1));
+        this._updateLevels();
+        // Sized as at the zoom's end: the layer reads the map's zoom for it.
+        const at = m._zoom;
+        m._zoom = r.z1;
+        try {
+          setView.call(this, r.center, r.z1, true, false);
+        } finally {
+          m._zoom = at;
+        }
+      }
+      this._setZoomTransforms(center, zoom);
+    };
+    layer._pruneTiles = function (this: Tiles) {
+      if (!run) prune.call(this);
+    };
+    // At a zoom's end the old tiles go once those that replace them are in. Leaflet keeps an
+    // old tile for a new one still loading only two levels down, and a zoom out of three or
+    // four left the whole view bare until the new tiles came; four levels, the most a zoom
+    // animates, are kept now.
+    const keep = layer._retainChildren;
+    let deep = false;
+    layer._retainChildren = function (this: Tiles, x, y, z, maxZoom) {
+      if (deep) return keep.call(this, x, y, z, maxZoom);
+      deep = true;
+      try {
+        keep.call(this, x, y, z, maxZoom + 2);
+      } finally {
+        deep = false;
+      }
+    };
+  };
+  map.eachLayer((layer) => {
+    if (isTiles(layer)) steer(layer);
+  });
+  map.on("layeradd", (e) => {
+    if (isTiles(e.layer)) steer(e.layer);
+  });
 
   const finish = (r: Run) => {
+    zooming(null);
     m._move(r.center, r.z1);
+    // The tiles take the end of the zoom even when its last step landed on it exactly, which
+    // fires no zoom event: the rest of the view is fetched and the old levels go.
+    map.eachLayer((layer) => {
+      if (isTiles(layer)) layer._setView(r.center, r.z1);
+    });
     m._moveEnd(true);
   };
 
@@ -117,7 +214,7 @@ export function smoothZoom(map: L.Map): void {
     }
     const z = r.z0 + (r.z1 - r.z0) * easeOut(t);
     const c = r.at(m.getZoomScale(z, r.z0));
-    // As flyTo's steps: the tiles scale, and the next level is only fetched past half way.
+    // Each step only moves and scales: the tiles were asked for at the zoom's start.
     m._move(m.unproject([c.x, c.y], r.z0), z, { flyTo: true });
     r.frame = requestAnimationFrame(step);
   };
@@ -131,8 +228,10 @@ export function smoothZoom(map: L.Map): void {
       // A new view takes the zoom up from where it has got to. Anything else that stops it (a
       // drag, a flight, a pinch, the map going) finds it ended where it was going, with its
       // zoomend, before it reads the view: a drag's bounds are those of the zoom it lands on.
-      if (taking) cut = r;
-      else finish(r);
+      if (taking) {
+        cut = r;
+        zooming(null);
+      } else finish(r);
     }
     return stop();
   };
@@ -160,6 +259,7 @@ export function smoothZoom(map: L.Map): void {
     if (run) cancelAnimationFrame(run.frame);
     run = null;
     cut = null;
+    zooming(null);
     const far = Math.abs(zoom - m._zoom) > (map.options.zoomAnimationThreshold ?? 4);
     if (options.animate === false || far) return false;
     // As Leaflet: a zoom about a point more than a screen away is a jump, not a zoom.
@@ -175,6 +275,12 @@ export function smoothZoom(map: L.Map): void {
     // A zoom taken up mid-way has already said it started.
     if (!from) m._moveStart(true, options.noMoveStart ?? false);
     run = { z0, z1: zoom, center, at, start: performance.now(), frame: 0 };
+    zooming(run);
+    // The tiles of the zoom it goes to are asked for now, not at its first step.
+    const now = m.getCenter();
+    map.eachLayer((layer) => {
+      if (isTiles(layer)) layer._setView(now, z0, true, true);
+    });
     run.frame = requestAnimationFrame(step);
     return true;
   };
@@ -217,5 +323,6 @@ export function smoothZoom(map: L.Map): void {
     if (run) cancelAnimationFrame(run.frame);
     run = null;
     cut = null;
+    zooming(null);
   });
 }
