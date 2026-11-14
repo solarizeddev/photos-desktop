@@ -90,6 +90,8 @@ export function LibraryTiles({ tiles }: { tiles: Tile[] }) {
 
 /** The square around a face, as a multiple of the face's longer side (the Android app's). */
 const FACE_ZOOM_OUT = 1.4;
+/** The least, near an edge: as the thumbnail server's FACE_ZOOM_OUT_MIN. */
+const FACE_ZOOM_OUT_MIN = 1.2;
 
 /** A person's cover cut to their face: a square FACE_ZOOM_OUT times the face. */
 export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box: FaceBox | null }) {
@@ -122,27 +124,37 @@ export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box
 }
 
 /**
- * The grid thumbnail cut to the face in the window: the picture is scaled and moved so a
- * square FACE_ZOOM_OUT times the face fills its square frame, kept inside the picture.
- * For when the thumbnail server cannot cut it. Until the picture's own shape is known it
- * is shown whole.
+ * The grid thumbnail cut to the face in the window: the picture is scaled and moved so the
+ * square the thumbnail server would cut (faceSquare) fills its square frame. For when the
+ * thumbnail server cannot cut it, and until its cut is in. Until the picture's own shape is
+ * known it is hidden, as the whole picture would show some other part of it.
  */
 function ThumbFaceCover({ thumb, box }: { thumb: string; box: FaceBox | null }) {
-  const [aspect, setAspect] = useState<number | null>(null);
+  // The shape of the picture it was measured on: a reused card given another picture waits
+  // for that one's.
+  const [measured, setMeasured] = useState<{ thumb: string; aspect: number } | null>(null);
+  const aspect = measured?.thumb === thumb ? measured.aspect : null;
   const src = thumb;
   let style: CSSProperties | undefined;
   if (box && aspect) {
     const [l, top, r, b] = box;
-    // The square's side, as a share of the picture's width.
-    const side = Math.min(Math.max(r - l, (b - top) / aspect) * FACE_ZOOM_OUT, Math.min(1, 1 / aspect));
-    const width = 100 / side;
-    const height = width / aspect;
     const cx = (l + r) / 2;
     const cy = (top + b) / 2;
+    // The square's side, as a share of the picture's width: as the thumbnail server cuts it
+    // (faceSquare), zoomed in near an edge to keep the face centred, down to the face itself.
+    const face = Math.max(r - l, (b - top) / aspect);
+    const room = 2 * Math.min(cx, 1 - cx, cy / aspect, (1 - cy) / aspect);
+    const side = Math.min(Math.max(face * FACE_ZOOM_OUT_MIN, Math.min(face * FACE_ZOOM_OUT, room)), Math.min(1, 1 / aspect));
+    const width = 100 / Math.max(side, 1e-3);
+    const height = width / aspect;
     // Kept inside the picture, so no edge of the circle shows past it.
     const left = Math.min(0, Math.max(100 - width, 50 - cx * width));
     const topPct = Math.min(0, Math.max(100 - height, 50 - cy * height));
     style = { position: "absolute", width: `${width}%`, height: `${height}%`, left: `${left}%`, top: `${topPct}%`, objectFit: "fill" };
+  } else if (box) {
+    // Its shape not known yet, the whole picture would show some other part of it: kept
+    // hidden that moment, so the circle shows nothing rather than the wrong spot.
+    style = { opacity: 0 };
   }
   return (
     // Lazy, as the cut over it is: a page of people mounts every card, and an eager picture
@@ -156,7 +168,7 @@ function ThumbFaceCover({ thumb, box }: { thumb: string; box: FaceBox | null }) 
       style={style}
       onLoad={(e) => {
         const img = e.currentTarget;
-        if (img.naturalWidth && img.naturalHeight) setAspect(img.naturalWidth / img.naturalHeight);
+        if (img.naturalWidth && img.naturalHeight) setMeasured({ thumb, aspect: img.naturalWidth / img.naturalHeight });
       }}
     />
   );
