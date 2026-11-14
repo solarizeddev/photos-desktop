@@ -163,10 +163,9 @@
 .ps-face.b {
   border-color: var(--status-pending);
 }
-.ps-face .lib-facebox {
-  position: absolute;
-  inset: 0;
-}
+/* The face cut fills the round frame: the shared .lib-facebox already centres a square of the
+   frame's height; setting inset here as well kept its half-width shift and put the face half
+   outside the circle. */
 .ps-face-empty {
   position: absolute;
   inset: 0;

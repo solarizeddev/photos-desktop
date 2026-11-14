@@ -47,13 +47,26 @@ const str = (v: unknown, max = 500) => String(v ?? "").slice(0, max);
 const ids = (v: unknown) =>
   Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, 10_000) : [];
 
+/** How long a split waits for the photos' dates. */
+const TIMES_WAIT_MS = 20_000;
+
 /** The photo dates the split being worked on opened with (see faceSplitStart), and for which library. */
 let splitTimes: { personId: string; library: number; times: Map<string, number> } | null = null;
 
 async function timesForSplit(personId: string, fresh = false): Promise<Map<string, number>> {
   const library = faceScanner.library;
   if (!fresh && splitTimes?.personId === personId && splitTimes.library === library) return splitTimes.times;
-  const times = await faceScanner.photoTimes();
+  // Not waited on for long: without the dates a split is still made, as before them.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const times = await Promise.race([
+    faceScanner.photoTimes(),
+    new Promise<Map<string, number>>((resolve) => {
+      timer = setTimeout(() => {
+        process.stderr.write("[faces] the photos' dates took too long: this split goes without them\n");
+        resolve(new Map());
+      }, TIMES_WAIT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
   splitTimes = { personId, library, times };
   return times;
 }

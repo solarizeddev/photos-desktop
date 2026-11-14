@@ -487,23 +487,37 @@ export class FaceScanner {
 
   /** The photos' capture times as last listed, and when. */
   private times: { at: number; map: Map<string, number> } | null = null;
+  private timesListing: { source: ScanSource; made: Promise<Map<string, number>> } | null = null;
 
   /**
    * Each photo's capture time by uid, for telling a person's faces apart by age; listed again
    * at most every ten minutes. Empty when there is no library or it cannot be listed.
    */
   async photoTimes(): Promise<Map<string, number>> {
-    const now = Date.now();
-    if (this.times && now - this.times.at < 10 * 60_000) return this.times.map;
+    if (this.times && Date.now() - this.times.at < 10 * 60_000) return this.times.map;
     const source = this.source;
     if (!source?.listTimes) return new Map();
-    try {
-      const map = await source.listTimes();
-      if (this.source === source) this.times = { at: now, map };
-      return map;
-    } catch {
-      return this.times?.map ?? new Map();
-    }
+    // One listing at a time: asked again while one runs, the answer is that one's.
+    if (this.timesListing?.source === source) return this.timesListing.made;
+    // Assigned before the listing can finish: the async body runs to its first await first.
+    // eslint-disable-next-line prefer-const
+    let listing!: { source: ScanSource; made: Promise<Map<string, number>> };
+    listing = {
+      source,
+      made: (async () => {
+        try {
+          const map = await source.listTimes!();
+          if (this.source === source) this.times = { at: Date.now(), map };
+          return map;
+        } catch {
+          return this.times?.map ?? new Map<string, number>();
+        } finally {
+          if (this.timesListing === listing) this.timesListing = null;
+        }
+      })(),
+    };
+    this.timesListing = listing;
+    return listing.made;
   }
 
   /** Whether the face model comparison asked for by PFP_FACE_COMPARE has been started this run. */

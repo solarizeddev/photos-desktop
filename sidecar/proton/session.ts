@@ -430,7 +430,8 @@ async function readPictureFile(path: string): Promise<Buffer | null> {
     return null;
   }
 }
-type TimelineRun = { id: number; items: TimelineItem[]; done: boolean; error: string | null };
+/** `offline`: only the photos kept on this computer, read while Proton could not be reached. */
+type TimelineRun = { id: number; items: TimelineItem[]; done: boolean; error: string | null; offline?: boolean };
 type TimelinePage = { items: TimelineItem[]; done: boolean; error: string | null };
 
 type LoginResult =
@@ -1619,7 +1620,13 @@ export class ProtonSession {
     if (!photos || !base) return;
     faceScanner.setSource({
       listUids: async () => (await this.getTimeline()).map((item) => item.uid),
-      listTimes: async () => new Map((await this.getTimeline()).map((item) => [item.uid, item.captureTime])),
+      // The timeline the window has read, when it has read all of it: listing it again from
+      // Drive takes as long as the library is large, and a split waits on it.
+      listTimes: async () => {
+        const run = this.timelineRun;
+        const items = run?.done && !run.error && !run.offline ? run.items : await this.getTimeline();
+        return new Map(items.map((item) => [item.uid, item.captureTime]));
+      },
       pictures: (uids, ahead) => this.scanPictures(photos, uids, ahead),
       listTrashed: async () => {
         const links = new Set<string>();
@@ -1963,7 +1970,7 @@ export class ProtonSession {
    */
   startTimeline(): { run: number } {
     if (!this.photos && this.offlineOnly) {
-      const run: TimelineRun = { id: ++this.timelineRuns, items: offlineLibrary(), done: true, error: null };
+      const run: TimelineRun = { id: ++this.timelineRuns, items: offlineLibrary(), done: true, error: null, offline: true };
       this.timelineRun = run;
       return { run: run.id };
     }
