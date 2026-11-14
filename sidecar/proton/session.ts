@@ -129,8 +129,8 @@ import { activeRevisionOf, nodeDurationMs, nodeLocation, nodeName, toMillis } fr
 import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
 import { FaceCovers } from "./faceCover.ts";
-import { OpenVideos, downloadVideo, seekVideo, videoFromBytes, type VideoSource } from "./videoStream.ts";
-import { openDownloader } from "./downloadSlots.ts";
+import { OpenVideos, downloadVideo, seekVideo, videoFromBytes, type SeekableStream, type SeekingVideo, type VideoSource } from "./videoStream.ts";
+import { SDK_SLOTS, lendSlot, openDownloader, slotsInUse } from "./downloadSlots.ts";
 import { SmallThumbs } from "./thumbSizes.ts";
 import { sameAccount } from "./accountSwitch.ts";
 import { hostNotice } from "./hostCall.ts";
@@ -358,6 +358,9 @@ const OCR_FETCH_GIVE_UP_MS = 3 * 60 * 1000;
  * of the SDK's download slots while it is open.
  */
 const MAX_STREAMED_VIDEO = 300 * 1024 * 1024;
+/** How many streams a large video reads on at most, and how long one more may wait for a slot. */
+const VIDEO_LANES = 3;
+const LANE_WAIT_MS = 2_000;
 /** How long a face scan waits for the window's read of the timeline before reading its own. */
 const SCAN_WAITS_FOR_TIMELINE_MS = 3 * 60_000;
 /** How long a session's first scan waits for the window's read to begin. */
@@ -2348,9 +2351,46 @@ export class ProtonSession {
       unused();
       return null;
     }
-    // Too large to hold whole while it plays: read from Proton range by range as it plays.
-    if (size > MAX_STREAMED_VIDEO) return seekVideo(downloader, size, mime, opened);
+    // Too large to hold whole while it plays: read from Proton range by range as it plays,
+    // on more than one stream when slots are free.
+    if (size > MAX_STREAMED_VIDEO) {
+      const video = seekVideo(downloader, size, mime, opened);
+      if (video) void this.moreLanes(uid, video);
+      return video;
+    }
     return downloadVideo(downloader, size, mime, stop);
+  }
+
+  /**
+   * Gives a large video more streams to read ahead on, each its own downloader, while slots
+   * are free (one is always left for anything else). Each is lent: another download that
+   * needs its slot has it back.
+   */
+  private async moreLanes(uid: string, video: SeekingVideo): Promise<void> {
+    for (let i = 1; i < VIDEO_LANES; i++) {
+      if (!this.photos || video.broken() || slotsInUse().count >= SDK_SLOTS - 1) return;
+      let opened: Awaited<ReturnType<typeof openDownloader>>;
+      try {
+        opened = await openDownloader(this.photos, uid, LANE_WAIT_MS, { borrow: true });
+      } catch {
+        return;
+      }
+      let stream: SeekableStream;
+      try {
+        stream = opened.downloader.getSeekableStream();
+      } catch {
+        opened.unused();
+        return;
+      }
+      let unlend = () => {};
+      const leave = video.addLane(stream, () => {
+        unlend();
+        opened.stop.abort();
+        opened.released();
+      });
+      if (!leave) return;
+      unlend = lendSlot(leave);
+    }
   }
 
   async getVideo(uid: string): Promise<VideoBytes> {

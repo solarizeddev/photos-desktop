@@ -379,6 +379,52 @@ describe("a video read range by range from Proton", () => {
     expect((await first).length).toBe(8 * MB + 1);
   });
 
+  it("reads ahead of the player on its other lanes", async () => {
+    const one = seekable(64 * MB);
+    const video = new SeekingVideo(64 * MB, "video/mp4", one.stream, () => {});
+    const two = seekable(64 * MB);
+    const three = seekable(64 * MB);
+    video.addLane(two.stream, () => {});
+    video.addLane(three.stream, () => {});
+    expect(video.laneCount()).toBe(3);
+    const gone = new AbortController().signal;
+    const first = await collect(video.read(0, 100, gone));
+    expect(first.length).toBe(101);
+    await vi.waitFor(() => expect(one.log.reads + two.log.reads + three.log.reads).toBeGreaterThanOrEqual(5));
+    // The four blocks after the first were read before the player asked for them.
+    const seeks = [...one.log.seeks, ...two.log.seeks, ...three.log.seeks].sort((a, b) => a - b);
+    expect(seeks.slice(0, 5)).toEqual([0, 4 * MB, 8 * MB, 12 * MB, 16 * MB]);
+    const reads = one.log.reads + two.log.reads + three.log.reads;
+    const later = await collect(video.read(16 * MB, 16 * MB + 10, gone));
+    expect(later[0]).toBe((16 * MB) & 0xff);
+    expect(one.log.reads + two.log.reads + three.log.reads).toBeGreaterThanOrEqual(reads);
+    video.close();
+  });
+
+  it("lets a lane asked to leave finish its read first, and plays on without it", async () => {
+    const one = seekable(64 * MB);
+    const video = new SeekingVideo(64 * MB, "video/mp4", one.stream, () => {});
+    let left = 0;
+    const leave = video.addLane(seekable(64 * MB).stream, () => left++)!;
+    const reading = collect(video.read(0, 9 * MB, new AbortController().signal));
+    leave();
+    const bytes = await reading;
+    expect(bytes.length).toBe(9 * MB + 1);
+    expect(bytes.every((b, i) => b === (i & 0xff))).toBe(true);
+    await vi.waitFor(() => expect(left).toBe(1));
+    expect(video.laneCount()).toBe(1);
+    expect(video.broken()).toBe(false);
+    video.close();
+  });
+
+  it("lets a lane added after it closed go at once", () => {
+    const video = new SeekingVideo(20 * MB, "video/mp4", seekable(20 * MB).stream, () => {});
+    video.close();
+    let left = 0;
+    expect(video.addLane(seekable(20 * MB).stream, () => left++)).toBeNull();
+    expect(left).toBe(1);
+  });
+
   it("is not used for a file with no block sizes on record, and its slot goes back", () => {
     let given = 0;
     const downloader = {

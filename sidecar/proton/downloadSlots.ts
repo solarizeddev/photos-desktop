@@ -37,6 +37,26 @@
 /** How long to wait for a free slot before giving up with an error rather than hanging. */
 export const SLOT_WAIT_MS = 60_000;
 
+/** How many downloads the SDK lets run at once. */
+export const SDK_SLOTS = 5;
+
+/**
+ * Slots lent out: those of a playing video's extra read lanes. Any other download that finds
+ * every slot taken has the newest given back, so a video never keeps a save, an export or an
+ * offline copy waiting.
+ */
+const lent: Array<() => void> = [];
+
+/** Lends a slot, given back by `giveBack` when another download needs it. Returns how to
+ * take it off the list (when it is let go some other way). */
+export function lendSlot(giveBack: () => void): () => void {
+  lent.push(giveBack);
+  return () => {
+    const at = lent.indexOf(giveBack);
+    if (at >= 0) lent.splice(at, 1);
+  };
+}
+
 export type OpenedDownloader = {
   downloader: any;
   /** Gives the slot back without downloading. For a downloader that will not be used. */
@@ -118,7 +138,14 @@ function follow(downloader: any): number {
  * A downloader for `uid`, with the way to give its slot back unused. Waiting for a free
  * slot gives up after `waitMs`, so a slot lost some other way shows as an error, not a hang.
  */
-export async function openDownloader(client: any, uid: string, waitMs = SLOT_WAIT_MS): Promise<OpenedDownloader> {
+export async function openDownloader(
+  client: any,
+  uid: string,
+  waitMs = SLOT_WAIT_MS,
+  { borrow = false }: { borrow?: boolean } = {},
+): Promise<OpenedDownloader> {
+  // A slot lent to a video's read lane comes back for any download but another lane.
+  if (!borrow && holding.size >= SDK_SLOTS) lent.pop()?.();
   const stop = new AbortController();
   const timer = setTimeout(() => stop.abort(), waitMs);
   let downloader: any;
