@@ -3401,6 +3401,7 @@ mod capability_tests {
             "core:window:allow-minimize",
             "core:window:allow-toggle-maximize",
             "core:window:allow-start-dragging",
+            "core:window:allow-start-resize-dragging",
             "core:window:allow-set-title",
         ] {
             assert!(granted.contains(&permission), "{permission} is not granted");
