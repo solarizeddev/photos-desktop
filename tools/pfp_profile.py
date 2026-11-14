@@ -83,6 +83,11 @@ SCREEN_LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[host\] \[screen\] ([a-z0-
 # The sidecar's own timing of a step of its face and search work (a step name and ms only),
 # stamped in local time:
 STEP_LINE = re.compile(r"^\[diag\] (\d\d):(\d\d):(\d\d)\.\d{3} (?:faces|drive) step step=([a-z_]+) ms=(\d+)\s*$")
+# A face scan pass starting or ending, and each batch of photos it read: counts and times only.
+# Keys and values as the sidecar's diagnostics write them (a code word, or "[x]").
+PASS_LINE = re.compile(
+    r"^\[diag\] (\d\d):(\d\d):(\d\d)\.\d{3} faces (pass_start|pass_end|scan_batch)"
+    r"((?: [A-Za-z0-9_.:+-]+=(?:[A-Za-z0-9_.:+-]+|\[x\]))*)\s*$")
 SLOTS_LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[sidecar\] \[slots\] in_use=(\d+) oldest=(\d+)")
 
 STEPS = [
@@ -759,6 +764,9 @@ def main():
     events = []   # (second into the run, what the app logged), for the spikes
     local_start = utc_start.astimezone()
     step_lines = []
+    pass_lines = []
+    pass_open = None   # [start, latest, text] of a face scan pass not yet ended
+    batches = 0
     step_by = defaultdict(lambda: defaultdict(lambda: [0, 0, 0]))   # phase -> step -> [n, sum ms, max ms]
 
     def when_step(h, mi, s, ms):
@@ -800,6 +808,31 @@ def main():
                     by_method[method].append((int(wait), int(hold)))
                     events.append((sec - int(hold) / 1000, sec, f"call {method} wait={int(wait)} ms hold={int(hold)} ms"))
                     rpc_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} {method:28} wait={int(wait):7d} ms hold={int(hold):7d} ms")
+                    continue
+                m = PASS_LINE.match(line)
+                if m:
+                    h, mi, s, kind, fields = m.groups()
+                    wall = bench_fields(fields).get("wall", 0) if kind == "scan_batch" else 0
+                    placed = when_step(h, mi, s, wall if isinstance(wall, int) else 0)
+                    if placed is None:
+                        continue
+                    sec, phase = placed
+                    if kind == "scan_batch":
+                        # Many a pass: counted, and kept as the span of the pass's reading.
+                        batches += 1
+                        if pass_open is not None:
+                            pass_open[1] = max(pass_open[1], sec + (wall if isinstance(wall, int) else 0) / 1000)
+                        continue
+                    text = f"face scan {kind}{fields}"
+                    pass_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} {text}")
+                    if kind == "pass_start":
+                        pass_open = [sec, sec, text]
+                    elif pass_open is not None:
+                        # The pass as one span, start to end, so a spike in its middle names it.
+                        events.append((pass_open[0], sec, pass_open[2] + " ... " + text))
+                        pass_open = None
+                    else:
+                        events.append((sec, sec, text))
                     continue
                 m = STEP_LINE.match(line)
                 if m:
@@ -875,6 +908,10 @@ def main():
     summary = ["Photos for Proton desktop profile", f"UTC {utc_start:%Y-%m-%d %H:%M:%S} to {utc_end:%H:%M:%S}", ""]
     summary.append("cpu = percent of ONE core. main = the process's main thread. rss/pss in MB.")
     summary.append("'main>=90%' = seconds the main thread was pinned, i.e. could do nothing else.")
+    # A pass still under way when the run ended spans to the end of the run.
+    if pass_open is not None:
+        run_end = phases[-1][2] if phases else pass_open[1]
+        events.append((pass_open[0], max(pass_open[1], run_end), pass_open[2] + " ... (still under way at the end)"))
     events.sort()
     try:
         summary += spikes_summary(rows, thread_ticks, phases, events)
@@ -936,6 +973,10 @@ def main():
             summary.append(f"{name:16} " + ", ".join(
                 f"{step}={total / 1000:.1f}s" + (f" ({n}x, max {most / 1000:.1f}s)" if n > 1 else "")
                 for step, (n, total, most) in parts))
+    summary.append("\n== Face scan passes (photos in the library, still to read, faces): reading photos is image work")
+    summary += pass_lines[:200] or ["none matched (no pass had photos to read, or none was logged)"]
+    if batches:
+        summary.append(f"({batches} batches of photos read in all)")
     summary.append("\n== Scroll measurement (the app scrolling its own timeline, measured from inside)")
     if bench_sums:
         summary += bench_summary(bench_start, bench_sums, rows, bench_windows)
