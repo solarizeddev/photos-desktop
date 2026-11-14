@@ -22,6 +22,11 @@
 
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { requestThumbnail } from "../hooks/useFolderMedia";
+import { clearImportThumbnails, requestImportThumbnail } from "../lib/importThumbs";
+import { isWindows } from "../lib/platform";
+
+/** The system draws a file's picture on Windows; elsewhere the sidecar draws it from the export. */
+const askThumbnail = isWindows ? requestThumbnail : requestImportThumbnail;
 import type { ImportState, ReviewCheck, ReviewItem, ReviewReason } from "../hooks/useUploads";
 import { locale } from "../lib/format";
 import { VirtualSections } from "./VirtualSections";
@@ -69,6 +74,8 @@ export function ImportReview({ items, checks, reasons, progress, onConfirm, onDi
   // Checked by name and bytes only (the library's content hashes could not be had): a renamed
   // copy is not found that way, so Import waits for a yes.
   const [weakOk, setWeakOk] = useState(false);
+  // The pictures belong to this export: gone with the review.
+  useEffect(() => () => clearImportThumbnails(), []);
   const anchor = useRef<number | null>(null);
 
   const albumCount = useMemo(
@@ -317,7 +324,7 @@ function ReviewCell({
     const seen = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
-          if (!stop) stop = requestThumbnail(item.path, setUrl);
+          if (!stop) stop = askThumbnail(item.path, setUrl);
         } else if (stop) {
           stop();
           stop = undefined;
@@ -349,7 +356,19 @@ function ReviewCell({
       onClick={onClick}
       title={name}
     >
-      {url ? <img src={url} alt="" draggable={false} /> : <div className="g-cell-ph" />}
+      {/* Shown once it has loaded, as every grid tile's picture is (see `.g-cell img`). */}
+      {url ? (
+        <img
+          src={url}
+          alt=""
+          draggable={false}
+          onLoad={(e) => {
+            e.currentTarget.dataset.ok = "1";
+          }}
+        />
+      ) : (
+        <div className="g-cell-ph" />
+      )}
 
       <span className="g-seldot">{kept ? <CheckIcon size={11} /> : null}</span>
 
