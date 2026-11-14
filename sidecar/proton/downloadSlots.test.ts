@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { openDownloader, slotsInUse } from "./downloadSlots.ts";
+import { lendSlot, openDownloader, slotsInUse } from "./downloadSlots.ts";
 import { getOriginal, getVideo, releaseOriginal } from "./download.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -99,5 +99,29 @@ describe("the paths that made a downloader and then did not download", () => {
     const client = slotClient({ claimed: 500 * 1024 * 1024, mediaType: "video/mp4" });
     for (let i = 0; i < 8; i++) await expect(getVideo(client, `v${i}`)).rejects.toThrow("VIDEO_TOO_LARGE");
     await vi.waitFor(() => expect(client.slots.inUse).toBe(0));
+  });
+});
+
+describe("a downloader made just as its wait ran out", () => {
+  it("gives its slot back and is not handed out", async () => {
+    const client = slotClient({ setupMs: 40 });
+    await expect(openDownloader(client, "slow", 10)).rejects.toThrow();
+    await vi.waitFor(() => expect(client.slots.inUse).toBe(0));
+  });
+});
+
+describe("a slot lent to a video's read lane", () => {
+  it("comes back when another download finds every slot taken, but not for another lane", async () => {
+    const client = slotClient();
+    for (let i = 0; i < 5; i++) await openDownloader(client, `full${i}`);
+    let given = 0;
+    const unlend = lendSlot(() => given++);
+    // Another lane does not take it.
+    await expect(openDownloader(slotClient(), "lane", 30, { borrow: true })).resolves.toBeTruthy();
+    expect(given).toBe(0);
+    // Anything else does.
+    await openDownloader(slotClient(), "save", 30);
+    expect(given).toBe(1);
+    unlend();
   });
 });

@@ -37,6 +37,32 @@
 /** How long to wait for a free slot before giving up with an error rather than hanging. */
 export const SLOT_WAIT_MS = 60_000;
 
+/** How many downloads the SDK lets run at once. */
+export const SDK_SLOTS = 5;
+
+/**
+ * Slots lent out: those of a playing video's extra read lanes. Any other download that finds
+ * every slot taken has the newest given back, so a video never keeps a save, an export or an
+ * offline copy waiting.
+ */
+const lent: Array<() => void> = [];
+/** Downloaders being made now: they take a slot before they are counted in `holding`. */
+let opening = 0;
+/** How often a download still waiting for a slot takes back one more lent slot. */
+const RECLAIM_EVERY_MS = 500;
+/** How long a download may take to be made before lent slots are taken back regardless. */
+const RECLAIM_AFTER_MS = 1_500;
+
+/** Lends a slot, given back by `giveBack` when another download needs it. Returns how to
+ * take it off the list (when it is let go some other way). */
+export function lendSlot(giveBack: () => void): () => void {
+  lent.push(giveBack);
+  return () => {
+    const at = lent.indexOf(giveBack);
+    if (at >= 0) lent.splice(at, 1);
+  };
+}
+
 export type OpenedDownloader = {
   downloader: any;
   /** Gives the slot back without downloading. For a downloader that will not be used. */
@@ -118,14 +144,38 @@ function follow(downloader: any): number {
  * A downloader for `uid`, with the way to give its slot back unused. Waiting for a free
  * slot gives up after `waitMs`, so a slot lost some other way shows as an error, not a hang.
  */
-export async function openDownloader(client: any, uid: string, waitMs = SLOT_WAIT_MS): Promise<OpenedDownloader> {
+export async function openDownloader(
+  client: any,
+  uid: string,
+  waitMs = SLOT_WAIT_MS,
+  { borrow = false }: { borrow?: boolean } = {},
+): Promise<OpenedDownloader> {
+  // A slot lent to a video's read lane comes back for any download but another lane: at once
+  // when every slot is counted taken, and one more every so often while this still waits
+  // (some downloads take slots this does not count).
+  if (!borrow && holding.size + opening >= SDK_SLOTS) lent.pop()?.();
+  const since = Date.now();
+  const reclaim = borrow
+    ? undefined
+    : setInterval(() => {
+        if (holding.size + opening >= SDK_SLOTS || Date.now() - since >= RECLAIM_AFTER_MS) lent.pop()?.();
+      }, RECLAIM_EVERY_MS);
   const stop = new AbortController();
   const timer = setTimeout(() => stop.abort(), waitMs);
   let downloader: any;
+  opening++;
   try {
     downloader = await client.getFileDownloader(uid, stop.signal);
   } finally {
+    opening--;
     clearTimeout(timer);
+    clearInterval(reclaim);
+  }
+  // Made just as the wait ran out: the SDK holds its slot, and a stream of it would never see
+  // the signal fire. It is given back now, and the caller is told there was no slot in time.
+  if (stop.signal.aborted) {
+    releaseUnusedDownloader(downloader, stop);
+    throw new Error("no download slot in time");
   }
   const held = follow(downloader);
   let done = false;

@@ -209,56 +209,125 @@ export function downloadVideo(downloader: any, size: number, mime: string, stop:
   return video;
 }
 
-/** What a seekable read asks of the SDK at once, and how much of what it read is kept. */
+/** What one seekable read asks of the SDK: one Proton block. */
 const SPAN = 16 * PIECE;
-const KEPT_PIECES = 128;
+/** How many spans are read ahead of the player, and how many pieces are kept in all. */
+const AHEAD = 6;
+const KEPT_PIECES = 16 * 16;
 /** A seekable read that has not answered in this long is given up, and the video with it. */
 const READ_STALL_MS = 60_000;
 
 /**
  * The SDK's seekable stream, as the SDK hands it out: seek to a position, then read so many
- * bytes from there. One per video: closing it gives the download slot back, once.
+ * bytes from there. One per downloader: closing it gives the download slot back, once.
  */
 export type SeekableStream = {
   seek(position: number): void | Promise<void>;
   read(numBytes: number): Promise<{ value: Uint8Array; done: boolean }>;
 };
 
+/** One seekable stream of a video, and how to let it go (which gives its slot back). */
+type Lane = { stream: SeekableStream; close: () => void; busy: boolean; leaving: boolean; first: boolean };
+
 /**
- * A video too large to hold whole, played through the SDK's seekable stream: each range the
- * player asks for is read from Proton as it is asked, a block at a time, and only the last
- * KEPT_PIECES pieces read are kept. Reads take turns on the one stream, a piece-aligned span
- * at a time, so a player reading in two places (the start and the index at the end, or a seek
- * while a read is open) costs a re-read of a block now and then, not one per piece.
+ * A video too large to hold whole, played through the SDK's seekable stream. It is read a
+ * block (span) at a time, and AHEAD spans past the one the player is in are read before it
+ * gets there. Each read is a block token and the block from Proton, one after the other, so
+ * one stream alone fell behind a high bitrate video and the player kept stopping: a video can
+ * be given more streams (lanes, each its own downloader), and reads ahead run on the lanes
+ * that are free. Only the last KEPT_PIECES pieces read are kept.
  *
  * The seekable stream does not check the file's signature, as the whole-file download does;
  * for playing it back that is the SDK's own advice. Nothing is written to disk, and this is
  * never a source for saving or exporting the file.
  *
- * It holds one of the SDK's download slots from open to close (a whole download gives its
- * slot back when done): `onClose` gives it back, by firing the downloader's signal, which is
- * the only way the SDK's seekable stream lets go of it (its own cancel is refused, its reader
- * being held). A read that fails, or hangs past READ_STALL_MS, ends the video: `broken` then
- * says so, and the next ask opens it afresh.
+ * Each lane holds one of the SDK's download slots until it is let go: its `close` fires the
+ * downloader's signal, the only way the SDK's seekable stream lets go of it. A lane added
+ * later can be asked to leave (`leave`), as soon as it has finished the read it is on. A
+ * read that fails, or hangs past READ_STALL_MS, ends the video: `broken` then says so, and
+ * the next ask opens it afresh.
  */
 export class SeekingVideo implements VideoSource {
   private pieces = new Map<number, Uint8Array>();
-  private turn: Promise<void> = Promise.resolve();
+  private loading = new Map<number, Promise<void>>();
+  private lanes: Lane[] = [];
+  /** Readers the player waits on, for a lane to come free. Reads ahead never wait. */
+  private queue: Array<() => void> = [];
+  /** The span the player read last: reads ahead follow it. */
+  private wanted = 0;
   private closed = false;
   private failed: Error | null = null;
+  /** When the player last read from it. */
+  private readAt = Date.now();
 
   constructor(
     readonly size: number,
     readonly mime: string,
-    private stream: SeekableStream,
-    private onClose: () => void,
-  ) {}
+    stream: SeekableStream,
+    onClose: () => void,
+  ) {
+    this.lanes.push({ stream, close: onClose, busy: false, leaving: false, first: true });
+  }
+
+  /**
+   * One more stream to read on. Returns how to ask it to leave, or null if the video is
+   * already closed, in which case the stream is let go at once.
+   */
+  addLane(stream: SeekableStream, onClose: () => void): (() => void) | null {
+    if (this.closed || this.failed) {
+      onClose();
+      return null;
+    }
+    const lane: Lane = { stream, close: onClose, busy: false, leaving: false, first: false };
+    this.lanes.push(lane);
+    this.freed();
+    return () => {
+      lane.leaving = true;
+      if (!lane.busy) this.drop(lane);
+    };
+  }
+
+  /** How many streams it reads on. */
+  laneCount(): number {
+    return this.lanes.length;
+  }
+
+  /** Closed, or broken: no lane is worth adding. */
+  done(): boolean {
+    return this.closed || this.failed !== null;
+  }
+
+  /** How long since the player last read from it (ms). */
+  idleFor(now = Date.now()): number {
+    return now - this.readAt;
+  }
+
+  /** Lets every lane but the first go, each once its read is done: a video not being played
+   * keeps no more than one slot. */
+  shed(): void {
+    for (const lane of [...this.lanes]) {
+      if (lane.first) continue;
+      lane.leaving = true;
+      if (!lane.busy) this.drop(lane);
+    }
+  }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
     this.pieces.clear();
-    this.onClose();
+    this.letGo();
+  }
+
+  private fail(e: Error): void {
+    this.failed = e;
+    this.letGo();
+  }
+
+  /** Every lane let go (each slot back), and every reader waiting for one woken. */
+  private letGo(): void {
+    for (const lane of this.lanes.splice(0)) lane.close();
+    for (const wake of this.queue.splice(0)) wake();
   }
 
   broken(): boolean {
@@ -280,63 +349,143 @@ export class SeekingVideo implements VideoSource {
     }
   }
 
-  /** Piece `index`, from those kept or read now (with the span after it); null if given up. */
+  /** Piece `index`, from those kept or read now; null if the player gave up or it closed. */
   private async piece(index: number, gone: AbortSignal): Promise<Uint8Array | null> {
-    const kept = this.pieces.get(index);
-    if (kept) {
-      this.pieces.delete(index);
-      this.pieces.set(index, kept);
-      return kept;
-    }
-    // One read of the stream at a time: it has one position. A reader the player gave up
-    // while it waited leaves at once, its turn passed on when the one before it ends.
-    const before = this.turn;
-    let release!: () => void;
-    this.turn = new Promise<void>((resolve) => (release = resolve));
-    const leave = new Promise<false>((resolve) => {
-      if (gone.aborted) resolve(false);
-      else gone.addEventListener("abort", () => resolve(false), { once: true });
-    });
-    if (!(await Promise.race([before.then(() => true), leave]))) {
-      void before.then(release);
-      return null;
-    }
-    try {
-      if (gone.aborted || this.closed) return null;
+    const span = Math.floor((index * PIECE) / SPAN);
+    this.wanted = span;
+    this.readAt = Date.now();
+    // A piece kept may still be thrown out by reads ahead, and a read ahead it waited on may
+    // have failed on its lane: it is read again then.
+    for (let tries = 0; tries < 3; tries++) {
+      const kept = this.pieces.get(index);
+      if (kept) {
+        this.pieces.delete(index);
+        this.pieces.set(index, kept);
+        this.ahead();
+        return kept;
+      }
+      if (this.closed || gone.aborted) return null;
       if (this.failed) throw this.failed;
-      // Another reader may have read it while this one waited.
-      const now = this.pieces.get(index);
-      if (now) return now;
-      const from = index * PIECE;
+      const leave = new Promise<false>((resolve) => {
+        if (gone.aborted) resolve(false);
+        else gone.addEventListener("abort", () => resolve(false), { once: true });
+      });
+      const loaded = this.load(span, true);
+      void loaded.catch(() => {});
+      // The lanes left free read on from here meanwhile (at the start, and after a seek).
+      this.ahead();
+      const ended = loaded.then(
+        () => true,
+        () => true,
+      );
+      if (!(await Promise.race([ended, leave]))) return null;
+    }
+    const kept = this.pieces.get(index);
+    if (kept) return kept;
+    if (this.failed) throw this.failed;
+    return null;
+  }
+
+  /** Reads ahead of the player on the lanes that are free now. */
+  private ahead(): void {
+    for (let s = this.wanted + 1; s <= this.wanted + AHEAD; s++) {
+      if (this.closed || this.failed || !this.lanes.some((l) => !l.busy && !l.leaving)) return;
+      if (s * SPAN >= this.size || this.loading.has(s) || this.hasSpan(s)) continue;
+      void this.load(s, false).catch(() => {});
+    }
+  }
+
+  private hasSpan(span: number): boolean {
+    const first = (span * SPAN) / PIECE;
+    const last = Math.floor((Math.min(this.size, (span + 1) * SPAN) - 1) / PIECE);
+    return this.pieces.has(first) && this.pieces.has(last);
+  }
+
+  /** Span `span` read into the pieces kept, once however many ask for it. */
+  private load(span: number, wait: boolean): Promise<void> {
+    const known = this.loading.get(span);
+    if (known) return known;
+    const loading = this.readSpan(span, wait).finally(() => {
+      if (this.loading.get(span) === loading) this.loading.delete(span);
+    });
+    this.loading.set(span, loading);
+    return loading;
+  }
+
+  private async readSpan(span: number, wait: boolean): Promise<void> {
+    const lane = await this.lane(wait);
+    if (!lane) return;
+    let aheadFailed = false;
+    try {
+      if (this.closed) return;
+      const from = span * SPAN;
       const length = Math.min(SPAN, this.size - from);
       if (length <= 0) throw new Error("video shorter than stated");
       let stall: ReturnType<typeof setTimeout> | undefined;
       try {
         const value = await Promise.race([
           (async () => {
-            await this.stream.seek(from);
-            return (await this.stream.read(length)).value;
+            await lane.stream.seek(from);
+            return (await lane.stream.read(length)).value;
           })(),
           new Promise<never>((_, reject) => {
             stall = setTimeout(() => reject(new Error("video read stalled")), READ_STALL_MS);
           }),
         ]);
-        if (this.closed) return null;
+        if (this.closed) return;
         if (value.length < length) throw new Error("video shorter than stated");
-        for (let i = 0; i * PIECE < value.length; i++) this.keep(index + i, value.subarray(i * PIECE, (i + 1) * PIECE));
+        const first = from / PIECE;
+        for (let i = 0; i * PIECE < value.length; i++) this.keep(first + i, value.subarray(i * PIECE, (i + 1) * PIECE));
       } catch (e) {
-        // The stream is no use any more (failed, ended short, or hung): the video is closed,
-        // which gives the slot back, and the next ask opens it afresh.
-        this.failed = e instanceof Error ? e : new Error("video read failed");
-        this.close();
-        throw this.failed;
+        // A read ahead that failed on a lane added later costs only that lane (a stream the
+        // SDK errored stays errored): the player's own read of the span tries again. On the
+        // first lane it fails the video, as any other read does.
+        if (!wait && !lane.first && !this.closed) {
+          lane.leaving = true;
+          aheadFailed = true;
+          throw e;
+        }
+        // The stream is no use any more (failed, ended short, or hung): every lane goes, and
+        // the next ask opens the video afresh. What was read is still served meanwhile.
+        if (!this.failed && !this.closed) this.fail(e instanceof Error ? e : new Error("video read failed"));
+        throw this.failed ?? e;
       } finally {
         clearTimeout(stall);
       }
-      return this.pieces.get(index) ?? null;
     } finally {
-      release();
+      lane.busy = false;
+      if (lane.leaving) this.drop(lane);
+      // After a failed read ahead only a waiting player is woken, not more reads ahead.
+      this.freed(!aheadFailed);
     }
+  }
+
+  /** A free lane, taken; for a read ahead (`wait` false) only if one is free now. */
+  private async lane(wait: boolean): Promise<Lane | null> {
+    for (;;) {
+      if (this.closed || this.failed) return null;
+      const free = this.lanes.find((l) => !l.busy && !l.leaving);
+      if (free) {
+        free.busy = true;
+        return free;
+      }
+      if (!wait) return null;
+      await new Promise<void>((resolve) => this.queue.push(resolve));
+    }
+  }
+
+  /** A lane came free (or was added): the player first, then reads ahead. */
+  private freed(readAhead = true): void {
+    const next = this.queue.shift();
+    if (next) next();
+    else if (readAhead) this.ahead();
+  }
+
+  private drop(lane: Lane): void {
+    const at = this.lanes.indexOf(lane);
+    if (at < 0) return;
+    this.lanes.splice(at, 1);
+    lane.close();
   }
 
   private keep(index: number, bytes: Uint8Array): void {
