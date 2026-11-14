@@ -4328,10 +4328,11 @@ export function Photos({
         <ImportReview
           items={uploads.review}
           checks={uploads.checks}
+          reasons={uploads.reasons}
           progress={uploads.status.importing}
-          onConfirm={(exclude, albums) => {
+          onConfirm={(exclude, albums, probable, upload) => {
             openUpload();
-            void uploads.confirmImport(exclude, albums, true);
+            void uploads.confirmImport(exclude, albums, true, probable, upload);
           }}
           onDiscard={() => void uploads.discardImport()}
         />

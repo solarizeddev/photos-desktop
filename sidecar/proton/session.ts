@@ -122,6 +122,7 @@ import { SavedCopies, SharedBackup, type BackupKind, type BackupStatus } from ".
 import { checkMyFolders, listMyFolder, type MyFolderListing } from "./myFilesImport.ts";
 import { diag } from "./diag.ts";
 import { duplicateFinder, withListingTap, type DuplicateStatus, type ShownGroups } from "./duplicates.ts";
+import { LibraryIndex, photoRootHashKey } from "./importMatch.ts";
 import { ocrModelStatus, readText, type OcrResult, type OcrStage } from "./ocr.ts";
 import { hiddenStore, type HiddenKind, type HiddenState } from "./hidden.ts";
 import { isTransient, withRetry } from "./transient.ts";
@@ -3053,8 +3054,26 @@ export class ProtonSession {
     media: Record<string, ShellMediaInfo> = {},
   ): { started: boolean } {
     if (!this.photos) throw new Error("Not signed in");
-    runPrepareImport(this.photos, frames, media);
+    runPrepareImport(this.photos, frames, media, () => this.importLibrary());
     return { started: true };
+  }
+
+  /**
+   * The library as an import checks against it: every photo's capture time and kind, and the
+   * content hashes the timeline listing handed out, with the key to make a file's own.
+   */
+  private async importLibrary(): Promise<LibraryIndex | null> {
+    const photos = this.photos;
+    if (!photos) return null;
+    const items = await this.getTimeline();
+    const hashKey = await photoRootHashKey(photos);
+    return new LibraryIndex(
+      items.map((item) => ({ uid: item.uid, captureTime: item.captureTime, video: item.tags.includes(PhotoTag.Videos) })),
+      duplicateFinder.contentHashEntries(),
+      hashKey,
+      (uid) => duplicateFinder.printOf(uid),
+      hiddenStore.hiddenPhotoTest(),
+    );
   }
 
   getImportReview() {
@@ -3066,9 +3085,9 @@ export class ProtonSession {
   }
 
   /** Uploads the reviewed export, less the items left out. */
-  confirmImport(exclude: number[], albums: boolean, live: boolean): { started: boolean } {
+  confirmImport(exclude: number[], albums: boolean, live: boolean, probable = false, upload: number[] = []): { started: boolean } {
     if (!this.photos) throw new Error("Not signed in");
-    runConfirmImport(this.photos, exclude, albums, live);
+    runConfirmImport(this.photos, exclude, albums, live, probable, upload);
     return { started: true };
   }
 

@@ -52,6 +52,8 @@ export type ImportState = {
   items?: number;
   checked?: number;
   already?: number;
+  probable?: number;
+  byContent?: boolean;
 };
 
 /** One item of an export under review; see the sidecar's `ReviewItem`. */
@@ -69,7 +71,16 @@ export type ReviewItem = {
   favorite?: boolean;
   alsoIn?: string[];
 };
-export type ReviewCheck = "pending" | "new" | "already";
+export type ReviewCheck = "pending" | "new" | "already" | "probable";
+/** Why an item was found already or probably in the library. */
+export type ReviewReason =
+  | "same_file"
+  | "same_time_look"
+  | "same_time_video"
+  | "same_time"
+  | "live_video"
+  | "same_in_export"
+  | "unchecked";
 export type UploadStatus = {
   running: boolean;
   total: number;
@@ -219,19 +230,22 @@ export function useUploads(onFinished: () => void) {
   /** The export under review, once read, and what the library check has found so far. */
   const [review, setReview] = useState<ReviewItem[] | null>(null);
   const [checks, setChecks] = useState<ReviewCheck[]>([]);
+  const [reasons, setReasons] = useState<(ReviewReason | null)[]>([]);
   const loadingReview = useRef(false);
   /** Whether the items are in hand, and the check count the marks were last read at. */
   const reviewLoaded = useRef(false);
   const marksAt = useRef(-1);
 
   /** Uploads the reviewed export, less what was left out. */
-  const confirmImport = useCallback(async (exclude: number[], albums: boolean, live: boolean) => {
-    setReview(null);
-    setChecks([]);
-    reviewLoaded.current = false;
-    marksAt.current = -1;
+  const confirmImport = useCallback(async (exclude: number[], albums: boolean, live: boolean, probable = false, upload: number[] = []) => {
     try {
-      await rpc("confirmImport", { exclude, albums, live });
+      // The review stays until the sidecar takes it, so a refusal keeps what was chosen.
+      await rpc("confirmImport", { exclude, albums, live, probable, upload });
+      setReview(null);
+      setChecks([]);
+      setReasons([]);
+      reviewLoaded.current = false;
+      marksAt.current = -1;
       setPolling(true);
     } catch (e) {
       setError(String(e));
@@ -353,9 +367,10 @@ export function useUploads(onFinished: () => void) {
                     reviewLoaded.current = true;
                   }
                 }
-                const marks = await rpc<{ checks: ReviewCheck[] } | null>("getImportChecks");
+                const marks = await rpc<{ checks: ReviewCheck[]; reasons?: (ReviewReason | null)[] } | null>("getImportChecks");
                 if (marks) {
                   setChecks(marks.checks);
+                  setReasons(marks.reasons ?? []);
                   marksAt.current = checked;
                 }
               } catch {
@@ -425,6 +440,7 @@ export function useUploads(onFinished: () => void) {
     review,
     checks,
     confirmImport,
+    reasons,
     discardImport,
     cancel,
     clear,
