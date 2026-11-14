@@ -24,6 +24,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { useThumbnails } from "../hooks/useThumbnails";
+import { cachedThumbnail } from "../lib/thumbStore";
 import { useLang, useT } from "../lib/i18n";
 import { groupByCity, loadCities, type Place } from "../lib/geocoder";
 import citiesUrl from "../assets/geo/cities15000.tsv?url";
@@ -35,6 +36,9 @@ import "../styles/Map.css";
 export type MapPoint = { uid: string; lat: number; lon: number; captureTime: number };
 
 type Pin = { key: string; lat: number; lon: number; uids: string[]; cover: string };
+
+/** How long after a zoom's last step the pins are grouped again for the new zoom. */
+const REGROUP_AFTER_MS = 180;
 
 /** How close, in screen pixels at the current zoom, two photos are to share a pin. */
 const PIN_CELL_PX = 76;
@@ -153,6 +157,8 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
   const mapRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.LayerGroup | null>(null);
   const moved = useRef(false);
+  /** Groups the pins for the zoom the map is at now, and notes that zoom (see the pins' effect). */
+  const settleRegroup = useRef<(() => void) | null>(null);
   /** Set while the map moves by itself (framing the photos, flying to a place), not by the user. */
   const byApp = useRef(false);
   const pointsRef = useRef<MapPoint[]>([]);
@@ -249,9 +255,37 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
     const regroup = () => setPins(pinsAt(map, points));
     if (!moved.current) frame();
     regroup();
-    map.on("zoomend", regroup);
+    // Once the zoom has settled, not at the end of each step of it: a turn of the wheel is
+    // several quick steps, and pins grouped again after each one drew every grouping in
+    // between for a frame or two, the pins of a moment ago coming and going. Between, the
+    // pins ride the map's own zoom as they are.
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    const regroupSoon = () => {
+      clearTimeout(settle);
+      settle = setTimeout(() => settleRegroup.current?.(), REGROUP_AFTER_MS);
+    };
+    const holdOff = () => clearTimeout(settle);
+    // A flight cut short (a drag, a wheel at the zoom's limit) ends with no zoomend: the zoom it
+    // stopped at is grouped once the map has stopped.
+    let grouped = map.getZoom();
+    const regroupNow = regroup;
+    const checkZoom = () => {
+      if (map.getZoom() !== grouped) regroupSoon();
+    };
+    const regroupAndNote = () => {
+      grouped = map.getZoom();
+      regroupNow();
+    };
+    settleRegroup.current = regroupAndNote;
+    map.on("zoomend", regroupSoon);
+    map.on("zoomstart", holdOff);
+    map.on("moveend", checkZoom);
     return () => {
-      map.off("zoomend", regroup);
+      clearTimeout(settle);
+      settleRegroup.current = null;
+      map.off("zoomend", regroupSoon);
+      map.off("zoomstart", holdOff);
+      map.off("moveend", checkZoom);
     };
   }, [points]);
 
@@ -267,13 +301,19 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
     const kept = markers.current;
     const now = new Set<string>();
     for (const pin of pins) {
-      const key = `${pin.key}|${pin.lat}|${pin.lon}`;
+      // By its newest photo and how many it holds, not by the grid cell of this zoom: a pin
+      // that is the same group at the next zoom keeps its marker and picture, and moves.
+      const key = `${pin.cover}|${pin.uids.length}`;
       now.add(key);
-      const html = pinHtml(covers[pin.cover], pin.uids.length);
+      // The picture from the shared cache at once when the hook has not handed it over yet:
+      // a pin drawn empty and filled a frame later blinked.
+      const html = pinHtml(covers[pin.cover] ?? cachedThumbnail(pin.cover), pin.uids.length);
       const icon = () => L.divIcon({ className: "map-pinwrap", html, iconSize: [56, 64], iconAnchor: [28, 64] });
       const have = kept.get(key);
       if (have) {
         have.uids = pin.uids;
+        const at = have.marker.getLatLng();
+        if (at.lat !== pin.lat || at.lng !== pin.lon) have.marker.setLatLng([pin.lat, pin.lon]);
         if (have.html !== html) {
           have.marker.setIcon(icon());
           have.html = html;
