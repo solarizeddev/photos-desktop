@@ -63,6 +63,7 @@ import {
   type FaceHit,
 } from "./faces.ts";
 import { FaceStore, MAX_FACE_INDEX, type FaceRecord } from "./faceStore.ts";
+import { CompareStop, compareFaceModels } from "./faceCompare.ts";
 import { adoptScanned, applyCopy, compareWithPhone, copyFits, copyForDrive, describeComparison } from "./faceSync.ts";
 import type { FaceCopy, FaceCopyToWrite, SearchCopyToWrite } from "./driveData.ts";
 import { markGpuFailed, openModel, type Accel } from "./inference.ts";
@@ -505,11 +506,70 @@ export class FaceScanner {
     }
   }
 
+  /** Whether the face model comparison asked for by PFP_FACE_COMPARE has been started this run. */
+  private compareStarted = false;
+
+  /**
+   * Starts the face model comparison (faceCompare.ts) when PFP_FACE_COMPARE names two people,
+   * "Name one,Name two": once a run, a little after the library opens.
+   */
+  private compareFromEnv(): void {
+    const wanted = process.env.PFP_FACE_COMPARE;
+    if (this.compareStarted || !wanted) return;
+    this.compareStarted = true;
+    const names = wanted.split(",").map((n) => n.trim()).filter(Boolean);
+    if (names.length !== 2) {
+      process.stderr.write("[face-compare] PFP_FACE_COMPARE needs two names, separated by a comma\n");
+      return;
+    }
+    const log = (line: string) => process.stderr.write(`${line}\n`);
+    log("[face-compare] starting in 20 s");
+    setTimeout(() => {
+      void (async () => {
+        const source = this.source;
+        if (!source || this.source !== source) throw new CompareStop("signed out");
+        if (!this.store.isLoaded()) {
+          if (!isReady()) throw new CompareStop("locked");
+          this.store.load();
+        }
+        await compareFaceModels([names[0], names[1]], {
+          store: this.store,
+          pictures: (uids) => source.pictures(uids, 2),
+          // Its own sessions: the scan closes its own when a run ends, which may be mid-photo here.
+          openFinder: async () => {
+            const detector = await openModel(faceModelPath(), true);
+            const embedder = await openModel(embedModel.path(), true).catch((e) => {
+              void detector.session?.release?.().catch(() => {});
+              throw e;
+            });
+            const models: Models = { detector: detector.session, embedder: embedder.session, accel: "cpu" };
+            return {
+              find: (img, uid) => analyzeImage(img, models, uid),
+              release: () => {
+                void detector.session?.release?.().catch(() => {});
+                void embedder.session?.release?.().catch(() => {});
+              },
+            };
+          },
+          alive: () => this.source === source && isReady(),
+          times: await this.photoTimes(),
+          log,
+        });
+      })().catch((e) =>
+        // Its own words only: another error's text can carry a path with the user's name.
+        log(
+          `[face-compare] stopped: ${e instanceof CompareStop ? e.message : ((e as Error)?.name ?? "failed")}; restart the app to try again`,
+        ),
+      );
+    }, 20_000).unref?.();
+  }
+
   /** The library to read, set on sign-in and cleared on sign-out or lock. */
   setSource(source: ScanSource | null): void {
     this.source = source;
     this.times = null;
     this.library++;
+    if (source) this.compareFromEnv();
     if (source) this.kick();
     else this.stop(true);
   }
