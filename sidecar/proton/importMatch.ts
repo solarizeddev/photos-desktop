@@ -38,11 +38,18 @@ import { isUsable, matches, type Fingerprint } from "./pdq.ts";
 
 export type LibraryPhoto = { uid: string; captureTime: number; video: boolean };
 
-export type MatchWhy = "same_file" | "same_time_look" | "same_time_video" | "same_time" | "live_video";
+export type MatchWhy =
+  | "same_file"
+  | "same_time_look"
+  | "same_time_video"
+  | "same_time"
+  | "live_video"
+  | "same_in_export"
+  | "unchecked";
 
 export type Match =
   | { verdict: "new" }
-  | { verdict: "already"; uid: string; why: "same_file"; hidden: boolean }
+  | { verdict: "already"; uid: string; why: "same_file" | "same_in_export"; hidden: boolean }
   | { verdict: "probable"; uid: string | null; why: MatchWhy; hidden: boolean };
 
 /** Seconds of slack either side of a capture time. */
@@ -91,8 +98,11 @@ export class LibraryIndex {
     }
     const listed = new Set(photos.map((p) => p.uid));
     for (const [uid, hash] of contentHashes) {
-      // Only photos still in the library: a hash of one since trashed means nothing now.
-      if (listed.has(uid) && !this.byContent.has(hash)) this.byContent.set(hash, uid);
+      // Only photos still in the library: a hash of one since trashed means nothing now. Of a
+      // hidden and a shown copy, the shown one, which the import may put in an album.
+      if (!listed.has(uid)) continue;
+      const held = this.byContent.get(hash);
+      if (!held || (this.isHidden(held) && !this.isHidden(uid))) this.byContent.set(hash, uid);
     }
   }
 
@@ -147,12 +157,17 @@ export type ExportFile = {
   print: () => Promise<Fingerprint | null>;
 };
 
-/** Whether `file` is in the library: the same file, probably the same photo, or new. */
-export async function matchFile(index: LibraryIndex, file: ExportFile): Promise<Match> {
+/**
+ * Whether `file` is in the library: the same file, probably the same photo, or new. A library
+ * photo in `claimed` is already some other file's exact copy, and is no candidate: in a library
+ * that holds most of an export byte for byte, that keeps a burst's next frame, or another video
+ * of the same second, from being taken for the one the library has.
+ */
+export async function matchFile(index: LibraryIndex, file: ExportFile, claimed: ReadonlySet<string> = new Set()): Promise<Match> {
   const same = index.sameFile(file.sha1);
   if (same) return { verdict: "already", uid: same, why: "same_file", hidden: index.hidden(same) };
   if (file.takenMs === null || !Number.isFinite(file.takenMs)) return { verdict: "new" };
-  const near = index.takenAt(file.takenMs, file.video);
+  const near = index.takenAt(file.takenMs, file.video).filter((n) => !claimed.has(n.photo.uid));
   if (near.length === 0) return { verdict: "new" };
   if (file.video) {
     const uid = near[0].photo.uid;
@@ -160,12 +175,17 @@ export async function matchFile(index: LibraryIndex, file: ExportFile): Promise<
   }
   const own = await file.print().catch(() => null);
   if (own && isUsable(own)) {
-    for (const { photo } of near) {
+    let unseen: string | null = null;
+    for (const { photo, shifted } of near) {
       const theirs = await index.print(photo.uid);
-      if (theirs && isUsable(theirs) && matches(own, theirs)) {
-        return { verdict: "probable", uid: photo.uid, why: "same_time_look", hidden: index.hidden(photo.uid) };
-      }
+      if (theirs && isUsable(theirs)) {
+        if (matches(own, theirs)) {
+          return { verdict: "probable", uid: photo.uid, why: "same_time_look", hidden: index.hidden(photo.uid) };
+        }
+      } else if (!shifted && unseen === null) unseen = photo.uid;
     }
+    // A photo of the same second whose look could not be had is no proof of a new one.
+    if (unseen) return { verdict: "probable", uid: unseen, why: "same_time", hidden: index.hidden(unseen) };
     return { verdict: "new" };
   }
   // Nothing to compare by (a picture this computer cannot read, or a flat frame): a photo of

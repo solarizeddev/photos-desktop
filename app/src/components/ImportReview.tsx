@@ -35,8 +35,8 @@ type Props = {
   checks: ReviewCheck[];
   reasons: (ReviewReason | null)[];
   progress: ImportState | undefined;
-  /** `probable`: upload the items that are probably in the library already, too. */
-  onConfirm: (exclude: number[], albums: boolean, probable: boolean) => void;
+  /** `probable`: upload every item probably in the library already too; `upload`: just these. */
+  onConfirm: (exclude: number[], albums: boolean, probable: boolean, upload: number[]) => void;
   onDiscard: () => void;
 };
 
@@ -62,8 +62,13 @@ export function ImportReview({ items, checks, reasons, progress, onConfirm, onDi
   // What is probably in the library already stays out unless asked for; only the new ones on
   // screen, to look them over before they go up.
   const [uploadProbable, setUploadProbable] = useState(false);
+  // The probable ones picked one by one to upload anyway.
+  const [chosen, setChosen] = useState<Set<number>>(new Set());
   const [onlyNew, setOnlyNew] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Checked by name and bytes only (the library's content hashes could not be had): a renamed
+  // copy is not found that way, so Import waits for a yes.
+  const [weakOk, setWeakOk] = useState(false);
   const anchor = useRef<number | null>(null);
 
   const albumCount = useMemo(
@@ -124,17 +129,29 @@ export function ImportReview({ items, checks, reasons, progress, onConfirm, onDi
       const check = checks[i.id] ?? "pending";
       const why = reasons[i.id];
       const out = excluded.has(i.id) ? "left out" : "";
-      return [check, why ?? "", out, [i.album, ...(i.alsoIn ?? [])].filter(Boolean).join(", "), i.name].join("\t");
+      const plain = (text: string) => text.replace(/[\t\r\n]+/g, " ");
+      return [check, why ?? "", out, plain([i.album, ...(i.alsoIn ?? [])].filter(Boolean).join(", ")), plain(i.name)].join("\t");
     });
     try {
       await navigator.clipboard.writeText(["check\treason\tchoice\talbums\tname", ...lines].join("\n"));
       setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
     } catch {
       /* nothing to copy into */
     }
   }
 
   function toggle(id: number, e: MouseEvent) {
+    // A probable one is picked to upload anyway, or unpicked.
+    if (checks[id] === "probable" && !e.shiftKey) {
+      setChosen((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+      return;
+    }
     const from = e.shiftKey && anchor.current !== null ? order.indexOf(anchor.current) : -1;
     const to = order.indexOf(id);
     setExcluded((prev) => {
@@ -193,7 +210,11 @@ export function ImportReview({ items, checks, reasons, progress, onConfirm, onDi
                     item={item}
                     check={checks[item.id]}
                     reason={reasons[item.id] ?? null}
-                    kept={!excluded.has(item.id)}
+                    kept={
+                      checks[item.id] === "probable"
+                        ? uploadProbable || chosen.has(item.id)
+                        : !excluded.has(item.id)
+                    }
                     onClick={(e) => toggle(item.id, e)}
                   />
                 ))}
@@ -202,6 +223,15 @@ export function ImportReview({ items, checks, reasons, progress, onConfirm, onDi
           />
         </div>
 
+        {progress?.byContent === false && !checking && (
+          <div className="ir-warn">
+            <span>{t("importReview.noContentCheck")}</span>
+            <label className="ir-option">
+              <input type="checkbox" className="st-switch" checked={weakOk} onChange={(e) => setWeakOk(e.currentTarget.checked)} />
+              <span>{t("importReview.importAnyway")}</span>
+            </label>
+          </div>
+        )}
         <div className="ap-foot ir-foot">
           {albumCount > 0 && (
             <label className="ir-option">
@@ -246,9 +276,9 @@ export function ImportReview({ items, checks, reasons, progress, onConfirm, onDi
               up although the library has it. */}
           <button
             className="ap-add"
-            disabled={kept === 0 || checking}
+            disabled={kept === 0 || checking || (progress?.byContent === false && !weakOk)}
             title={checking ? t("importReview.waitForCheck") : undefined}
-            onClick={() => onConfirm([...excluded], albums, uploadProbable)}
+            onClick={() => onConfirm([...excluded], albums, uploadProbable, [...chosen])}
           >
             {t("importReview.confirm", { n: kept })}
           </button>
@@ -310,6 +340,7 @@ function ReviewCell({
     ...(day ? [day] : []),
     ...(item.alsoIn?.length ? [`${t("viewer.albums")}: ${albumsOf}`] : []),
     ...(reason ? [t(`importReview.why.${reason}`)] : []),
+    ...(probable ? [t("importReview.probableClick")] : []),
   ].join("\n");
   return (
     <div

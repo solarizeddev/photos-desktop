@@ -272,6 +272,7 @@ const handlers: Record<string, (params: any, ctx: CallContext) => Promise<unknow
       p.albums !== false,
       p.live !== false,
       p.probable === true,
+      Array.isArray(p.upload) ? p.upload.filter((x: unknown) => Number.isInteger(x)) : [],
     ),
   discardImport: () => session.discardImport(),
   dropReplaced: () => session.dropReplaced(),

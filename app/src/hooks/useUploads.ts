@@ -53,6 +53,7 @@ export type ImportState = {
   checked?: number;
   already?: number;
   probable?: number;
+  byContent?: boolean;
 };
 
 /** One item of an export under review; see the sidecar's `ReviewItem`. */
@@ -72,7 +73,14 @@ export type ReviewItem = {
 };
 export type ReviewCheck = "pending" | "new" | "already" | "probable";
 /** Why an item was found already or probably in the library. */
-export type ReviewReason = "same_file" | "same_time_look" | "same_time_video" | "same_time" | "live_video";
+export type ReviewReason =
+  | "same_file"
+  | "same_time_look"
+  | "same_time_video"
+  | "same_time"
+  | "live_video"
+  | "same_in_export"
+  | "unchecked";
 export type UploadStatus = {
   running: boolean;
   total: number;
@@ -229,14 +237,14 @@ export function useUploads(onFinished: () => void) {
   const marksAt = useRef(-1);
 
   /** Uploads the reviewed export, less what was left out. */
-  const confirmImport = useCallback(async (exclude: number[], albums: boolean, live: boolean, probable = false) => {
+  const confirmImport = useCallback(async (exclude: number[], albums: boolean, live: boolean, probable = false, upload: number[] = []) => {
     setReview(null);
     setChecks([]);
     setReasons([]);
     reviewLoaded.current = false;
     marksAt.current = -1;
     try {
-      await rpc("confirmImport", { exclude, albums, live, probable });
+      await rpc("confirmImport", { exclude, albums, live, probable, upload });
       setPolling(true);
     } catch (e) {
       setError(String(e));

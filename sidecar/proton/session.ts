@@ -3085,9 +3085,9 @@ export class ProtonSession {
   }
 
   /** Uploads the reviewed export, less the items left out. */
-  confirmImport(exclude: number[], albums: boolean, live: boolean, probable = false): { started: boolean } {
+  confirmImport(exclude: number[], albums: boolean, live: boolean, probable = false, upload: number[] = []): { started: boolean } {
     if (!this.photos) throw new Error("Not signed in");
-    runConfirmImport(this.photos, exclude, albums, live, probable);
+    runConfirmImport(this.photos, exclude, albums, live, probable, upload);
     return { started: true };
   }
 
