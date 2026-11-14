@@ -310,4 +310,22 @@ describe("an export imported against the library", () => {
     const album = first === "Trip/x.jpg" ? "album-Other" : "album-Trip";
     expect(w.added.filter((a) => a.uids.includes(w.uploads[0].uid)).map((a) => a.album)).toEqual([album]);
   });
+
+  it("uploads three equal files once when the first is left out, into the others' albums", async () => {
+    const X = await picture(93);
+    const root = tree("copy-three", { "A/x.jpg": X, "B/x(1).jpg": X, "C/y.jpg": X });
+    const w = world([{ uid: "lib-z", t: 5, bytes: await picture(96), name: "z.jpg" }]);
+    let firstAlbum = "";
+    await run(root, w, false, true, () => [], (byPath) => {
+      const checks = up.getImportChecks()!;
+      const paths = ["A/x.jpg", "B/x(1).jpg", "C/y.jpg"];
+      const first = paths.find((p) => checks.reasons[Number(byPath[p])] !== "same_in_export")!;
+      firstAlbum = first.split("/")[0];
+      return [Number(byPath[first])];
+    });
+    expect(w.uploads).toHaveLength(1);
+    const albums = w.added.filter((a) => a.uids.includes(w.uploads[0].uid)).map((a) => a.album).sort();
+    expect(albums).toEqual(["A", "B", "C"].filter((a) => a !== firstAlbum).map((a) => `album-${a}`));
+  });
 });
+

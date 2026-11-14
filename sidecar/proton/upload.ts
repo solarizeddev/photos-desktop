@@ -1968,12 +1968,27 @@ export function confirmImport(
   /** Items probably in the library that are put in their album as the library's photo. */
   const standIn = new Set<string>();
   const leftByUser = new Set(exclude);
+  // Of the copies of a first item the user left out, one goes in its place, carrying the
+  // albums of the others, which stay out: the same bytes still go up once.
+  const standInFor = new Map<number, number>();
+  for (const [id, first] of [...current.copyOf].sort((a, b) => a[0] - b[0])) {
+    if (!leftByUser.has(first) || leftByUser.has(id)) continue;
+    const taken = standInFor.get(first);
+    if (taken === undefined) {
+      standInFor.set(first, id);
+      continue;
+    }
+    const keeper = current.plan[taken];
+    const item = current.plan[id];
+    const albumsOf = [item.album, ...(item.alsoIn ?? [])].filter((a): a is string => !!a && a !== keeper.album);
+    keeper.alsoIn = [...new Set([...(keeper.alsoIn ?? []), ...albumsOf])];
+  }
   current.plan.forEach((item, id) => {
     // Its bytes go up once, as the other item, which carries its albums too; but in its place
     // when that one was left out, as that one would have gone.
     const first = current.copyOf.get(id);
     if (first !== undefined) {
-      if (!leftByUser.has(first) || leftByUser.has(id)) {
+      if (standInFor.get(first) !== id) {
         left.add(id);
         return;
       }
