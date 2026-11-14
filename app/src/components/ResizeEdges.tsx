@@ -12,9 +12,14 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 /** The edge a resize starts from, as the window API names them (its type is not exported). */
 type ResizeDirection = Parameters<ReturnType<typeof getCurrentWindow>["startResizeDragging"]>[0];
 
-/** How far in from the window's edge a press resizes it, and how far along a corner reaches. */
-const EDGE = 6;
-const CORNER = 14;
+/**
+ * How far in from the window's edge a press resizes it, and how far along a corner reaches.
+ * The edge is the toolkit's own band (5 px), which resizes on a press there anyway, so the
+ * handles take no more of the scroll bar on the right or the title bar's buttons above than it
+ * already does, and both ask for the same edge. The corners reach a little further, to be found.
+ */
+const EDGE = 5;
+const CORNER = 10;
 
 type Handle = { dir: ResizeDirection; cursor: string; style: CSSProperties };
 
