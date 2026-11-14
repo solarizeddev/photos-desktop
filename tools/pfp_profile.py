@@ -39,14 +39,16 @@ Scroll measurement (a build that has it)
      minute (down, back up, a fast fling, a rest). The script goes on when it is done.
   4. Upload the .tar.gz it prints at the end.
 
-People page
-  python3 pfp_profile.py --people
-  opens People, scrolls it, and opens it again: which process (the window, or the sidecar)
-  and which of its threads take the CPU, step by step.
+Watching, with nothing to answer
+  python3 pfp_profile.py --watch      (or --people)
+  start the app, use it, quit it: the run is split by the screen the app says it shows, and
+  the summary opens with the busiest moments, each with its screen, the sidecar's threads
+  and what the app logged then.
 
 Options
   --app-id ID     Flatpak app id (default eu.akoos.photos)
-  --people        measure only the People page
+  --watch         follow the app's screens, no steps or questions
+  --people        the same as --watch
   --idle SECONDS  length of the final idle step (default 30; 20 with --bench)
   --bench         record the app's own scroll measurement instead of the manual steps
 """
@@ -76,6 +78,8 @@ QUEUE_LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[host\] \[rpc\] queue (stuc
 THUMBS_LINE = re.compile(
     r"^\[(\d\d):(\d\d):(\d\d)\] \[sidecar\] \[thumbs\] open=(\d+) oldest=(\d+) served=(\d+) "
     r"missing=(\d+) failed=(\d+) dropped=(\d+)")
+# The window's screen, as it changes (a fixed screen name only):
+SCREEN_LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[host\] \[screen\] ([a-z0-9_]{1,40})\s*$")
 # The sidecar's own timing of a step of its face and search work (a step name and ms only),
 # stamped in local time:
 STEP_LINE = re.compile(r"^\[diag\] (\d\d):(\d\d):(\d\d)\.\d{3} (?:faces|drive) step step=([a-z_]+) ms=(\d+)\s*$")
@@ -110,25 +114,159 @@ STEPS = [
 ]
 
 
-def people_steps():
-    """The steps of a --people run: where the People page's time and CPU go."""
-    return [
-        ("launch",
-         "Press Enter, THEN start the app.\n"
-         "   Press Enter again as soon as its window shows anything (lock screen or photos)."),
-        ("unlock_to_ready",
-         "Unlock / sign in if asked, and wait until the timeline is filled with thumbnails.\n"
-         "   Press Enter when the first screen of photos is fully drawn."),
-        ("people_open",
-         "Open Albums > People and wait, without scrolling, until every face circle\n"
-         "   on screen is drawn. Press Enter then."),
-        ("people_scroll",
-         "Scroll slowly down through the whole page (people and 'Sin agrupar') to the end,\n"
-         "   then back to the top. Press Enter when done."),
-        ("people_again",
-         "Go to Photos, then back to People, and wait until the circles on screen are drawn.\n"
-         "   Press Enter then."),
-    ]
+def follow_screens(sampler, log_path, offset, limit, app_id, already_running):
+    """A run with no steps to follow: takes the step of the run from the screen the window says
+    it shows (its "[screen] ..." log lines) until the app is quit, Ctrl+C, or `limit` seconds.
+    Returns the run's steps as (name, start, end, False), and whether the log was rotated."""
+    if already_running:
+        print("The app is already running: measuring it from now. Switch to a screen to start.")
+    else:
+        print("Start the app now (from the menu, or: flatpak run eu.akoos.photos).")
+    print("Use it as you like: open the screens that feel slow and stay a little on each.")
+    print("When done, quit the app (its Quit; closing the window may only hide it) or press")
+    print("Ctrl+C here. Nothing to answer.\n")
+    seen_app = already_running
+    gone_since = None
+    phases = []
+    current, started = "starting", 0.0
+    counts = defaultdict(int)
+    pos = offset
+    rotated = False
+    screens_seen = 0
+    t_end = time.monotonic() + limit
+    ended = "limit"
+
+    def switch(name):
+        nonlocal current, started
+        now = time.monotonic() - sampler.t0
+        phases.append((current, started, now, False))
+        counts[name] += 1
+        current = name if counts[name] == 1 else f"{name}#{counts[name]}"
+        started = now
+        sampler.phase = current
+        print(f"\r   {now:6.0f} s  screen: {name:24}", end="", flush=True)
+
+    sampler.phase = current
+    checked = 0
+    try:
+        while time.monotonic() < t_end:
+            time.sleep(0.5)
+            # A first run may have no log yet: looked for again until there is one.
+            if not log_path:
+                log_path = find_log(app_id)
+                pos = 0
+            try:
+                if log_path and os.path.exists(log_path):
+                    size = os.path.getsize(log_path)
+                    if size < pos:
+                        pos, rotated = 0, True  # the log was rotated
+                    if size > pos:
+                        with open(log_path, "r", errors="replace") as f:
+                            f.seek(pos)
+                            chunk = f.read()
+                            pos = f.tell()
+                        for line in chunk.splitlines():
+                            m = SCREEN_LINE.match(line)
+                            if m:
+                                screens_seen += 1
+                                switch(m.group(4))
+            except OSError:
+                pass
+            # Whether the app still runs, once a second (the sampler scans /proc as well).
+            checked += 1
+            if checked % 2:
+                continue
+            if sampler.find_pids():
+                seen_app, gone_since = True, None
+            elif seen_app:
+                gone_since = gone_since or time.monotonic()
+                if time.monotonic() - gone_since > 3:
+                    ended = "quit"
+                    break
+    except KeyboardInterrupt:
+        ended = "ctrl-c"
+    print()
+    if ended == "limit":
+        print(f"   Stopped after {limit // 60} minutes.")
+    if screens_seen == 0:
+        print("   The app wrote no screen names: this build may not have them, so the run is one step.")
+    end = (time.monotonic() - sampler.t0) - (3.5 if ended == "quit" else 0)
+    phases.append((current, started, max(end, started), False))
+    return [p for p in phases if p[2] - p[1] >= 0.5], rotated, ended, log_path
+
+
+def spikes_summary(rows, thread_ticks, phases, events):
+    """The moments the app took the most CPU, each with what the window showed, which of the
+    sidecar's threads ran, and what the app logged around it."""
+    per_t = defaultdict(lambda: defaultdict(float))
+    for r in rows:
+        if r["cpu"] is not None:
+            per_t[int(r["t"])][r["role"]] += r["cpu"]
+            if r["role"] == "webview":
+                per_t[int(r["t"])]["webview_main"] = max(per_t[int(r["t"])]["webview_main"], r["main_cpu"] or 0.0)
+    hot = sorted(t for t, v in per_t.items()
+                 if v.get("sidecar", 0) >= 150 or v.get("webview", 0) >= 100 or v.get("webview_main", 0) >= 90)
+    episodes = []
+    for t in hot:
+        if episodes and t - episodes[-1][1] <= 2:
+            episodes[-1][1] = t
+        else:
+            episodes.append([t, t])
+    def phase_at(t):
+        return next((p[0] for p in phases if p[1] <= t <= p[2]), "-")
+    scored = []
+    for a, b in episodes:
+        secs = range(a, b + 1)
+        total = sum(sum(v for k, v in per_t[t].items() if k != "webview_main") for t in secs)
+        scored.append((total, a, b))
+    lines = ["\n== CPU spikes: the busiest moments (a second with the sidecar >= 150%, or the window >= 100% or",
+             "   its main thread >= 90%), with the screen, the sidecar's threads and what the app logged then"]
+    if not scored:
+        lines.append("none")
+        return lines
+    for total, a, b in sorted(scored, reverse=True)[:12]:
+        secs = range(a, b + 1)
+        n = len(secs)
+        avg = lambda role: sum(per_t[t].get(role, 0) for t in secs) / n
+        peak = lambda role: max(per_t[t].get(role, 0) for t in secs)
+        screens = list(dict.fromkeys(phase_at(t) for t in secs))
+        threads = defaultdict(float)
+        for _, at, used in thread_ticks:
+            if a < at <= b + 1:
+                for name, v in used.items():
+                    threads[name] += v
+        top = sorted(threads.items(), key=lambda kv: -kv[1])[:4]
+        lines.append(f"\n{a:5d}-{b:<5d}s ({n} s) on {', '.join(screens)}: "
+                     f"sidecar {avg('sidecar'):.0f}% (peak {peak('sidecar'):.0f}%), "
+                     f"window {avg('webview'):.0f}% (main peak {peak('webview_main'):.0f}%), host {avg('host'):.0f}%")
+        shown = [f"{name}={v:.1f}s" for name, v in top if v >= 0.05]
+        if shown:
+            lines.append("   sidecar threads: " + ", ".join(shown))
+        near = [text for at, until, text in events if at <= b + 2 and until >= a - 2]
+        for text in near[:8]:
+            lines.append(f"   {text}")
+        if len(near) > 8:
+            lines.append(f"   ... {len(near) - 8} more")
+    return lines
+
+
+def screens_summary(rows, phases):
+    """CPU and time per screen, all its visits together (people, people#2, ... as one)."""
+    base = lambda name: name.split("#")[0]
+    seconds = defaultdict(float)
+    for name, a, b, _ in phases:
+        seconds[base(name)] += b - a
+    cpu = defaultdict(lambda: defaultdict(float))   # screen -> role -> cpu-seconds
+    for r in rows:
+        if r["cpu"] is not None:
+            cpu[base(r["phase"])][r["role"]] += r["cpu"] / 100
+    lines = ["\n== CPU by screen, all visits together (cpu-seconds; 1 = one core for one second)",
+             f"{'screen':20} {'time':>7} {'sidecar':>8} {'window':>8} {'host':>8} {'network':>8}"]
+    for name in sorted(seconds, key=lambda n: -sum(cpu[n].values())):
+        c = cpu[name]
+        lines.append(f"{name:20} {seconds[name]:6.0f}s {c.get('sidecar', 0):8.1f} {c.get('webview', 0):8.1f} "
+                     f"{c.get('host', 0):8.1f} {c.get('webkit-network', 0):8.1f}")
+    return lines
 
 
 def bench_steps(app_id):
@@ -263,6 +401,7 @@ class Sampler(threading.Thread):
         self.prev = {}          # pid -> (ticks, main_ticks, time)
         self.prev_threads = {}  # (pid, tid) -> ticks
         self.thread_cpu = defaultdict(lambda: defaultdict(float))  # phase -> thread name -> cpu s
+        self.thread_ticks = []  # (t, {sidecar thread name: cpu s}) per sample, for the spikes
         self.roles = {}
         self.tick = 0
 
@@ -370,7 +509,12 @@ class Sampler(threading.Thread):
             name = "MAIN(" + comm + ")" if tid == str(pid) else re.sub(r"[-#:]?\d+$", "", comm)
             key = (pid, tid)
             if key in self.prev_threads:
-                self.thread_cpu[self.phase][name] += (ticks - self.prev_threads[key]) / CLK
+                used = (ticks - self.prev_threads[key]) / CLK
+                self.thread_cpu[self.phase][name] += used
+                if used > 0:
+                    if not self.thread_ticks or self.thread_ticks[-1][0] != self.tick:
+                        self.thread_ticks.append((self.tick, round(time.monotonic() - self.t0, 2), defaultdict(float)))
+                    self.thread_ticks[-1][2][name] += used
             self.prev_threads[key] = ticks
 
     def run(self):
@@ -489,14 +633,18 @@ def main():
     ap.add_argument("--bench", action="store_true",
                     help="record the app's own scroll measurement (start the app with PFP_SCROLL_BENCH=1)")
     ap.add_argument("--people", action="store_true",
-                    help="measure only opening and scrolling the People page")
+                    help="the same as --watch: follow the app's screens by themselves, no questions")
+    ap.add_argument("--watch", action="store_true",
+                    help="no steps or questions: follow the screens the app shows until it is closed, "
+                         "and report the busiest moments")
     ap.add_argument("--log", help=argparse.SUPPRESS)         # testing: the app log to read
     ap.add_argument("--match", help=argparse.SUPPRESS)       # testing: match processes by name
     ap.add_argument("--auto", type=int, help=argparse.SUPPRESS)  # testing: seconds per step, no prompts
     args = ap.parse_args()
     if args.idle is None:
         args.idle = 20 if args.bench else 30
-    steps = bench_steps(args.app_id) if args.bench else people_steps() if args.people else STEPS
+    watch = args.watch or args.people
+    steps = bench_steps(args.app_id) if args.bench else [] if watch else STEPS
 
     if not sys.platform.startswith("linux"):
         sys.exit("This script reads /proc and only works on Linux.")
@@ -505,15 +653,18 @@ def main():
     out_dir = os.path.abspath(f"pfp-profile-{stamp}")
     os.makedirs(out_dir)
 
+    if watch and args.bench:
+        sys.exit("--watch (or --people) and --bench measure differently: pick one.")
     sampler = Sampler(args.app_id, args.match)
-    if not args.auto and sampler.find_pids():
-        print("The app seems to be running. Close it completely first (also from the tray), then run this again.")
+    already_running = bool(sampler.find_pids())
+    if not args.auto and already_running and not watch:
+        print("The app seems to be running. Quit it completely first (its Quit), then run this again.")
         os.rmdir(out_dir)
         sys.exit(1)
 
     answers = {}
     if not args.auto:
-        print(f"Photos for Proton desktop profiler. About {'3' if args.bench or args.people else '10'} minutes. "
+        print(f"Photos for Proton desktop profiler. {'As long as you like' if watch else 'About ' + ('3' if args.bench else '10') + ' minutes'}. "
               "Nothing personal is recorded.\n")
     # The questions about the library are asked only with --ask: the measurement itself says
     # what they used to, and a run that repeats one before is quicker without them.
@@ -558,18 +709,35 @@ def main():
                   + (": it had no timeline to scroll." if ended == "skip" else
                      ". Was it started with PFP_SCROLL_BENCH=1, and is this a build that has it?"))
         phases.append(("bench", t, time.monotonic() - sampler.t0, ended is None))
-    idle = args.auto or args.idle
-    print(f"\n--- Step: idle\n   Do not touch the app for {idle} seconds (shows whether memory is given back).")
-    sampler.phase = "idle"
-    t = time.monotonic() - sampler.t0
-    for left in range(idle, 0, -1):
-        print(f"\r   {left:4d} s left ", end="", flush=True)
-        time.sleep(1)
-    print()
-    phases.append(("idle", t, time.monotonic() - sampler.t0, False))
+    rotated, ended = False, None
+    if watch:
+        phases, rotated, ended, log_path = follow_screens(
+            sampler, log_path, log_offset, args.auto or 20 * 60, args.app_id, already_running)
+    else:
+        idle = args.auto or args.idle
+        print(f"\n--- Step: idle\n   Do not touch the app for {idle} seconds (shows whether memory is given back).")
+        sampler.phase = "idle"
+        t = time.monotonic() - sampler.t0
+        for left in range(idle, 0, -1):
+            print(f"\r   {left:4d} s left ", end="", flush=True)
+            time.sleep(1)
+        print()
+        phases.append(("idle", t, time.monotonic() - sampler.t0, False))
+    if not phases:
+        phases = [("run", 0.0, time.monotonic() - sampler.t0, False)]
     sampler.stop_flag = True
+    # The recording is not to be lost to a second Ctrl+C while it is written out.
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     sampler.join(timeout=5)
     utc_end = datetime.now(timezone.utc)
+    rows = list(sampler.rows)
+    thread_ticks = [(n, at, dict(used)) for n, at, used in list(sampler.thread_ticks)]
+    cols = ["t", "phase", "role", "pid", "cpu", "main_cpu", "rss_mb", "pss_mb", "threads", "read_mb", "write_mb"]
+    with open(os.path.join(out_dir, "samples.csv"), "w") as f:
+        f.write(",".join(cols) + "\n")
+        for r in rows:
+            f.write(",".join("" if r[c] is None else str(r[c]) for c in cols) + "\n")
 
     # the app's own slow-call log, rpc timing lines only
     rpc_lines, other_tags = [], defaultdict(int)
@@ -588,6 +756,7 @@ def main():
         phase = next((p[0] for p in phases if p[1] <= sec <= p[2]),
                      min(phases, key=lambda p: min(abs(sec - p[1]), abs(sec - p[2])))[0])
         return sec, phase
+    events = []   # (second into the run, what the app logged), for the spikes
     local_start = utc_start.astimezone()
     step_lines = []
     step_by = defaultdict(lambda: defaultdict(lambda: [0, 0, 0]))   # phase -> step -> [n, sum ms, max ms]
@@ -607,11 +776,19 @@ def main():
                              min(phases, key=lambda p: min(abs(sec - p[1]), abs(sec - p[2])))[0])
                 return int(sec), phase
         return None
+    # The log as written during the run: after a rotation, the older file's part and then the
+    # whole of the new one.
+    log_sources = []
     if log_path and os.path.exists(log_path):
-        size = os.path.getsize(log_path)
-        with open(log_path, "r", errors="replace") as f:
-            if size >= log_offset:
-                f.seek(log_offset)
+        if rotated:
+            if os.path.exists(log_path + ".1"):
+                log_sources.append((log_path + ".1", log_offset))
+            log_sources.append((log_path, 0))
+        else:
+            log_sources.append((log_path, log_offset if os.path.getsize(log_path) >= log_offset else 0))
+    for src_path, start_at in log_sources:
+        with open(src_path, "r", errors="replace") as f:
+            f.seek(start_at)
             for line in f:
                 m = RPC_LINE.match(line)
                 if m:
@@ -621,6 +798,7 @@ def main():
                     phase = next((p[0] for p in phases if p[1] <= sec <= p[2]),
                                  min(phases, key=lambda p: min(abs(sec - p[1]), abs(sec - p[2])))[0])
                     by_method[method].append((int(wait), int(hold)))
+                    events.append((sec - int(hold) / 1000, sec, f"call {method} wait={int(wait)} ms hold={int(hold)} ms"))
                     rpc_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} {method:28} wait={int(wait):7d} ms hold={int(hold):7d} ms")
                     continue
                 m = STEP_LINE.match(line)
@@ -635,6 +813,7 @@ def main():
                     agg[1] += int(ms)
                     agg[2] = max(agg[2], int(ms))
                     step_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} {step:20} {int(ms):7d} ms")
+                    events.append((sec, sec + int(ms) / 1000, f"sidecar step {step} {int(ms)} ms"))
                     continue
                 m = STUCK_LINE.match(line)
                 if m:
@@ -645,6 +824,7 @@ def main():
                     stuck_by[phase][key] = max(stuck_by[phase][key], ms)
                     extra = f" waited={int(waited):7d} ms" if waited else ""
                     stuck_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} {method:28} {lane} {state}={ms:7d} ms{extra}")
+                    events.append((sec - ms / 1000, sec, f"call {method} still {state} after {ms} ms"))
                     continue
                 m = QUEUE_LINE.match(line)
                 if m:
@@ -691,16 +871,16 @@ def main():
                 m = OTHER_TAG.match(line)
                 other_tags[(m.group(1) + "/" + m.group(2)) if m else "untagged"] += 1
 
-    rows = sampler.rows
-    cols = ["t", "phase", "role", "pid", "cpu", "main_cpu", "rss_mb", "pss_mb", "threads", "read_mb", "write_mb"]
-    with open(os.path.join(out_dir, "samples.csv"), "w") as f:
-        f.write(",".join(cols) + "\n")
-        for r in rows:
-            f.write(",".join("" if r[c] is None else str(r[c]) for c in cols) + "\n")
 
     summary = ["Photos for Proton desktop profile", f"UTC {utc_start:%Y-%m-%d %H:%M:%S} to {utc_end:%H:%M:%S}", ""]
     summary.append("cpu = percent of ONE core. main = the process's main thread. rss/pss in MB.")
     summary.append("'main>=90%' = seconds the main thread was pinned, i.e. could do nothing else.")
+    events.sort()
+    try:
+        summary += spikes_summary(rows, thread_ticks, phases, events)
+        summary += screens_summary(rows, phases)
+    except Exception as e:  # the rest of the report still goes out
+        summary.append(f"\n(spikes could not be summarised: {type(e).__name__})")
     summary += summarise(rows, phases)
     summary.append("\n== Node sidecar: CPU seconds by thread, per step")
     for name, _, _, skipped in phases:
@@ -721,7 +901,7 @@ def main():
     for r in rows:
         last_seen[(r["role"], r["pid"])] = r["t"]
     gone = [(role, t) for (role, _), t in last_seen.items() if t < end_t - 3]
-    if gone:
+    if gone and ended != "quit":
         summary.append("\n== Processes that ended during the run")
         for role, t in sorted(gone, key=lambda x: x[1]):
             phase = next((p[0] for p in phases if p[1] <= t <= p[2]), "?")
