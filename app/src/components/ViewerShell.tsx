@@ -143,6 +143,8 @@ type Props = {
   onKey?: (e: KeyboardEvent) => void;
   /** The video would not play; `at` is where it had got to (seconds). */
   onVideoError?: (at: number) => void;
+  /** The video is playing. */
+  onVideoPlaying?: () => void;
   /** Right-click on the stage, so the caller can raise a context menu. Called with the
    *  native menu already prevented and the shell's own dead menu suppressed. */
   onContextMenu?: (e: MouseEvent) => void;
@@ -193,6 +195,7 @@ export function ViewerShell({
   onRename,
   onKey,
   onVideoError,
+  onVideoPlaying,
   onContextMenu,
   textSource,
   initialSide,
@@ -528,6 +531,7 @@ export function ViewerShell({
                 }}
                 onClick={(e) => e.stopPropagation()}
                 onError={(e) => onVideoError?.(e.currentTarget.currentTime || 0)}
+                onPlaying={onVideoPlaying}
               />
               <VideoControls video={videoEl} />
             </>

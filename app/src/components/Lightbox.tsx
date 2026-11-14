@@ -276,6 +276,8 @@ export function Lightbox({
     if (streamRetries.current.uid !== uid) {
       streamRetries.current = { uid, n: 0 };
       setResumeAt(null);
+      // A stream that failed for another video is tried again for this one.
+      setStreamFailed((s) => (s === uid ? s : null));
     }
     setDetails(null);
     setFavOverride(null);
@@ -697,8 +699,10 @@ export function Lightbox({
         const tries = streamRetries.current.uid === uid ? streamRetries.current.n : 0;
         if (streaming && tries < STREAM_RETRIES) {
           streamRetries.current = { uid, n: tries + 1 };
-          setResumeAt({ uid, at });
-          // A new address is a new element (keyed by it): the sidecar opens the video afresh.
+          // A retry that failed before it loaded says 0: the place from before stands.
+          setResumeAt((r) => (at > 0 || r?.uid !== uid ? { uid, at } : r));
+          // A new address is a new element (keyed by it), and the sidecar opens the video
+          // afresh if its stream broke.
           setVideoUrl(`${stream}?again=${tries + 1}`);
           return;
         }
@@ -710,6 +714,10 @@ export function Lightbox({
           setVideoState("loading");
           setStreamFailed(uid);
         } else setVideoState("error");
+      }}
+      onVideoPlaying={() => {
+        // Playing again from the place kept: it is used up, so nothing later seeks back to it.
+        setResumeAt(null);
       }}
       onContextMenu={(e) => setMenuAt({ x: e.clientX, y: e.clientY })}
       onKey={(e) => {

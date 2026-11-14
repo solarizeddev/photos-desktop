@@ -455,6 +455,22 @@ describe("a video read range by range from Proton", () => {
     expect(reads).toBeLessThan(10);
   });
 
+  it("reads nothing for a place the player left while it waited, and serves the newest first", async () => {
+    const { stream, log } = seekable(64 * MB);
+    const video = new SeekingVideo(64 * MB, "video/mp4", stream, () => {});
+    const first = collect(video.read(0, 100, new AbortController().signal));
+    // Two places asked for while the one stream is busy; the player leaves the first.
+    const left = new AbortController();
+    const skipped = collect(video.read(40 * MB, 40 * MB + 10, left.signal));
+    const wanted = collect(video.read(52 * MB, 52 * MB + 10, new AbortController().signal));
+    left.abort();
+    expect((await skipped).length).toBe(0);
+    expect((await wanted)[0]).toBe((52 * MB) & 0xff);
+    await first;
+    expect(log.seeks).not.toContain(40 * MB);
+    video.close();
+  });
+
   it("lets a lane added after it closed go at once", () => {
     const video = new SeekingVideo(20 * MB, "video/mp4", seekable(20 * MB).stream, () => {});
     video.close();

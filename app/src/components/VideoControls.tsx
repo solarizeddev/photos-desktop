@@ -79,6 +79,9 @@ function safeSeconds(n: number): number {
  * It is handed the element rather than owning it, the way the Android pill is handed
  * an ExoPlayer. The stage keeps its one `<video>`; this keeps only the controls.
  */
+/** The least time between two seeks while the slider is dragged. */
+const SCRUB_SEEK_MS = 250;
+
 export function VideoControls({ video }: Props) {
   const t = useT();
   const [playing, setPlaying] = useState(false);
@@ -254,17 +257,30 @@ export function VideoControls({ video }: Props) {
     seekTo(r);
   }
 
+  // A drag moves the thumb at once but seeks at most every SCRUB_SEEK_MS, and once more
+  // where it is let go: each seek is a new range from Proton, and one per pointer move queued
+  // reads nobody wanted ahead of the one that was.
+  const lastSeek = useRef(0);
+  const pendingRatio = useRef<number | null>(null);
+
   function moveScrub(e: ReactPointerEvent<HTMLDivElement>): void {
     if (!scrubbingRef.current) return;
     const r = ratioAt(e.clientX);
     setScrubRatio(r);
-    seekTo(r);
+    const now = performance.now();
+    if (now - lastSeek.current >= SCRUB_SEEK_MS) {
+      lastSeek.current = now;
+      pendingRatio.current = null;
+      seekTo(r);
+    } else pendingRatio.current = r;
   }
 
   function endScrub(e: ReactPointerEvent<HTMLDivElement>): void {
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
     }
+    if (scrubbingRef.current && pendingRatio.current !== null) seekTo(pendingRatio.current);
+    pendingRatio.current = null;
     scrubbingRef.current = false;
     setScrubbing(false);
   }

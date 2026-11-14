@@ -141,6 +141,11 @@ export class ArrivingVideo implements VideoSource {
     return this.have;
   }
 
+  /** Its download failed or stopped: the next ask opens the video afresh. */
+  broken(): boolean {
+    return this.ended === "failed";
+  }
+
   close(): void {
     if (!this.ended) this.end(false);
     this.onClose();
@@ -381,7 +386,7 @@ export class SeekingVideo implements VideoSource {
         if (gone.aborted) resolve(false);
         else gone.addEventListener("abort", () => resolve(false), { once: true });
       });
-      const loaded = this.load(span, true);
+      const loaded = this.load(span, true, gone);
       void loaded.catch(() => {});
       // The lanes left free read on from here meanwhile (at the start, and after a seek).
       this.ahead();
@@ -413,18 +418,18 @@ export class SeekingVideo implements VideoSource {
   }
 
   /** Span `span` read into the pieces kept, once however many ask for it. */
-  private load(span: number, wait: boolean): Promise<void> {
+  private load(span: number, wait: boolean, gone?: AbortSignal): Promise<void> {
     const known = this.loading.get(span);
     if (known) return known;
-    const loading = this.readSpan(span, wait).finally(() => {
+    const loading = this.readSpan(span, wait, gone).finally(() => {
       if (this.loading.get(span) === loading) this.loading.delete(span);
     });
     this.loading.set(span, loading);
     return loading;
   }
 
-  private async readSpan(span: number, wait: boolean): Promise<void> {
-    const lane = await this.lane(wait);
+  private async readSpan(span: number, wait: boolean, gone?: AbortSignal): Promise<void> {
+    const lane = await this.lane(wait, gone);
     if (!lane) return;
     let aheadFailed = false;
     try {
@@ -473,22 +478,37 @@ export class SeekingVideo implements VideoSource {
   }
 
   /** A free lane, taken; for a read ahead (`wait` false) only if one is free now. */
-  private async lane(wait: boolean): Promise<Lane | null> {
+  private async lane(wait: boolean, gone?: AbortSignal): Promise<Lane | null> {
     for (;;) {
-      if (this.closed || this.failed) return null;
+      if (this.closed || this.failed || gone?.aborted) return null;
       const free = this.lanes.find((l) => !l.busy && !l.leaving);
       if (free) {
         free.busy = true;
         return free;
       }
       if (!wait) return null;
-      await new Promise<void>((resolve) => this.queue.push(resolve));
+      // A player that gives up waiting (a drag of the slider asks for one place after
+      // another) leaves the queue, rather than having a block read for it nobody wants.
+      await new Promise<void>((resolve) => {
+        const left = () => {
+          const at = this.queue.indexOf(woken);
+          if (at >= 0) this.queue.splice(at, 1);
+          resolve();
+        };
+        const woken = () => {
+          gone?.removeEventListener("abort", left);
+          resolve();
+        };
+        this.queue.push(woken);
+        gone?.addEventListener("abort", left, { once: true });
+      });
     }
   }
 
-  /** A lane came free (or was added): the player first, then reads ahead. */
+  /** A lane came free (or was added): the player first, the newest ask first, then reads
+   * ahead. */
   private freed(readAhead = true): void {
-    const next = this.queue.shift();
+    const next = this.queue.pop();
     if (next) next();
     else if (readAhead) this.ahead();
   }
