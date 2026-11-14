@@ -814,6 +814,8 @@ async function uploadOne(
     extraTags?: number[];
     known?: string;
     fresh?: boolean;
+    /** Called once the library is known not to have the file, just before it is sent. */
+    onCleared?: () => void;
     onProgress?: (sent: number, size: number) => void;
     /**
      * Make a lighter copy to upload in its place. The copy made on a first try is kept here and
@@ -876,6 +878,7 @@ async function uploadOne(
   }
   const sendPath = copy?.path ?? path;
   const sendSize = copy?.size ?? info.size;
+  options.onCleared?.();
   options.onProgress?.(0, sendSize);
 
   // Dimensions come from whichever side actually opened the file. The shell answered for
@@ -1116,6 +1119,7 @@ async function drain(photos: any): Promise<void> {
           try {
             const key = frameKey(file);
             let attempt = 0;
+            let cleared = false;
             const { uid, duplicates, saved, lighter } = await withRetry(
               () =>
                 uploadOne(
@@ -1131,6 +1135,9 @@ async function drain(photos: any): Promise<void> {
                     // A try after a failure asks the library first: the failed one may
                     // have finished on the server with only its answer lost.
                     fresh: attempt++ === 0 && group.fresh?.has(file),
+                    onCleared: () => {
+                      cleared = true;
+                    },
                     extraTags: video ? [PhotoTag.LivePhotos] : [],
                     onProgress: progress,
                     compress,
@@ -1140,9 +1147,10 @@ async function drain(photos: any): Promise<void> {
               abort.signal,
             );
             mainUid = uid ?? duplicates[0] ?? null;
-            // Up now, or found on a retry when this run's first try did go up with only its
-            // answer lost: either way, a still this run put there.
-            stillWentUp = uid !== null || (attempt > 1 && !group.known?.has(file));
+            // Up now, or found on a retry after an earlier try of this run had found nothing
+            // there and begun sending it (its answer lost): either way, a still this run put
+            // there. A try that failed before asking proves nothing, so it does not count.
+            stillWentUp = uid !== null || cleared;
             wentLighter = !!lighter && mainUid !== null;
             if (mainUid) group.uidOf?.set(file, mainUid);
             if (uid) {
@@ -1816,6 +1824,8 @@ async function checkReview(
   // First pass: the exact copies, and what the export holds twice.
   const claimed = new Set<string>();
   const firstOf = new Map<string, number>();
+  /** The library photo each exact copy's bytes are, found by content or by name. */
+  const exactOf = new Map<string, string>();
   const sha1s = new Map<number, string>();
   const rest: number[] = [];
   await pool(all, HASH_CONCURRENCY, async (i) => {
@@ -1823,8 +1833,9 @@ async function checkReview(
     const sha1 = await sha1Of(item.file);
     if (signal.aborted) return;
     sha1s.set(i, sha1);
-    const exact = index.sameFile(sha1) ?? (await findInLibrary(photos, item.file, signal, sha1));
+    const exact = index.sameFile(sha1) ?? exactOf.get(sha1) ?? (await findInLibrary(photos, item.file, signal, sha1));
     if (exact) {
+      exactOf.set(sha1, exact);
       claimed.add(exact);
       record(current, i, { verdict: "already", uid: exact, why: "same_file", hidden: index.hidden(exact) });
       return;
@@ -1844,7 +1855,8 @@ async function checkReview(
     if (item.liveVideo) {
       const half = index.sameFile(await sha1Of(item.liveVideo));
       if (half) {
-        record(current, i, { verdict: "probable", uid: null, why: "live_video", hidden: index.hidden(half) });
+        // The library's Live Photo of that video stands in for it.
+        record(current, i, { verdict: "probable", uid: half, why: "live_video", hidden: index.hidden(half) });
         return;
       }
     }
@@ -1866,6 +1878,8 @@ async function checkReview(
     for (let tries = 0; match.verdict === "probable" && match.uid && claimed.has(match.uid) && tries < 3; tries++) {
       match = await matchFile(index, { sha1: sha1s.get(i)!, takenMs, video, print: async () => (video ? null : fingerprintOf(item.file)) }, claimed);
     }
+    // Still taken by another file after three looks: held back rather than shared.
+    if (match.verdict === "probable" && match.uid && claimed.has(match.uid)) match = { ...match, uid: null };
     if (match.verdict === "probable" && match.uid) claimed.add(match.uid);
     record(current, i, match);
   });
@@ -1953,11 +1967,24 @@ export function confirmImport(
   const asked = new Set(upload);
   /** Items probably in the library that are put in their album as the library's photo. */
   const standIn = new Set<string>();
+  const leftByUser = new Set(exclude);
   current.plan.forEach((item, id) => {
-    // Its bytes go up once, as the other item, which carries its albums too.
-    if (current.copyOf.has(id)) {
-      left.add(id);
-      return;
+    // Its bytes go up once, as the other item, which carries its albums too; but in its place
+    // when that one was left out, as that one would have gone.
+    const first = current.copyOf.get(id);
+    if (first !== undefined) {
+      if (!leftByUser.has(first) || leftByUser.has(id)) {
+        left.add(id);
+        return;
+      }
+      current.checks[id] = current.checks[first];
+      current.reasons[id] = current.reasons[first];
+      const firstFile = current.plan[first].file;
+      const found = current.found.get(firstFile);
+      if (found) current.found.set(item.file, found);
+      if (current.probable.has(firstFile)) current.probable.set(item.file, current.probable.get(firstFile)!);
+      if (current.hiddenMatch.has(firstFile)) current.hiddenMatch.add(item.file);
+      if (current.verifiedNew.has(firstFile)) current.verifiedNew.add(item.file);
     }
     const wanted = probable || asked.has(id);
     if (current.hiddenMatch.has(item.file)) {

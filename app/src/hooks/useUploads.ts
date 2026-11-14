@@ -238,13 +238,14 @@ export function useUploads(onFinished: () => void) {
 
   /** Uploads the reviewed export, less what was left out. */
   const confirmImport = useCallback(async (exclude: number[], albums: boolean, live: boolean, probable = false, upload: number[] = []) => {
-    setReview(null);
-    setChecks([]);
-    setReasons([]);
-    reviewLoaded.current = false;
-    marksAt.current = -1;
     try {
+      // The review stays until the sidecar takes it, so a refusal keeps what was chosen.
       await rpc("confirmImport", { exclude, albums, live, probable, upload });
+      setReview(null);
+      setChecks([]);
+      setReasons([]);
+      reviewLoaded.current = false;
+      marksAt.current = -1;
       setPolling(true);
     } catch (e) {
       setError(String(e));

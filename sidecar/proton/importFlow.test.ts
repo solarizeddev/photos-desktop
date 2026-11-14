@@ -71,7 +71,7 @@ const sidecar = (seconds: number) => JSON.stringify({ photoTakenTime: { timestam
 
 type Lib = { uid: string; t: number; video?: boolean; bytes?: Buffer; thumb?: Buffer | null; hidden?: boolean; name?: string };
 
-function world(lib: Lib[], opts: { failFirstCommitOf?: string } = {}) {
+function world(lib: Lib[], opts: { failFirstCommitOf?: string; failAsks?: { name: string; times: number } } = {}) {
   const uploads: { name: string; meta: any; uid: string }[] = [];
   const added: { album: string; uids: string[] }[] = [];
   const asked: string[] = [];
@@ -80,6 +80,10 @@ function world(lib: Lib[], opts: { failFirstCommitOf?: string } = {}) {
   const photos: any = {
     findPhotoDuplicates: async (name: string, gen: () => Promise<string>) => {
       asked.push(name);
+      if (opts.failAsks?.name === name && opts.failAsks.times > 0) {
+        opts.failAsks.times--;
+        throw Object.assign(new Error("fetch failed"), { name: "ConnectionError" });
+      }
       if (committed.has(name)) return [committed.get(name)!];
       const byName = lib.filter((l) => l.name === name && l.bytes);
       if (byName.length === 0) return [];
@@ -141,7 +145,14 @@ async function settle(until: (s: any) => boolean, ms = 20000) {
 }
 const finished = (s: any) => !s.importing && !s.running && s.total > 0 && s.done + s.skipped + s.failed === s.total;
 
-async function run(root: string, w: ReturnType<typeof world>, probable = false, live = true, upload: (verdict: Record<string, number>) => number[] = () => []) {
+async function run(
+  root: string,
+  w: ReturnType<typeof world>,
+  probable = false,
+  live = true,
+  upload: (verdict: Record<string, number>) => number[] = () => [],
+  exclude: (ids: Record<string, string>) => number[] = () => [],
+) {
   up.startImport([root]);
   await settle((s) => s.importing?.phase === "ready");
   up.prepareImport(w.photos, {}, {}, w.library);
@@ -155,7 +166,9 @@ async function run(root: string, w: ReturnType<typeof world>, probable = false, 
     verdict[i.name] = `${checks.checks[i.id]}/${checks.reasons[i.id] ?? ""}`;
     ids[i.name] = i.id;
   }
-  up.confirmImport(w.photos, [], true, live, probable, upload(ids));
+  const byPath: Record<string, string> = {};
+  for (const i of review.items) byPath[i.path.split(/[\\/]/).slice(-2).join("/")] = String(i.id);
+  up.confirmImport(w.photos, exclude(byPath), true, live, probable, upload(ids));
   let done: any = null;
   try { done = await settle(finished); } catch { done = up.getUploadStatus(); }
   return { verdict, done, byContent, rows: up.getUploadStatus().items.map((i: any) => `${i.name}:${i.status}`) };
@@ -265,5 +278,36 @@ describe("an export imported against the library", () => {
     };
     const r = await run(root, w);
     expect(r.byContent).toBe(false);
+  });
+
+  it("never joins a video to a photo the library had, when a try failed before asking", async () => {
+    const S = await picture(81), M = Buffer.alloc(5000, 7);
+    const root = tree("ask-failed", { "Trip/IMG_7.jpg": S, "Trip/IMG_7.mov": M });
+    // The library has the still under its name; the review's question and the upload's first fail.
+    const w = world([{ uid: "lib-s7", t: 5, bytes: S, name: "IMG_7.jpg" }], { failAsks: { name: "IMG_7.jpg", times: 2 } });
+    (w as any).library = async () => {
+      throw new Error("timeline stalled");
+    };
+    const r = await run(root, w, false, true, (ids) => [ids["IMG_7.jpg"]]);
+    expect(r.verdict["IMG_7.jpg"]).toBe("probable/unchecked");
+    expect(w.uploads.find((u) => u.meta.mainPhotoNodeUid === "lib-s7")).toBeUndefined();
+    expect(w.uploads).toEqual([]);
+  }, 30000);
+
+  it("uploads a copy in its own album when the first of two equal files is left out", async () => {
+    const X = await picture(91);
+    const root = tree("copy-left", { "Trip/x.jpg": X, "Other/y.jpg": X });
+    const w = world([{ uid: "lib-z", t: 5, bytes: await picture(97), name: "z.jpg" }]);
+    // Whichever of the two the check took first, that one is left out.
+    let first = "";
+    await run(root, w, false, true, () => [], (byPath) => {
+      const checks = up.getImportChecks()!;
+      const a = Number(byPath["Trip/x.jpg"]);
+      first = checks.reasons[a] === "same_in_export" ? "Other/y.jpg" : "Trip/x.jpg";
+      return [Number(byPath[first])];
+    });
+    expect(w.uploads).toHaveLength(1);
+    const album = first === "Trip/x.jpg" ? "album-Other" : "album-Trip";
+    expect(w.added.filter((a) => a.uids.includes(w.uploads[0].uid)).map((a) => a.album)).toEqual([album]);
   });
 });
