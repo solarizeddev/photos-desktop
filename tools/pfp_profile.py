@@ -12,6 +12,8 @@ What it records
   - which threads of the Node sidecar burn the CPU
   - the app's "[rpc] <method> wait=<ms> hold=<ms>" log lines written during the run
     (the app logs every call that waited or ran for 1 s or more)
+  - the sidecar's timing of the steps of its face, search and Explorer-folder work
+    ("[diag] ... step" lines: a step name and its milliseconds)
   - the app's watchdog lines for calls still stuck (waiting or running for 5 s or more)
     and how many of Proton's download slots are held, where the build writes them
   - with --bench: the app's own scroll measurement ("[bench] ..." lines: frame times and
@@ -74,6 +76,9 @@ QUEUE_LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[host\] \[rpc\] queue (stuc
 THUMBS_LINE = re.compile(
     r"^\[(\d\d):(\d\d):(\d\d)\] \[sidecar\] \[thumbs\] open=(\d+) oldest=(\d+) served=(\d+) "
     r"missing=(\d+) failed=(\d+) dropped=(\d+)")
+# The sidecar's own timing of a step of its face and search work (a step name and ms only),
+# stamped in local time:
+STEP_LINE = re.compile(r"^\[diag\] (\d\d):(\d\d):(\d\d)\.\d{3} (?:faces|drive) step step=([a-z_]+) ms=(\d+)\s*$")
 SLOTS_LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[sidecar\] \[slots\] in_use=(\d+) oldest=(\d+)")
 
 STEPS = [
@@ -583,6 +588,25 @@ def main():
         phase = next((p[0] for p in phases if p[1] <= sec <= p[2]),
                      min(phases, key=lambda p: min(abs(sec - p[1]), abs(sec - p[2])))[0])
         return sec, phase
+    local_start = utc_start.astimezone()
+    step_lines = []
+    step_by = defaultdict(lambda: defaultdict(lambda: [0, 0, 0]))   # phase -> step -> [n, sum ms, max ms]
+
+    def when_step(h, mi, s, ms):
+        """When a step began (its line is written at its end), in seconds into the run, and the
+        run's step it fell in. The sidecar stamps it in its own zone, which inside the sandbox
+        may be UTC rather than this machine's: whichever reading lands inside the run is taken;
+        None when neither does."""
+        at = int(h) * 3600 + int(mi) * 60 + int(s) - ms / 1000
+        end = phases[-1][2] + 5 if phases else 0
+        for start in (local_start, utc_start):
+            sec = (at - (start.hour * 3600 + start.minute * 60 + start.second)) % 86400
+            if -5 <= sec <= end or sec >= 86400 - 5:
+                sec = sec - 86400 if sec > 43200 else sec
+                phase = next((p[0] for p in phases if p[1] <= sec <= p[2]),
+                             min(phases, key=lambda p: min(abs(sec - p[1]), abs(sec - p[2])))[0])
+                return int(sec), phase
+        return None
     if log_path and os.path.exists(log_path):
         size = os.path.getsize(log_path)
         with open(log_path, "r", errors="replace") as f:
@@ -598,6 +622,19 @@ def main():
                                  min(phases, key=lambda p: min(abs(sec - p[1]), abs(sec - p[2])))[0])
                     by_method[method].append((int(wait), int(hold)))
                     rpc_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} {method:28} wait={int(wait):7d} ms hold={int(hold):7d} ms")
+                    continue
+                m = STEP_LINE.match(line)
+                if m:
+                    h, mi, s, step, ms = m.groups()
+                    placed = when_step(h, mi, s, int(ms))
+                    if placed is None:
+                        continue
+                    sec, phase = placed
+                    agg = step_by[phase][step]
+                    agg[0] += 1
+                    agg[1] += int(ms)
+                    agg[2] = max(agg[2], int(ms))
+                    step_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} {step:20} {int(ms):7d} ms")
                     continue
                 m = STUCK_LINE.match(line)
                 if m:
@@ -710,6 +747,15 @@ def main():
             o, oldest, served, missing, failed, dropped = thumbs_by[name]
             summary.append(f"{name:16} open max={o:4d}  oldest={oldest / 1000:5.1f} s  served={served}  "
                            f"missing={missing}  failed={failed}  dropped={dropped}")
+    summary.append("\n== Sidecar work after unlock (faces, search, Explorer folder): steps of 20 ms or more, per step of the run")
+    if not step_by:
+        summary.append("none (or this build does not time them)")
+    for name, _, _, _ in phases:
+        if name in step_by:
+            parts = sorted(step_by[name].items(), key=lambda kv: -kv[1][1])
+            summary.append(f"{name:16} " + ", ".join(
+                f"{step}={total / 1000:.1f}s" + (f" ({n}x, max {most / 1000:.1f}s)" if n > 1 else "")
+                for step, (n, total, most) in parts))
     summary.append("\n== Scroll measurement (the app scrolling its own timeline, measured from inside)")
     if bench_sums:
         summary += bench_summary(bench_start, bench_sums, rows, bench_windows)
@@ -732,6 +778,8 @@ def main():
         f.write("\n".join(slot_lines) + "\n")
     with open(os.path.join(out_dir, "thumbs.txt"), "w") as f:
         f.write("\n".join(thumb_lines) + "\n")
+    with open(os.path.join(out_dir, "steps.txt"), "w") as f:
+        f.write("\n".join(step_lines) + "\n")
     with open(os.path.join(out_dir, "bench.txt"), "w") as f:
         f.write("\n".join(bench_lines) + "\n")
     with open(os.path.join(out_dir, "meta.json"), "w") as f:
