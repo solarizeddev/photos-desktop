@@ -14,7 +14,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { dot, FACE_CLUSTER_MERGE_THRESHOLD } from "./faceCluster.ts";
 import { curationKey, regroupAll } from "./facePeople.ts";
-import { applySplit, planSplit, splitStart, undoSplit } from "./faceSplit.ts";
+import { applySplit, planSplit, sortYear, splitStart, undoSplit } from "./faceSplit.ts";
 import { FaceStore, type FaceRecord } from "./faceStore.ts";
 import { initStore, setDataKey } from "./store.ts";
 import { direction, faceOf, seeded } from "./testFaces.ts";
@@ -201,6 +201,154 @@ describe("a split from few or uneven examples", () => {
     const { store, truth } = merged(0.6);
     const plan = await planSplit(store, "pA", "Sam", { a: pick(truth, "a", 4), b: pick(truth, "b", 1) });
     expect(plan.verdict).toBe("few");
+  });
+});
+
+/**
+ * Two siblings over the years, two years apart, both grouped as Alex: a face is who it is plus
+ * how old they are, and age moves a face further than who does, so each sibling as a baby looks
+ * like the other as a baby more than like themselves at eight. `times` dates each photo.
+ */
+function growingUp(apart = 0.6, perYear = 14, seed = 11, spread = 0.45) {
+  const rand = seeded(seed);
+  const idA = direction(rand);
+  const idB = unit(idA.map((x, i) => x + apart * (direction(rand)[i] ?? 0)));
+  // Age: a walk, a new step each year, so near ages look alike and far ones do not.
+  const ages: Float32Array[] = [];
+  let walk = new Float32Array(idA.length);
+  for (let k = 0; k <= 10; k++) {
+    walk = walk.map((x, i) => x + (direction(rand)[i] ?? 0));
+    ages.push(unit(walk));
+  }
+  const store = new FaceStore();
+  store.load();
+  const p = store.people;
+  p.people.push({ id: "pA", name: "Alex", isOther: false });
+  const truth = new Map<string, "a" | "b">();
+  const yearOf = new Map<string, number>();
+  const times = new Map<string, number>();
+  for (let year = 2016; year <= 2026; year++) {
+    for (const [side, id, born] of [["a", idA, 2016], ["b", idB, 2018]] as const) {
+      const age = year - born;
+      if (age < 0) continue;
+      for (let i = 0; i < perYear; i++) {
+        const base = unit(id.map((x, j) => x + 1.6 * ages[age][j]));
+        const f = face(`vol~${side}${year}-${i}`, 0, faceOf(base, rand, spread));
+        store.put(f.uid, [f]);
+        p.assign[f.id] = "pA";
+        p.confirmed[f.id] = "Alex";
+        truth.set(f.id, side);
+        yearOf.set(f.id, year);
+        times.set(f.uid, Date.UTC(year, 5, 1));
+      }
+    }
+  }
+  p.grouped = true;
+  return { store, truth, yearOf, times };
+}
+
+describe("siblings growing up", () => {
+  it("are offered to pick from year by year, the newest first, where the two ends are the two", () => {
+    const { store, truth, times } = growingUp();
+    const start = splitStart(store, "pA", times);
+    expect(start.contrast[0].year).toBe(2026);
+    // The newest year's two ends, taken in turn: each end is one sibling.
+    const newest = start.contrast.filter((f) => f.year === start.contrast[0].year);
+    expect(newest.length).toBeGreaterThanOrEqual(6);
+    const even = new Set(newest.filter((_, i) => i % 2 === 0).map((f) => truth.get(f.faceId)));
+    const odd = new Set(newest.filter((_, i) => i % 2 === 1).map((f) => truth.get(f.faceId)));
+    expect(even.size).toBe(1);
+    expect(odd.size).toBe(1);
+    expect(even).not.toEqual(odd);
+  });
+
+  /**
+   * Splits `growingUp(apart)`, from five faces of each in 2026 or from every face the pick
+   * screen offers answered rightly: how the faces ended up.
+   */
+  async function splitFrom(apart: number, examples: "2026" | "offered", dated = true, seed = 11, spread = 0.45) {
+    const { store, truth, yearOf, times } = growingUp(apart, 14, seed, spread);
+    const picked: { a: string[]; b: string[] } = { a: [], b: [] };
+    if (examples === "2026") {
+      for (const side of ["a", "b"] as const)
+        picked[side] = [...truth].filter(([id, s]) => s === side && yearOf.get(id) === 2026).slice(0, 5).map(([id]) => id);
+    } else {
+      for (const f of splitStart(store, "pA", times).contrast) picked[truth.get(f.faceId)!].push(f.faceId);
+    }
+    const plan = await planSplit(store, "pA", "Sam", picked, dated ? times : undefined);
+    await applySplit(store, "pA", "Sam", picked, 50, dated ? times : undefined);
+    const sam = store.people.people.find((x) => x.name === "Sam")!.id;
+    const unsure = new Set(plan.unsure.map((f) => f.faceId));
+    let wrong = 0;
+    for (const [id, side] of truth) {
+      const moved = store.people.assign[id] === sam;
+      // An unsure face is left with Alex as it was: not a sort, right or wrong.
+      if (!moved && unsure.has(id)) continue;
+      if (moved !== (side === "b")) wrong++;
+    }
+    return { plan, wrong, faces: truth.size };
+  }
+
+  it("are sorted year by year from examples of the newest, two years out, and none the wrong way", async () => {
+    const { plan, wrong, faces } = await splitFrom(0.6, "2026");
+    expect(wrong).toBe(0);
+    expect(plan.verdict).toBe("reliable");
+    expect(plan.byYear[0].year).toBe(2026);
+    expect(plan.byYear.reduce((n, r) => n + r.a + r.b + r.unsure, 0)).toBe(faces);
+    // The examples' year and the two before it are sorted; the years further wait for examples.
+    for (const row of plan.byYear) {
+      if (row.year! >= 2024) expect(row.unsure).toBeLessThanOrEqual(1);
+      else expect(row.a + row.b).toBe(0);
+    }
+    expect(plan.waiting).toEqual([2023, 2022, 2021, 2020, 2019, 2018, 2017, 2016]);
+  });
+
+  it("are sorted in every year from the faces offered year by year", async () => {
+    const { plan, wrong } = await splitFrom(0.6, "offered");
+    expect(wrong).toBe(0);
+    expect(plan.verdict).toBe("reliable");
+    // Only the years before the younger was born, with no examples of both to be had.
+    expect(plan.waiting.every((y) => y < 2018)).toBe(true);
+    for (const row of plan.byYear) if (row.year! >= 2018) expect(row.unsure).toBeLessThanOrEqual(1);
+  });
+
+  it("are not sorted by age instead of who, as without the dates", async () => {
+    const undated = await splitFrom(0.6, "2026", false);
+    expect(undated.wrong).toBeGreaterThan(0);
+  });
+
+  it("closer alike or less clear, from 2026 alone, none the wrong way either way", async () => {
+    for (const seed of [11, 12, 13])
+      for (const [apart, spread] of [
+        [0.45, 0.45],
+        [0.5, 0.6],
+        [0.6, 0.6],
+      ]) {
+        const { plan, wrong } = await splitFrom(apart, "2026", true, seed, spread);
+        expect(wrong, `apart ${apart}, spread ${spread}, seed ${seed}`).toBe(0);
+        // Of the 84 faces of the three years in reach, at least half (the examples' year all).
+        expect(plan.counts.a + plan.counts.b).toBeGreaterThanOrEqual(42);
+      }
+  });
+
+  it("leave a year that is not two groups, as the year next to it has them, unsorted", () => {
+    const rand = seeded(3);
+    const one = direction(rand);
+    // One child's faces only: the two-means splits them by noise, and their leans do not follow.
+    const faces = Array.from({ length: 20 }, (_, i) => face(`vol~x${i}`, 0, faceOf(one, rand, 0.5)));
+    const leans = faces.map(() => (rand() - 0.5) * 0.04);
+    expect(sortYear(faces, leans)).toBeNull();
+    expect(sortYear(faces.slice(0, 4), leans.slice(0, 4))).toBeNull();
+    expect(sortYear(faces, leans.map(() => null))).toBeNull();
+  });
+
+  it("closer alike, from the faces offered year by year, are sorted, none the wrong way", async () => {
+    const close = await splitFrom(0.45, "offered");
+    expect(close.wrong).toBe(0);
+    expect(close.plan.counts.unsure).toBeLessThan(close.faces * 0.15);
+    const closer = await splitFrom(0.35, "offered");
+    expect(closer.wrong).toBe(0);
+    expect(closer.plan.counts.a + closer.plan.counts.b).toBeGreaterThan(closer.faces * 0.6);
   });
 });
 

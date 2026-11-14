@@ -285,6 +285,42 @@
 .ps-bar.busy {
   opacity: 0.55;
 }
+.ps-bar.small {
+  height: 10px;
+  flex: 1;
+  min-width: 80px;
+}
+.ps-years {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ps-year-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--fg-dim);
+}
+.ps-year-label {
+  color: var(--fg-soft);
+  font-variant-numeric: tabular-nums;
+}
+.ps-year-counts {
+  font-variant-numeric: tabular-nums;
+}
+.ps-year-counts strong.a {
+  color: var(--accent);
+}
+.ps-year-counts strong.b {
+  color: var(--status-pending);
+}
+.ps-year {
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
 .ps-bar-a {
   background: var(--accent);
 }

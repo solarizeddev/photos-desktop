@@ -47,6 +47,17 @@ const str = (v: unknown, max = 500) => String(v ?? "").slice(0, max);
 const ids = (v: unknown) =>
   Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, 10_000) : [];
 
+/** The photo dates the split being worked on opened with (see faceSplitStart), and for which library. */
+let splitTimes: { personId: string; library: number; times: Map<string, number> } | null = null;
+
+async function timesForSplit(personId: string, fresh = false): Promise<Map<string, number>> {
+  const library = faceScanner.library;
+  if (!fresh && splitTimes?.personId === personId && splitTimes.library === library) return splitTimes.times;
+  const times = await faceScanner.photoTimes();
+  splitTimes = { personId, library, times };
+  return times;
+}
+
 function store() {
   const s = faceScanner.store;
   if (!s.isLoaded()) {
@@ -110,10 +121,18 @@ export const faceHandlers: Record<string, (p: any) => unknown> = {
   facePersonCover: (p) => change(() => setPersonCover(store(), str(p?.id), str(p?.uid))),
   // Splitting a person in two (see faceSplit): what to pick examples from, the split those
   // examples give, carrying it out, and taking it back.
-  faceSplitStart: (p) => splitStart(store(), str(p?.id)),
-  faceSplitPlan: (p) => planSplit(store(), str(p?.id), str(p?.other, 100), { a: ids(p?.a), b: ids(p?.b) }),
+  // The photos' dates let it tell the two apart year by year (see faceSplit). Read once when
+  // a split opens, and kept for its previews and its apply, so the split applied is the one
+  // previewed even if the timeline changes or cannot be listed meanwhile.
+  faceSplitStart: async (p) => {
+    const id = str(p?.id);
+    return splitStart(store(), id, await timesForSplit(id, true));
+  },
+  faceSplitPlan: async (p) =>
+    planSplit(store(), str(p?.id), str(p?.other, 100), { a: ids(p?.a), b: ids(p?.b) }, await timesForSplit(str(p?.id))),
   faceSplitApply: async (p) => {
-    const out = await applySplit(store(), str(p?.id), str(p?.other, 100), { a: ids(p?.a), b: ids(p?.b) });
+    const times = await timesForSplit(str(p?.id));
+    const out = await applySplit(store(), str(p?.id), str(p?.other, 100), { a: ids(p?.a), b: ids(p?.b) }, Date.now(), times);
     faceScanner.changed();
     return out;
   },
