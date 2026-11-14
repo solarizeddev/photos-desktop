@@ -60,6 +60,8 @@ import {
   storeDir,
   coverGet,
   coverPut,
+  sizedGet,
+  sizedPut,
   thumbGet,
   thumbPut,
   wipeCache,
@@ -2104,7 +2106,7 @@ export class ProtonSession {
   /** Videos the window is playing, for the thumbnail server: see `videoSource`. */
   private videos = new OpenVideos((uid) => this.videoSource(uid));
   /** Grid thumbnails cut down to the size the grid shows them: see `thumbSizes`. */
-  private smallThumbs = new SmallThumbs();
+  private smallThumbs = new SmallThumbs(undefined, { get: sizedGet, put: sizedPut });
   private thumbFlush: ReturnType<typeof setTimeout> | null = null;
   private thumbFetching = 0;
 

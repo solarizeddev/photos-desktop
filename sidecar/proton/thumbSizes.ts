@@ -72,7 +72,14 @@ export class SmallThumbs {
   /** Bumped by `clear`, so a cut finishing after a lock is not kept. */
   private epoch = 0;
 
-  constructor(private keepBytes = KEEP_BYTES) {}
+  constructor(
+    private keepBytes = KEEP_BYTES,
+    /**
+     * Where cut thumbnails are kept between runs (sealed beside the thumbnails): each photo
+     * is cut once for a size, not again at every start and every scroll back.
+     */
+    private disk?: { get(key: string): Buffer | null; put(key: string, small: Buffer): void },
+  ) {}
 
   /** The thumbnail of `uid` cut to `width`, made from `full()` if it is not kept. */
   async get(uid: string, width: number, full: () => Promise<Buffer | null>): Promise<Buffer | null> {
@@ -85,13 +92,21 @@ export class SmallThumbs {
     }
     const same = this.making.get(key);
     if (same) return same;
+    const stored = this.disk?.get(key);
+    if (stored) {
+      this.keep(key, stored);
+      return stored;
+    }
     const epoch = this.epoch;
     const made = (async () => {
       const bytes = await full();
       if (!bytes) return null;
       try {
         const small = await shrinkThumb(bytes, width);
-        if (epoch === this.epoch) this.keep(key, small);
+        if (epoch === this.epoch) {
+          this.keep(key, small);
+          this.disk?.put(key, small);
+        }
         return small;
       } catch {
         // A picture sharp cannot read is handed over as it came, as before.
