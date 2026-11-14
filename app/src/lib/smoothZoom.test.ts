@@ -62,7 +62,7 @@ describe("a zoom drawn a frame at a time", () => {
 
 /** Just enough of a Leaflet map for the zoom's own bookkeeping: a flat world, one pixel a
  * unit at zoom 0, and the order its events come in. */
-function fakeMap() {
+function fakeMap(tiles?: object) {
   const events: string[] = [];
   const pt = (x: number, y: number) => ({
     x,
@@ -90,6 +90,8 @@ function fakeMap() {
     _moveEnd: () => events.push("zoomend"),
     _stop: () => undefined,
     _tryAnimatedZoom: (() => false) as (c: unknown, z: number, o?: object) => boolean,
+    layers: [] as unknown[],
+    eachLayer: (fn: (l: unknown) => void) => map.layers.forEach(fn),
     on: () => undefined,
     fire: (name: string) => events.push(name),
     setView(c: ReturnType<typeof ll>, z: number, o?: { animate?: boolean }) {
@@ -105,6 +107,7 @@ function fakeMap() {
     zoomIn: (_d?: number) => map,
     zoomOut: (_d?: number) => map,
   };
+  if (tiles) map.layers.push(tiles);
   smoothZoom(map as unknown as L.Map);
   return map;
 }
@@ -140,5 +143,45 @@ describe("the zoom's bookkeeping", () => {
     expect(map._zoom).toBe(1);
     map._stop();
     expect(map._zoom).toBe(1);
+  });
+
+  it("has the tiles fetch for where the zoom ends, at its start, and keeps the old ones till then", () => {
+    const calls: string[] = [];
+    let mapZoom = 0;
+    const tiles = {
+      _setView(_c: unknown, zoom: number, _noPrune?: boolean, noUpdate?: boolean) {
+        calls.push(`view ${zoom} ${noUpdate ? "scale" : `fetch at map zoom ${mapZoom}`}`);
+      },
+      _setZoomTransforms: (_c: unknown, zoom: number) => calls.push(`scale ${zoom}`),
+      _pruneTiles: () => calls.push("prune"),
+      _retainChildren: () => undefined,
+      _tileZoom: undefined as number | undefined,
+      _clampZoom: (z: number) => z,
+      _updateLevels: () => calls.push("level"),
+    };
+    const map = fakeMap(tiles);
+    const move = map._move;
+    map._move = (c: Parameters<typeof move>[0], z: number, data?: object) => {
+      move(c, z);
+      // As the layer does on each zoom event: a step of a zoom only scales.
+      tiles._setView(c, z, !!data, !!data);
+    };
+    Object.defineProperty(map, "_zoom", {
+      get: () => mapZoom,
+      set: (z: number) => {
+        mapZoom = z;
+      },
+    });
+    mapZoom = 3;
+    map.zoomOut(); // to 2
+    expect(calls).toEqual(["level", "view 2 fetch at map zoom 2", "scale 3"]);
+    expect(tiles._tileZoom).toBe(2);
+    tiles._pruneTiles();
+    expect(calls).not.toContain("prune");
+    frames.splice(0).forEach((f) => f(0));
+    map._stop();
+    expect(calls[calls.length - 1]).toBe("view 2 fetch at map zoom 2");
+    tiles._pruneTiles();
+    expect(calls[calls.length - 1]).toBe("prune");
   });
 });
