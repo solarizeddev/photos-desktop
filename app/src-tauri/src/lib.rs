@@ -3516,18 +3516,28 @@ const SOFTWARE_VIDEO_FLAG: &str = "video-software-decode";
 #[cfg(target_os = "linux")]
 fn early_data_dir() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
-        .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))?;
     Some(base.join("eu.akoos.photos.desktop"))
 }
 
-/// The ranks to run with: ours, then any the person set themselves, which win.
+/// The ranks to run with, from those inherited: ours (with the switch on) and then any the
+/// person set themselves, which win; None for none at all. Ours are taken off what is
+/// inherited first: a restart from Settings starts the new process with this one's
+/// environment, which carried them even after the switch was turned off.
 #[cfg(target_os = "linux")]
-fn video_ranks(own: Option<&str>) -> String {
-    match own {
-        Some(theirs) if !theirs.trim().is_empty() => format!("{SOFTWARE_VIDEO_RANKS},{theirs}"),
-        _ => SOFTWARE_VIDEO_RANKS.to_string(),
+fn video_ranks(inherited: Option<&str>, on: bool) -> Option<String> {
+    let mut theirs = inherited.unwrap_or("");
+    while let Some(rest) = theirs.strip_prefix(SOFTWARE_VIDEO_RANKS) {
+        theirs = rest.strip_prefix(',').unwrap_or(rest);
+    }
+    let theirs = theirs.trim();
+    match (on, theirs.is_empty()) {
+        (true, true) => Some(SOFTWARE_VIDEO_RANKS.to_string()),
+        (true, false) => Some(format!("{SOFTWARE_VIDEO_RANKS},{theirs}")),
+        (false, true) => None,
+        (false, false) => Some(theirs.to_string()),
     }
 }
 
@@ -3558,9 +3568,14 @@ pub fn run() {
     // decoders rank below the software ones. Set before anything starts, so the web process
     // inherits it.
     #[cfg(target_os = "linux")]
-    if early_data_dir().is_some_and(|d| d.join(SOFTWARE_VIDEO_FLAG).exists()) {
-        let own = std::env::var("GST_PLUGIN_FEATURE_RANK").ok();
-        std::env::set_var("GST_PLUGIN_FEATURE_RANK", video_ranks(own.as_deref()));
+    {
+        let on = early_data_dir().is_some_and(|d| d.join(SOFTWARE_VIDEO_FLAG).exists());
+        let inherited = std::env::var("GST_PLUGIN_FEATURE_RANK").ok();
+        match video_ranks(inherited.as_deref(), on) {
+            Some(ranks) if inherited.as_deref() != Some(ranks.as_str()) => std::env::set_var("GST_PLUGIN_FEATURE_RANK", ranks),
+            None if inherited.is_some() => std::env::remove_var("GST_PLUGIN_FEATURE_RANK"),
+            _ => {}
+        }
     }
 
     // Keep the WebView2 profile inside the app's own data folder so, on an
@@ -3936,11 +3951,16 @@ mod gate_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn software_video_ranks_leave_the_persons_own_last() {
-        use super::video_ranks;
-        assert!(video_ranks(None).starts_with("vah264dec:1,"));
-        assert!(!video_ranks(None).contains(' '));
-        assert!(video_ranks(Some("")).ends_with("nvh265sldec:1"));
-        assert!(video_ranks(Some("avdec_h264:0")).ends_with(",avdec_h264:0"));
+        use super::{video_ranks, SOFTWARE_VIDEO_RANKS as OURS};
+        assert_eq!(video_ranks(None, true).as_deref(), Some(OURS));
+        assert!(!OURS.contains(' ') && OURS.starts_with("vah264dec:1,"));
+        assert_eq!(video_ranks(Some("x:0"), true), Some(format!("{OURS},x:0")));
+        assert_eq!(video_ranks(None, false), None);
+        assert_eq!(video_ranks(Some("x:0"), false).as_deref(), Some("x:0"));
+        // Inherited across a restart from Settings: ours come off, and are not doubled.
+        assert_eq!(video_ranks(Some(OURS), false), None);
+        assert_eq!(video_ranks(Some(&format!("{OURS},x:0")), false).as_deref(), Some("x:0"));
+        assert_eq!(video_ranks(Some(&format!("{OURS},{OURS},x:0")), true), Some(format!("{OURS},x:0")));
     }
 
     #[test]
