@@ -18,7 +18,7 @@ import "../styles/AlbumDialogs.css";
 import "../styles/PersonSplit.css";
 
 type Box = [number, number, number, number];
-type SplitFace = { faceId: string; uid: string; box: Box };
+type SplitFace = { faceId: string; uid: string; box: Box; year?: number };
 type Start = {
   personId: string;
   name: string | null;
@@ -34,8 +34,23 @@ type Plan = {
   verdict: "reliable" | "weak" | "unreliable" | "few";
   leastSureA: SplitFace[];
   leastSureB: SplitFace[];
-  unsure: (SplitFace & { lean: "a" | "b" | "even" })[];
+  unsure: (SplitFace & { lean: "a" | "b" | "even" | "none" })[];
+  byYear: { year: number | null; a: number; b: number; unsure: number }[];
+  waiting: number[];
 };
+
+/** Years as the shortest text: runs of years as "2016–2019", the rest by commas, newest first. */
+function yearsText(years: number[]): string {
+  const sorted = [...years].sort((x, y) => y - x);
+  const runs: string[] = [];
+  for (let i = 0; i < sorted.length; ) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] - 1) j++;
+    runs.push(j > i ? `${sorted[j]}–${sorted[i]}` : String(sorted[i]));
+    i = j + 1;
+  }
+  return runs.join(", ");
+}
 type Applied = { stayed: number; moved: number; unsure: number; undo: string };
 type Undone = { ok: boolean; restored: number; skipped: number };
 type Side = "a" | "b";
@@ -383,11 +398,13 @@ export function PersonSplit({
               </section>
             )}
             <section className="ps-section">
-              <h4 className="ps-h">{t("faces.split.contrast")}</h4>
+              <h4 className="ps-h">{t(start.contrast.some((f) => f.year) ? "faces.split.contrastByYear" : "faces.split.contrast")}</h4>
+              {start.contrast.some((f) => f.year) && <p className="ps-note">{t("faces.split.contrastByYearHint")}</p>}
               <div className="ps-grid">
                 {start.contrast.map((f) => (
                   <div key={f.faceId} className={`ps-cell${picks.get(f.faceId) ? ` ${picks.get(f.faceId)}` : ""}`}>
                     {face(f)}
+                    {f.year && <span className="ps-year">{f.year}</span>}
                     {sideButtons(f.faceId)}
                   </div>
                 ))}
@@ -431,6 +448,29 @@ export function PersonSplit({
                   </span>
                 </div>
                 <p className="ps-note">{t("faces.split.unsureNote", { name: here })}</p>
+                {plan.byYear.filter((r) => r.year !== null).length > 1 && (
+                  <section className="ps-section">
+                    <h4 className="ps-h">{t("faces.split.byYear")}</h4>
+                    <div className="ps-years">
+                      {plan.byYear.map((r) => (
+                        <div key={r.year ?? "none"} className="ps-year-row">
+                          <span className="ps-year-label">{r.year ?? t("faces.split.undated")}</span>
+                          <span className="ps-bar small" role="img" aria-label={`${here} ${r.a}, ${otherName} ${r.b}, ${t("faces.split.unsure")} ${r.unsure}`}>
+                            <span className="ps-bar-a" style={{ flexGrow: r.a }} />
+                            <span className="ps-bar-b" style={{ flexGrow: r.b }} />
+                            <span className="ps-bar-u" style={{ flexGrow: r.unsure }} />
+                          </span>
+                          <span className="ps-year-counts">
+                            <strong className="a">{r.a}</strong> · <strong className="b">{r.b}</strong> · {r.unsure}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+                {plan.waiting.length > 0 && (
+                  <p className="ps-note">{t("faces.split.waiting", { years: yearsText(plan.waiting) })}</p>
+                )}
                 <div className="ps-columns">
                   <section className="ps-section">
                     <h4 className="ps-h a">{t("faces.split.leastSure", { name: here })}</h4>
@@ -480,9 +520,12 @@ export function PersonSplit({
               {unsureLeft.slice(0, REVIEW_PAGE).map((f) => (
                 <div key={f.faceId} className="ps-cell">
                   {face(f)}
-                  <span className="ps-lean">
-                    {f.lean === "even" ? t("faces.split.even") : t("faces.split.leans", { name: f.lean === "a" ? here : otherName })}
-                  </span>
+                  {f.year && <span className="ps-year">{f.year}</span>}
+                  {f.lean !== "none" && (
+                    <span className="ps-lean">
+                      {f.lean === "even" ? t("faces.split.even") : t("faces.split.leans", { name: f.lean === "a" ? here : otherName })}
+                    </span>
+                  )}
                   {sideButtons(f.faceId)}
                   <button className="ps-skip" onClick={() => setReviewed((r) => new Set(r).add(f.faceId))}>
                     {t("faces.split.skip")}

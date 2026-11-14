@@ -1619,6 +1619,7 @@ export class ProtonSession {
     if (!photos || !base) return;
     faceScanner.setSource({
       listUids: async () => (await this.getTimeline()).map((item) => item.uid),
+      listTimes: async () => new Map((await this.getTimeline()).map((item) => [item.uid, item.captureTime])),
       pictures: (uids, ahead) => this.scanPictures(photos, uids, ahead),
       listTrashed: async () => {
         const links = new Set<string>();

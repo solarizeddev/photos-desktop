@@ -155,6 +155,8 @@ export type ScanSource = {
   listTrashed(): Promise<Set<string>>;
   /** Which photos are hidden: they are not scanned, and their faces never go to Drive. */
   hiddenTest(): (uid: string) => boolean;
+  /** Each photo's capture time in ms, by uid, as the timeline has it (splitting a person by age). */
+  listTimes?(): Promise<Map<string, number>>;
 };
 
 export type ScanState =
@@ -479,9 +481,35 @@ export class FaceScanner {
     ]);
   }
 
+  /** Counts the libraries set (sign-ins, sign-outs, locks): what was read of one is not used for the next. */
+  library = 0;
+
+  /** The photos' capture times as last listed, and when. */
+  private times: { at: number; map: Map<string, number> } | null = null;
+
+  /**
+   * Each photo's capture time by uid, for telling a person's faces apart by age; listed again
+   * at most every ten minutes. Empty when there is no library or it cannot be listed.
+   */
+  async photoTimes(): Promise<Map<string, number>> {
+    const now = Date.now();
+    if (this.times && now - this.times.at < 10 * 60_000) return this.times.map;
+    const source = this.source;
+    if (!source?.listTimes) return new Map();
+    try {
+      const map = await source.listTimes();
+      if (this.source === source) this.times = { at: now, map };
+      return map;
+    } catch {
+      return this.times?.map ?? new Map();
+    }
+  }
+
   /** The library to read, set on sign-in and cleared on sign-out or lock. */
   setSource(source: ScanSource | null): void {
     this.source = source;
+    this.times = null;
+    this.library++;
     if (source) this.kick();
     else this.stop(true);
   }
