@@ -2567,6 +2567,21 @@ fn bench_note(app: AppHandle, line: String) {
     }
 }
 
+/// Whether a screen's name may go into the log: a short word of lowercase letters, digits
+/// and `_`, as the window names its screens. Nothing a photo, album or person is called fits.
+fn screen_name_ok(screen: &str) -> bool {
+    !screen.is_empty() && screen.len() <= 40 && screen.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Which screen the window shows, written into the log as it changes, so a profile run can
+/// say on its own what the app was doing when it measured what it measured.
+#[tauri::command]
+fn screen_note(app: AppHandle, screen: String) {
+    if screen_name_ok(&screen) {
+        note(&app, &format!("[screen] {screen}"));
+    }
+}
+
 /// The current start-with-Windows preference, for the Settings toggle.
 #[tauri::command]
 fn launch_at_login() -> bool {
@@ -3557,6 +3572,7 @@ pub fn run() {
             log_note,
             scroll_bench,
             bench_note,
+            screen_note,
             launch_at_login,
             set_launch_at_login,
             hide_tray_popup,
@@ -3853,6 +3869,16 @@ mod gate_tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_screen_note_takes_only_a_screen_name() {
+        assert!(screen_name_ok("people"));
+        assert!(screen_name_ok("person_photos"));
+        let long = "a".repeat(41);
+        for bad in ["", "People", "a b", "x/y", "Violeta", long.as_str()] {
+            assert!(!screen_name_ok(bad), "{bad:?} was let through");
+        }
     }
 
     #[test]
