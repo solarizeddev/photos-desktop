@@ -67,3 +67,25 @@ describe("cutting a thumbnail down", () => {
     expect(await new SmallThumbs().get("u", 128, async () => null)).toBeNull();
   });
 });
+
+describe("cut thumbnails kept between runs", () => {
+  it("are cut once for a size, and read back by a new run without the full thumbnail", async () => {
+    const disk = new Map<string, Buffer>();
+    const store = { get: (k: string) => disk.get(k) ?? null, put: (k: string, b: Buffer) => void disk.set(k, b) };
+    const full = await sharp({ create: { width: 512, height: 384, channels: 3, background: "#888" } }).jpeg().toBuffer();
+    let fetched = 0;
+    const first = new SmallThumbs(undefined, store);
+    await first.get("vol~a", 192, async () => {
+      fetched++;
+      return full;
+    });
+    expect(disk.size).toBe(1);
+    const second = new SmallThumbs(undefined, store);
+    const again = await second.get("vol~a", 192, async () => {
+      fetched++;
+      return full;
+    });
+    expect(fetched).toBe(1);
+    expect((await sharp(again!).metadata()).height).toBe(192);
+  });
+});
