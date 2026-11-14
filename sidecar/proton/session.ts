@@ -2388,6 +2388,12 @@ export class ProtonSession {
       } catch {
         return;
       }
+      // The same file as the first stream reads: a version uploaded since would serve other
+      // bytes for the same places.
+      if ((opened.downloader.getClaimedSizeInBytes?.() ?? 0) !== video.size) {
+        opened.unused();
+        return;
+      }
       let stream: SeekableStream;
       try {
         stream = opened.downloader.getSeekableStream();
