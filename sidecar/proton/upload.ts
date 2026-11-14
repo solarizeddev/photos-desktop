@@ -43,7 +43,7 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { readdir, rm, stat } from "node:fs/promises";
+import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join } from "node:path";
 import { Readable } from "node:stream";
 
@@ -69,6 +69,8 @@ import { dateFromName } from "./nameDate.ts";
 import { diag } from "./diag.ts";
 import { readMp4CreationTime } from "./mp4Date.ts";
 import { withRetry } from "./transient.ts";
+import { fingerprintOf } from "./duplicates.ts";
+import { matchFile, type LibraryIndex, type Match, type MatchWhy } from "./importMatch.ts";
 import { watchSlowUploads } from "./api.ts";
 import { PhotoTag, ThumbnailType } from "@protontech/drive-sdk";
 
@@ -180,6 +182,8 @@ export type ImportState = {
   items?: number;
   checked?: number;
   already?: number;
+  /** How many look like a photo already in the library without being the same file. */
+  probable?: number;
 };
 
 export type UploadStatus = {
@@ -1090,6 +1094,7 @@ async function drain(photos: any): Promise<void> {
           };
           const video = group.related?.get(file);
           let mainUid: string | null = null;
+          let stillWentUp = false;
           // In the library as a lighter copy, uploaded now or found there.
           let wentLighter = false;
           // Not a Live Photo's still: its video is matched to it as it was taken.
@@ -1128,6 +1133,7 @@ async function drain(photos: any): Promise<void> {
               abort.signal,
             );
             mainUid = uid ?? duplicates[0] ?? null;
+            stillWentUp = uid !== null;
             wentLighter = !!lighter && mainUid !== null;
             if (mainUid) group.uidOf?.set(file, mainUid);
             if (uid) {
@@ -1174,15 +1180,23 @@ async function drain(photos: any): Promise<void> {
             // so a large export never holds the disk for longer than it must.
             if (group.staging && isStagedImport(file)) await rm(file, { force: true }).catch(() => {});
           }
-          if (video) await processLiveVideo(video, file, mainUid);
+          if (video) await processLiveVideo(video, file, mainUid, stillWentUp);
         };
 
         /** A Live Photo's video, uploaded as part of the photo that went up just before it. */
-        const processLiveVideo = async (video: string, photo: string, mainUid: string | null) => {
+        const processLiveVideo = async (video: string, photo: string, mainUid: string | null, stillWentUp: boolean) => {
           const item = status.items[group.itemOf?.get(video) ?? -1];
           if (!item || abort.signal.aborted) return;
           try {
             if (!mainUid) throw new Error("its photo did not upload");
+            // A still the library already had keeps what it has: a video is never joined to
+            // a photo that was there before this upload.
+            if (!stillWentUp) {
+              item.status = "skipped";
+              item.error = "already in your library";
+              status.skipped++;
+              return;
+            }
             item.status = "uploading";
             const progress = (sent: number, size: number) => {
               item.sent = sent;
@@ -1599,8 +1613,13 @@ export type ReviewItem = {
   alsoIn?: string[];
 };
 
-/** What the library check found for one item: not yet checked, new, or already there. */
-export type ReviewCheck = "pending" | "new" | "already";
+/**
+ * What the library check found for one item: not yet checked, new, already there (the same
+ * file, under any name), or probably there (the same photo taken at the same moment, in other
+ * bytes). One already or probably there is not uploaded: the photo the library has goes into
+ * the album instead, unless the probable ones are asked for anyway.
+ */
+export type ReviewCheck = "pending" | "new" | "already" | "probable";
 
 /** The export under review, between `prepareImport` and `confirmImport` or `discardImport`. */
 let review: {
@@ -1610,8 +1629,14 @@ let review: {
   frames: Record<string, string>;
   media: Record<string, ShellMediaInfo>;
   checks: ReviewCheck[];
+  /** Why each item was found already or probably there. */
+  reasons: (MatchWhy | null)[];
   /** The photo already in the library, for an item found there, and for its Live video. */
   found: Map<string, string>;
+  /** The photo an item is probably a copy of, or null when there is none to point to. */
+  probable: Map<string, string | null>;
+  /** Items whose match is a hidden photo: left out, so the hidden one is not put in an album. */
+  hiddenMatch: Set<string>;
   /** Files the check asked about and the library does not have: their upload skips asking. */
   verifiedNew: Set<string>;
   abort: AbortController;
@@ -1635,6 +1660,7 @@ export function prepareImport(
   photos: any,
   given: Record<string, string> = {},
   media: Record<string, ShellMediaInfo> = {},
+  library?: () => Promise<LibraryIndex | null>,
 ): void {
   const job = pendingImport;
   if (!job) return;
@@ -1680,7 +1706,10 @@ export function prepareImport(
         frames,
         media,
         checks: items.map((): ReviewCheck => "pending"),
+        reasons: items.map((): MatchWhy | null => null),
         found: new Map<string, string>(),
+        probable: new Map<string, string | null>(),
+        hiddenMatch: new Set<string>(),
         verifiedNew: new Set<string>(),
         abort: new AbortController(),
         myFiles: job.myFiles,
@@ -1695,8 +1724,9 @@ export function prepareImport(
         items: items.length,
         checked: 0,
         already: 0,
+        probable: 0,
       };
-      void checkReview(photos, current);
+      void checkReview(photos, current, library);
     } catch (e) {
       for (const root of job.staged) await discardStagedImport(root);
       status.importError = (e as Error).message;
@@ -1705,8 +1735,17 @@ export function prepareImport(
   })();
 }
 
-/** Marks each reviewed item new or already in the library, a few at a time. */
-async function checkReview(photos: any, current: NonNullable<typeof review>): Promise<void> {
+/** Marks each reviewed item new, already or probably in the library, a few at a time. */
+async function checkReview(
+  photos: any,
+  current: NonNullable<typeof review>,
+  library?: () => Promise<LibraryIndex | null>,
+): Promise<void> {
+  // The library's own record of every photo's content, when it can be had: one listing,
+  // instead of a question to the server per file that only finds files under the same name.
+  const loaded = library ? await library().catch(() => null) : null;
+  const index = loaded?.canMatchContent() ? loaded : null;
+  diag.log("upload", "import_check", { items: current.plan.length, by_content: index ? 1 : 0 });
   let next = 0;
   const worker = async () => {
     for (;;) {
@@ -1714,37 +1753,97 @@ async function checkReview(photos: any, current: NonNullable<typeof review>): Pr
       if (i >= current.plan.length || current.abort.signal.aborted) return;
       const item = current.plan[i];
       try {
-        const existing = await findInLibrary(photos, item.file, current.abort.signal);
-        if (existing) current.found.set(item.file, existing);
-        else current.verifiedNew.add(item.file);
-        if (item.liveVideo) {
-          const video = await findInLibrary(photos, item.liveVideo, current.abort.signal);
-          if (video) current.found.set(item.liveVideo, video);
-          else current.verifiedNew.add(item.liveVideo);
-        }
-        current.checks[i] = existing ? "already" : "new";
+        const match = await checkItem(photos, item, index, current.abort.signal);
+        record(current, i, item, match);
       } catch {
         // Unchecked is not a verdict: the upload checks again, so this only loses the mark.
         current.checks[i] = "new";
       }
       if (review === current && status.importing?.phase === "review") {
         status.importing.checked = (status.importing.checked ?? 0) + 1;
-        if (current.checks[i] === "already") {
-          status.importing.already = (status.importing.already ?? 0) + 1;
-        }
+        if (current.checks[i] === "already") status.importing.already = (status.importing.already ?? 0) + 1;
+        if (current.checks[i] === "probable") status.importing.probable = (status.importing.probable ?? 0) + 1;
       }
     }
   };
   await Promise.all(Array.from({ length: CHECK_CONCURRENCY }, worker));
 }
 
+/** Notes what the check found for item `i`. */
+function record(current: NonNullable<typeof review>, i: number, item: ExportItem, match: Match & { video?: string }): void {
+  if (match.verdict === "new") {
+    current.checks[i] = "new";
+    current.verifiedNew.add(item.file);
+    if (item.liveVideo) current.verifiedNew.add(item.liveVideo);
+    return;
+  }
+  current.checks[i] = match.verdict;
+  current.reasons[i] = match.why;
+  if (match.hidden) current.hiddenMatch.add(item.file);
+  if (match.verdict === "already") current.found.set(item.file, match.uid);
+  else current.probable.set(item.file, match.uid);
+}
+
 /**
- * The photo in the library with these exact bytes, if there is one. The SDK asks the
- * server by name first and hashes the file only when a name matches, which in an import
- * is rare: hashing every file up front was most of what made the check slow.
+ * Whether one item of the export is in the library. With the library's content hashes, by
+ * content under any name and then by moment and look; without them, as Proton checks, by name
+ * and bytes. A Live Photo is one item: found when its still is, and held back for a look when
+ * only its video is.
  */
-async function findInLibrary(photos: any, path: string, signal: AbortSignal): Promise<string | null> {
-  const duplicates: string[] = await photos.findPhotoDuplicates(basename(path), () => sha1Of(path), signal);
+async function checkItem(photos: any, item: ExportItem, index: LibraryIndex | null, signal: AbortSignal): Promise<Match> {
+  if (!index) {
+    const existing = await findInLibrary(photos, item.file, signal);
+    if (existing) return { verdict: "already", uid: existing, why: "same_file", hidden: false };
+    if (item.liveVideo && (await findInLibrary(photos, item.liveVideo, signal))) {
+      return { verdict: "probable", uid: null, why: "live_video", hidden: false };
+    }
+    return { verdict: "new" };
+  }
+  const video = (mediaTypeOf(item.file) ?? "").startsWith("video/");
+  const sha1 = await sha1Of(item.file);
+  if (signal.aborted) throw new Error("cancelled");
+  const match = await matchFile(index, {
+    sha1,
+    takenMs: item.sidecar?.takenMs ?? (await takenForMatch(item.file)),
+    video,
+    print: async () => (video ? null : fingerprintOf(await readFile(item.file))),
+  });
+  if (match.verdict !== "new") return match;
+  // A photo uploaded since the library's hashes were listed is not among them: Proton's own
+  // check still finds it by name and bytes.
+  const byName = await findInLibrary(photos, item.file, signal, sha1);
+  if (byName) return { verdict: "already", uid: byName, why: "same_file", hidden: index.hidden(byName) };
+  if (item.liveVideo) {
+    const half = index.sameFile(await sha1Of(item.liveVideo));
+    if (half) return { verdict: "probable", uid: null, why: "live_video", hidden: index.hidden(half) };
+  }
+  return match;
+}
+
+/**
+ * When a file was taken, for matching it: its EXIF date, or a video's recorded time. Never the
+ * name or the file's own times, which say when it was copied, not taken.
+ */
+async function takenForMatch(path: string): Promise<number | null> {
+  try {
+    const exif = await exifFactsOf(path);
+    if (exif.captureTime) return exif.captureTime.getTime();
+    if ((mediaTypeOf(path) ?? "").startsWith("video/")) {
+      const recorded = await readMp4CreationTime(path).catch(() => null);
+      if (recorded) return recorded.getTime();
+    }
+  } catch {
+    /* no date to go by */
+  }
+  return null;
+}
+
+/**
+ * The photo in the library with this exact name and these bytes, if there is one. The SDK asks
+ * the server by name first and hashes the file only when a name matches.
+ */
+async function findInLibrary(photos: any, path: string, signal: AbortSignal, sha1?: string): Promise<string | null> {
+  const duplicates: string[] = await photos.findPhotoDuplicates(basename(path), async () => sha1 ?? sha1Of(path), signal);
   return duplicates[0] ?? null;
 }
 
@@ -1754,15 +1853,18 @@ export function getImportReview(): { items: ReviewItem[] } | null {
 }
 
 /** What the library check has found so far, one entry per reviewed item. */
-export function getImportChecks(): { checks: ReviewCheck[] } | null {
-  return review ? { checks: review.checks } : null;
+export function getImportChecks(): { checks: ReviewCheck[]; reasons: (MatchWhy | null)[] } | null {
+  return review ? { checks: review.checks, reasons: review.reasons } : null;
 }
 
 /**
  * Queues the reviewed export, less what was left out. `albums` false puts everything on
- * the timeline; `live` false uploads a Live Photo's two files as two separate items.
+ * the timeline; `live` false uploads a Live Photo's two files as two separate items. An item
+ * probably in the library is not uploaded unless `probable` is true: the photo the library has
+ * goes into its album instead, and one with no photo to point to is left out. An item whose
+ * match is a hidden photo is always left out, so the hidden photo is not put in an album.
  */
-export function confirmImport(photos: any, exclude: number[] = [], albums = true, live = true): void {
+export function confirmImport(photos: any, exclude: number[] = [], albums = true, live = true, probable = false): void {
   const current = review;
   if (!current) return;
   review = null;
@@ -1770,6 +1872,16 @@ export function confirmImport(photos: any, exclude: number[] = [], albums = true
   status.importing = undefined;
 
   const left = new Set(exclude);
+  current.plan.forEach((item, id) => {
+    if (current.hiddenMatch.has(item.file)) {
+      if (current.checks[id] === "already" || !probable) left.add(id);
+      return;
+    }
+    if (probable || current.checks[id] !== "probable") return;
+    const uid = current.probable.get(item.file);
+    if (uid) current.found.set(item.file, uid);
+    else left.add(id);
+  });
   const kept = current.plan.filter((_, id) => !left.has(id));
   // Left-out files are never uploaded, so their unpacked copies go now.
   for (const item of current.plan.filter((_, id) => left.has(id))) {

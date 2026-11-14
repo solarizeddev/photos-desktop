@@ -54,6 +54,12 @@
   font-size: 11px;
   color: var(--status-synced);
 }
+/* Probably in the library in other bytes: not uploaded unless asked for. */
+.ir-probable {
+  padding: 0 5px;
+  font-size: 11px;
+  color: var(--status-pending);
+}
 
 /* The album switch and the hint share the picker's footer with its two buttons. */
 .ir-foot {

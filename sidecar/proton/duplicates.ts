@@ -255,6 +255,30 @@ export class DuplicateFinder {
     this.inputsChanged();
   }
 
+  /** Each library photo's content hash, as the last timeline listing gave it. */
+  contentHashEntries(): [string, string][] {
+    return [...this.contentHashes];
+  }
+
+  /**
+   * A library photo's fingerprint: the one the scan made, or one made now from its small
+   * thumbnail, and kept, when the scan has not reached it. Null for one with no picture to read.
+   */
+  async printOf(uid: string): Promise<Fingerprint | null> {
+    this.load();
+    const known = this.prints.get(uid);
+    if (known) return known;
+    if (this.unreadable.has(uid) || !this.source) return null;
+    for await (const { uid: got, bytes } of this.source.thumbnails([uid])) {
+      if (got !== uid) continue;
+      const fp = bytes ? await this.fingerprint(bytes).catch(() => null) : null;
+      if (fp) this.prints.set(uid, fp);
+      else this.unreadable.add(uid);
+      return fp;
+    }
+    return null;
+  }
+
   /** Photos moved to the trash anywhere in the app: no group holds them from now on. */
   removed(uids: string[]): void {
     for (const u of uids) this.gone.add(u);
