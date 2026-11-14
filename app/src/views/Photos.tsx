@@ -3604,6 +3604,7 @@ export function Photos({
                 onContext={onCellContext}
                 offlineUids={offlineUids}
                 localUids={localUids}
+                covered={settingsOpen || uploadOpen}
               />
             ) : <VirtualSections
               scrollRef={scrollRef}
