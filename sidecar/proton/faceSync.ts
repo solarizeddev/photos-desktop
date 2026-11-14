@@ -506,34 +506,8 @@ export function applyCopy(store: FaceStore, copy: FaceCopy, ownToo = false): App
   }
   pruneCuration(p);
 
-  for (const [phone, local] of localOf) {
-    if (rejected.has(local.id)) continue;
-    const decided = p.confirmed[local.id] !== undefined;
-    if (phone.rejected) {
-      if (!decided) {
-        rejected.add(local.id);
-        delete p.assign[local.id];
-        result.rejected++;
-      }
-      continue;
-    }
-    const name = phone.confirmed ?? phone.person;
-    if (!name || nameTakenOffSince(p, name, copy.createdAt)) continue;
-    const ownerName = p.assign[local.id] ? nameOf.get(p.assign[local.id]) : undefined;
-    if (ownerName !== undefined) {
-      if (foldPersonName(ownerName) !== foldPersonName(name)) result.conflicts++;
-      continue;
-    }
-    if (decided || p.blocked[local.id]?.some((n) => foldPersonName(n) === foldPersonName(name))) continue;
-    const person = personNamed(p, name);
-    nameOf.set(person.id, person.name!);
-    p.assign[local.id] = person.id;
-    // Only a name confirmed there is confirmed here: the other device's grouping is as automatic as this one's.
-    if (phone.confirmed) p.confirmed[local.id] = person.name!;
-    result.named++;
-  }
-  p.rejected = [...rejected];
-
+  // The marks first: one set by hand there after the confirmation here takes the face off that
+  // person, so the name loop below can then give it the name it has there.
   for (const mark of copy.notPerson) {
     const local = byKeyIndex.get(`${mark.key}#${mark.index}`);
     if (!local) continue;
@@ -560,6 +534,52 @@ export function applyCopy(store: FaceStore, copy: FaceCopy, ownToo = false): App
     p.blocked[local.id] = list;
     result.marked++;
   }
+  for (const [phone, local] of localOf) {
+    if (rejected.has(local.id)) continue;
+    const decided = p.confirmed[local.id] !== undefined;
+    if (phone.rejected) {
+      if (!decided) {
+        rejected.add(local.id);
+        delete p.assign[local.id];
+        result.rejected++;
+      }
+      continue;
+    }
+    const name = phone.confirmed ?? phone.person;
+    if (!name || nameTakenOffSince(p, name, copy.createdAt)) continue;
+    if (p.blocked[local.id]?.some((n) => foldPersonName(n) === foldPersonName(name))) continue;
+    const ownerName = p.assign[local.id] ? nameOf.get(p.assign[local.id]) : undefined;
+    if (ownerName !== undefined && foldPersonName(ownerName) === foldPersonName(name)) {
+      delete p.conflicts[local.id];
+      continue;
+    }
+    if (ownerName !== undefined || decided) {
+      // Named differently on the two sides. A face confirmed there and only grouped here takes the
+      // name it was confirmed as: a hand there outranks this computer's own guess, which is all an
+      // unconfirmed name here is. Confirmed on both sides, neither outranks the other: the name here
+      // stays, and the face is kept as a conflict for someone to decide.
+      if (!phone.confirmed) {
+        result.conflicts++;
+        continue;
+      }
+      if (decided) {
+        if (foldPersonName(p.confirmed[local.id]) !== foldPersonName(phone.confirmed)) {
+          p.conflicts[local.id] = { there: phone.confirmed, device: copy.deviceId, at: copy.createdAt };
+          result.conflicts++;
+        }
+        continue;
+      }
+    }
+    const person = personNamed(p, name);
+    nameOf.set(person.id, person.name!);
+    p.assign[local.id] = person.id;
+    // Only a name confirmed there is confirmed here: the other device's grouping is as automatic as this one's.
+    if (phone.confirmed) p.confirmed[local.id] = person.name!;
+    delete p.conflicts[local.id];
+    result.named++;
+  }
+  p.rejected = [...rejected];
+
   for (const m of copy.manual) {
     if (!m.name.trim() || nameTakenOffSince(p, m.name, copy.createdAt)) continue;
     const name = holder(m.name)?.name ?? m.name;

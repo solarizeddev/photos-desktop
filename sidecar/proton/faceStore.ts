@@ -125,7 +125,17 @@ export type PeopleState = {
   heldOver: HeldOver[];
   /** The generation of the keys `namedAt` and `curation` are kept under; see [NAME_KEYS]. */
   nameKeys: number;
+  /**
+   * Faces confirmed as one person here and as another on a device whose copy was taken in, by
+   * face id: the name there, the device, and when its copy was made. Neither side's confirmation
+   * outranks the other's, so the face keeps its name here until someone decides; a split of the
+   * person here offers these first. Gone once both sides agree, or a hand decides it here.
+   */
+  conflicts: Record<string, Conflict>;
 };
+
+/** A face confirmed differently on another device: see `PeopleState.conflicts`. */
+export type Conflict = { there: string; device: string; at: number };
 
 /** Generation 2: names are keyed by `foldPersonName` with their accents kept, as the phone keys them;
  *  generation 1 dropped the accents, and its keys are brought up to date on load by [rekeyNames]. */
@@ -189,6 +199,7 @@ export function emptyPeople(): PeopleState {
     format: PEOPLE_FORMAT,
     heldOver: [],
     nameKeys: NAME_KEYS,
+    conflicts: {},
   };
 }
 

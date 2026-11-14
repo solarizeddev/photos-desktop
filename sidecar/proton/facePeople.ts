@@ -605,7 +605,7 @@ export function nameFaces(store: FaceStore, faceIds: string[], rawName: string, 
     p.people.push(person);
     p.namedAt[fold] = at;
   }
-  addFacesToPerson(store, person.id, faceIds);
+  addFacesToPerson(store, person.id, faceIds, at);
   return person.id;
 }
 
@@ -1065,6 +1065,7 @@ export function notThisPerson(store: FaceStore, faceId: string, at = Date.now())
   if (!store.facesOf(uid).some((f) => f.id === faceId)) return false;
   p.assign[faceId] = otherPerson(p).id;
   delete p.confirmed[faceId];
+  delete p.conflicts[faceId];
   if (person.name) {
     const list = p.blocked[faceId] ?? [];
     if (!list.includes(person.name)) list.push(person.name);
@@ -1121,8 +1122,19 @@ export function addFacesToPerson(store: FaceStore, id: string, faceIds: string[]
   let count = 0;
   // Moving a face to a person takes back a mark that it is not them.
   const unmarked: string[] = [];
+  const nameOf = new Map(p.people.filter((x) => x.name).map((x) => [x.id, x.name!]));
   for (const faceId of faceIds) {
     if (!known.has(faceId)) continue;
+    // Moved off someone named: it is not them, said by hand and with a time, as "not this person"
+    // says it. That is what lets another device move it too: there it is still grouped, or
+    // confirmed, as who it was, and a name alone would only be a disagreement between the two.
+    const was = p.assign[faceId] ? nameOf.get(p.assign[faceId]) : undefined;
+    if (was && person.name && foldPersonName(was) !== foldPersonName(person.name)) {
+      const list = p.blocked[faceId] ?? [];
+      if (!list.some((n) => foldPersonName(n) === foldPersonName(was))) p.blocked[faceId] = [...list, was];
+      noteCuration(p, 2, was, [portableFaceId(faceId)], false, at);
+    }
+    delete p.conflicts[faceId];
     p.assign[faceId] = id;
     p.rejected = p.rejected.filter((x) => x !== faceId);
     if (person.name) {
