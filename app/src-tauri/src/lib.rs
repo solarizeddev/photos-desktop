@@ -3799,7 +3799,7 @@ pub fn run() {
 mod gate_tests {
     // The gate is tested in isolation: `Gate` carries no `Sidecar`, so these exercise
     // the queueing and mutual-exclusion logic without spawning the Node process.
-    use super::{Gate, Priority};
+    use super::{screen_name_ok, Gate, Priority};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
