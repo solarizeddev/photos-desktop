@@ -47,8 +47,18 @@ export const COVER_SIZE = 320;
 /** Cut covers kept in memory: at some 20 KB each, a few MB for a long page of people. */
 const KEPT = 400;
 
-/** How many covers are cut at once. Each may fetch a preview, so kept low. */
+/** How many covers are cut from previews at once. Each fetches one, so kept low. */
 const AT_ONCE = 2;
+
+/**
+ * A cover is cut from the grid thumbnail, already here or fetched with others in one go,
+ * when the face's square in it has at least this share of the pixels the cover is shown
+ * at; only a face too small in it waits for the HD preview.
+ */
+const THUMB_ENOUGH = 0.8;
+
+/** Where cut covers are kept between runs (sealed, as the thumbnails are). */
+export type CoverDisk = { get(key: string): Buffer | null; put(key: string, cut: Buffer): void };
 
 /**
  * The square cut out of a `width` x `height` picture for `box`, shown in a circle: FACE_ZOOM_OUT
@@ -131,21 +141,38 @@ export class FaceCovers {
   /** Bumped by `clear`, so a cut finishing after a lock is not kept. */
   private epoch = 0;
 
-  constructor(private picture: CoverPicture) {}
+  constructor(
+    private picture: CoverPicture,
+    private more: {
+      /** The grid thumbnail, for a cover small enough to be cut from it. */
+      thumbnail?: (uid: string, gone: AbortSignal) => Promise<Buffer | null>;
+      disk?: CoverDisk;
+    } = {},
+  ) {}
 
-  async get(uid: string, box: FaceBox, gone: AbortSignal): Promise<Buffer | null> {
-    const key = `${uid}|${box.join(",")}`;
+  /**
+   * The cover of `box` in `uid`, `want` pixels a side at most (COVER_SIZE when not said): a
+   * small circle needs no HD preview.
+   */
+  async get(uid: string, box: FaceBox, gone: AbortSignal, want = COVER_SIZE): Promise<Buffer | null> {
+    const side = Math.max(1, Math.min(COVER_SIZE, Math.round(want)));
+    const key = `${uid}|${box.join(",")}|${side}`;
     const hit = this.kept.get(key);
     if (hit) {
       this.kept.delete(key);
       this.kept.set(key, hit);
       return hit;
     }
+    const stored = this.more.disk?.get(key);
+    if (stored) {
+      this.keep(key, stored);
+      return stored;
+    }
     if (gone.aborted) return null;
     // A cut everyone left while it waited in line is on its way out with nothing, so it is
     // not joined; one already being made will still answer, so it is.
     const under = this.running.get(key);
-    const run = under && (under.started || !under.stop.signal.aborted) ? under : this.start(uid, box, key);
+    const run = under && (under.started || !under.stop.signal.aborted) ? under : this.start(uid, box, key, side);
     run.askers++;
     gone.addEventListener(
       "abort",
@@ -157,30 +184,65 @@ export class FaceCovers {
     return run.made;
   }
 
-  /** Begins one cut, in line behind those already being made. */
-  private start(uid: string, box: FaceBox, key: string) {
+  /**
+   * Begins one cut: from the grid thumbnail at once when it is enough, else in line behind
+   * the cuts from previews already being made.
+   */
+  private start(uid: string, box: FaceBox, key: string, side: number) {
     const stop = new AbortController();
     const epoch = this.epoch;
     const run = { made: Promise.resolve<Buffer | null>(null), askers: 0, stop, started: false };
-    run.made = this.turn(stop.signal).then(async (go) => {
-      if (!go) return null;
+    const kept = (cut: Buffer) => {
+      if (epoch !== this.epoch) return;
+      this.keep(key, cut);
+      this.more.disk?.put(key, cut);
+    };
+    const fromPreview = (go: boolean) => {
+      if (!go) return Promise.resolve(null);
       run.started = true;
-      try {
-        const picture = await this.picture(uid);
-        const cut = picture ? await cutFace(picture.bytes, box) : null;
-        if (cut && picture?.keep && epoch === this.epoch) this.keep(key, cut);
-        return cut;
-      } catch {
-        return null;
-      } finally {
-        this.release();
-      }
-    });
+      return (async () => {
+        try {
+          const picture = await this.picture(uid);
+          const cut = picture ? await cutFace(picture.bytes, box, side) : null;
+          if (cut && picture?.keep) kept(cut);
+          return cut;
+        } catch {
+          return null;
+        } finally {
+          this.release();
+        }
+      })();
+    };
+    run.made = this.more.thumbnail
+      ? this.fromThumbnail(uid, box, side, stop.signal)
+          .catch(() => null)
+          .then((small) => {
+            // Left while the thumbnail was tried: no preview is fetched for nobody.
+            if (!small) return stop.signal.aborted ? null : this.turn(stop.signal).then(fromPreview);
+            kept(small);
+            return small;
+          })
+      : // In line at once, as asked.
+        this.turn(stop.signal).then(fromPreview);
     this.running.set(key, run);
     void run.made.finally(() => {
       if (this.running.get(key) === run) this.running.delete(key);
     });
     return run;
+  }
+
+  /** The cover cut from the grid thumbnail, when the face has pixels enough in it. */
+  private async fromThumbnail(uid: string, box: FaceBox, side: number, gone: AbortSignal): Promise<Buffer | null> {
+    // The largest cover (a big card, or no size asked) is cut from the HD preview, as before.
+    if (!this.more.thumbnail || side >= COVER_SIZE) return null;
+    const bytes = await this.more.thumbnail(uid, gone);
+    if (!bytes || gone.aborted) return null;
+    const meta = await sharp(bytes, { failOn: "none" }).metadata();
+    if (!meta.width || !meta.height) return null;
+    const turned = (meta.orientation ?? 1) >= 5;
+    const { size } = faceSquare(box, turned ? meta.height : meta.width, turned ? meta.width : meta.height);
+    if (size < side * THUMB_ENOUGH) return null;
+    return cutFace(bytes, box, side);
   }
 
   /** Forget every cut cover: at lock, so nothing decrypted outlives the session. */
@@ -205,6 +267,7 @@ export class FaceCovers {
 
   /** Resolves true once this request may run, or false if it was given up first. */
   private turn(gone: AbortSignal): Promise<boolean> {
+    if (gone.aborted) return Promise.resolve(false);
     if (this.busy < AT_ONCE) {
       this.busy++;
       return Promise.resolve(true);
