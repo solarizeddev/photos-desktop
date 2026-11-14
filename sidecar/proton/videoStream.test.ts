@@ -394,10 +394,11 @@ describe("a video read range by range from Proton", () => {
     // The four blocks after the first were read before the player asked for them.
     const seeks = [...one.log.seeks, ...two.log.seeks, ...three.log.seeks].sort((a, b) => a - b);
     expect(seeks.slice(0, 5)).toEqual([0, 4 * MB, 8 * MB, 12 * MB, 16 * MB]);
-    const reads = one.log.reads + two.log.reads + three.log.reads;
     const later = await collect(video.read(16 * MB, 16 * MB + 10, gone));
     expect(later[0]).toBe((16 * MB) & 0xff);
-    expect(one.log.reads + two.log.reads + three.log.reads).toBeGreaterThanOrEqual(reads);
+    // Already read ahead: that block is not asked of Proton again.
+    const at16 = [...one.log.seeks, ...two.log.seeks, ...three.log.seeks].filter((p) => p === 16 * MB);
+    expect(at16.length).toBe(1);
     video.close();
   });
 
@@ -414,6 +415,26 @@ describe("a video read range by range from Proton", () => {
     await vi.waitFor(() => expect(left).toBe(1));
     expect(video.laneCount()).toBe(1);
     expect(video.broken()).toBe(false);
+    video.close();
+  });
+
+  it("lets a lane go whose read ahead failed, and plays on", async () => {
+    const one = seekable(64 * MB);
+    const video = new SeekingVideo(64 * MB, "video/mp4", one.stream, () => {});
+    const bad = seekable(64 * MB);
+    bad.fail(0);
+    for (let at = 0; at < 64 * MB; at += 4 * MB) bad.fail(at);
+    let left = 0;
+    // Every read on this lane fails.
+    bad.stream.read = async () => {
+      throw new Error("block failed");
+    };
+    video.addLane(bad.stream, () => left++);
+    const bytes = await collect(video.read(0, 12 * MB, new AbortController().signal));
+    expect(bytes.length).toBe(12 * MB + 1);
+    expect(bytes.every((b, i) => b === (i & 0xff))).toBe(true);
+    expect(video.broken()).toBe(false);
+    await vi.waitFor(() => expect(left).toBe(1));
     video.close();
   });
 

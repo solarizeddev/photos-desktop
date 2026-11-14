@@ -361,6 +361,9 @@ const MAX_STREAMED_VIDEO = 300 * 1024 * 1024;
 /** How many streams a large video reads on at most, and how long one more may wait for a slot. */
 const VIDEO_LANES = 3;
 const LANE_WAIT_MS = 2_000;
+/** How often a large video's lanes are looked at, and how long unread before it sheds them. */
+const LANE_CHECK_MS = 5_000;
+const LANE_IDLE_MS = 15_000;
 /** How long a face scan waits for the window's read of the timeline before reading its own. */
 const SCAN_WAITS_FOR_TIMELINE_MS = 3 * 60_000;
 /** How long a session's first scan waits for the window's read to begin. */
@@ -2367,8 +2370,18 @@ export class ProtonSession {
    * needs its slot has it back.
    */
   private async moreLanes(uid: string, video: SeekingVideo): Promise<void> {
-    for (let i = 1; i < VIDEO_LANES; i++) {
-      if (!this.photos || video.broken() || slotsInUse().count >= SDK_SLOTS - 1) return;
+    // Looked at again every so often while it is open: slots taken at the start may be free
+    // later, and a video not played for a while gives its extra lanes up for the one that is.
+    while (!video.done()) {
+      if (video.idleFor() > LANE_IDLE_MS) video.shed();
+      else await this.addLanes(uid, video);
+      await new Promise((resolve) => setTimeout(resolve, LANE_CHECK_MS));
+    }
+  }
+
+  private async addLanes(uid: string, video: SeekingVideo): Promise<void> {
+    while (video.laneCount() < VIDEO_LANES) {
+      if (!this.photos || video.done() || slotsInUse().count >= SDK_SLOTS - 1) return;
       let opened: Awaited<ReturnType<typeof openDownloader>>;
       try {
         opened = await openDownloader(this.photos, uid, LANE_WAIT_MS, { borrow: true });

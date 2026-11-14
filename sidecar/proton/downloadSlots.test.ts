@@ -102,6 +102,14 @@ describe("the paths that made a downloader and then did not download", () => {
   });
 });
 
+describe("a downloader made just as its wait ran out", () => {
+  it("gives its slot back and is not handed out", async () => {
+    const client = slotClient({ setupMs: 40 });
+    await expect(openDownloader(client, "slow", 10)).rejects.toThrow();
+    await vi.waitFor(() => expect(client.slots.inUse).toBe(0));
+  });
+});
+
 describe("a slot lent to a video's read lane", () => {
   it("comes back when another download finds every slot taken, but not for another lane", async () => {
     const client = slotClient();

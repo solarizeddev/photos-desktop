@@ -212,8 +212,8 @@ export function downloadVideo(downloader: any, size: number, mime: string, stop:
 /** What one seekable read asks of the SDK: one Proton block. */
 const SPAN = 16 * PIECE;
 /** How many spans are read ahead of the player, and how many pieces are kept in all. */
-const AHEAD = 4;
-const KEPT_PIECES = 16 * 12;
+const AHEAD = 6;
+const KEPT_PIECES = 16 * 16;
 /** A seekable read that has not answered in this long is given up, and the video with it. */
 const READ_STALL_MS = 60_000;
 
@@ -227,7 +227,7 @@ export type SeekableStream = {
 };
 
 /** One seekable stream of a video, and how to let it go (which gives its slot back). */
-type Lane = { stream: SeekableStream; close: () => void; busy: boolean; leaving: boolean };
+type Lane = { stream: SeekableStream; close: () => void; busy: boolean; leaving: boolean; first: boolean };
 
 /**
  * A video too large to hold whole, played through the SDK's seekable stream. It is read a
@@ -257,6 +257,8 @@ export class SeekingVideo implements VideoSource {
   private wanted = 0;
   private closed = false;
   private failed: Error | null = null;
+  /** When the player last read from it. */
+  private readAt = Date.now();
 
   constructor(
     readonly size: number,
@@ -264,7 +266,7 @@ export class SeekingVideo implements VideoSource {
     stream: SeekableStream,
     onClose: () => void,
   ) {
-    this.lanes.push({ stream, close: onClose, busy: false, leaving: false });
+    this.lanes.push({ stream, close: onClose, busy: false, leaving: false, first: true });
   }
 
   /**
@@ -276,7 +278,7 @@ export class SeekingVideo implements VideoSource {
       onClose();
       return null;
     }
-    const lane: Lane = { stream, close: onClose, busy: false, leaving: false };
+    const lane: Lane = { stream, close: onClose, busy: false, leaving: false, first: false };
     this.lanes.push(lane);
     this.freed();
     return () => {
@@ -285,9 +287,29 @@ export class SeekingVideo implements VideoSource {
     };
   }
 
-  /** How many streams it reads on (for tests). */
+  /** How many streams it reads on. */
   laneCount(): number {
     return this.lanes.length;
+  }
+
+  /** Closed, or broken: no lane is worth adding. */
+  done(): boolean {
+    return this.closed || this.failed !== null;
+  }
+
+  /** How long since the player last read from it (ms). */
+  idleFor(now = Date.now()): number {
+    return now - this.readAt;
+  }
+
+  /** Lets every lane but the first go, each once its read is done: a video not being played
+   * keeps no more than one slot. */
+  shed(): void {
+    for (const lane of [...this.lanes]) {
+      if (lane.first) continue;
+      lane.leaving = true;
+      if (!lane.busy) this.drop(lane);
+    }
   }
 
   close(): void {
@@ -321,8 +343,10 @@ export class SeekingVideo implements VideoSource {
   private async piece(index: number, gone: AbortSignal): Promise<Uint8Array | null> {
     const span = Math.floor((index * PIECE) / SPAN);
     this.wanted = span;
-    // A piece kept may still be thrown out by reads ahead; read it again then, once.
-    for (let tries = 0; tries < 2; tries++) {
+    this.readAt = Date.now();
+    // A piece kept may still be thrown out by reads ahead, and a read ahead it waited on may
+    // have failed on its lane: it is read again then.
+    for (let tries = 0; tries < 3; tries++) {
       const kept = this.pieces.get(index);
       if (kept) {
         this.pieces.delete(index);
@@ -338,7 +362,14 @@ export class SeekingVideo implements VideoSource {
       });
       const loaded = this.load(span, true);
       void loaded.catch(() => {});
-      if (!(await Promise.race([loaded.then(() => true), leave]))) return null;
+      // The lanes left free read on from here meanwhile (at the start, and after a seek).
+      this.ahead();
+      const ended = loaded.then(
+        () => true,
+        () => true,
+      );
+      if (!(await Promise.race([ended, leave]))) return null;
+      if (this.failed) throw this.failed;
       if (this.closed) return null;
     }
     if (this.failed) throw this.failed;
@@ -395,6 +426,12 @@ export class SeekingVideo implements VideoSource {
         const first = from / PIECE;
         for (let i = 0; i * PIECE < value.length; i++) this.keep(first + i, value.subarray(i * PIECE, (i + 1) * PIECE));
       } catch (e) {
+        // A read ahead that failed costs only its lane (not the first): the player's own read
+        // of that span tries again, and fails the video only if that fails too.
+        if (!wait && !this.closed) {
+          if (!lane.first) lane.leaving = true;
+          throw e;
+        }
         // The stream is no use any more (failed, ended short, or hung): the video is closed,
         // which lets every lane go, and the next ask opens it afresh.
         if (!this.failed && !this.closed) {
