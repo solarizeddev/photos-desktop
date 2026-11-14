@@ -633,6 +633,7 @@ export const en: Record<string, string> = {
   "faces.split.elsewhere": "Another device confirmed {count} of these faces as {name}",
   "faces.split.elsewhereHint": "Pick a name above and those faces count as examples of them.",
   "faces.split.next": "Next",
+  "faces.split.loading": "Reading the faces…",
   "faces.split.examples": "{name}: {count} examples",
   "faces.split.pickHint": "Tap who each face is. Five of each is plenty; leave any you are not sure of.",
   "faces.split.pairs": "Photos with both of them",

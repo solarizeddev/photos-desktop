@@ -343,7 +343,7 @@ export function PersonSplit({
                 {t("common.cancel")}
               </button>
               <button className="cf-btn primary" disabled={!otherName || sameName || !start} onClick={() => setStep("pick")}>
-                {t("faces.split.next")}
+                {start || error ? t("faces.split.next") : t("faces.split.loading")}
               </button>
             </div>
           </div>

@@ -632,6 +632,7 @@ export const es: Record<string, string> = {
   "faces.split.elsewhere": "Otro dispositivo confirmó {count} de estas caras como {name}",
   "faces.split.elsewhereHint": "Elige un nombre de arriba y esas caras cuentan como ejemplos suyos.",
   "faces.split.next": "Siguiente",
+  "faces.split.loading": "Leyendo las caras…",
   "faces.split.examples": "{name}: {count} ejemplos",
   "faces.split.pickHint": "Toca quién es cada cara. Con cinco de cada uno basta; deja las que no tengas claras.",
   "faces.split.pairs": "Fotos con los dos",
