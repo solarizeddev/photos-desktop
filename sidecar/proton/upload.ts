@@ -1930,6 +1930,47 @@ async function findInLibrary(photos: any, path: string, signal: AbortSignal, sha
   return duplicates[0] ?? null;
 }
 
+/** The longest edge of a review tile's picture. */
+const REVIEW_THUMB_EDGE = 320;
+
+/**
+ * Pictures for the review's tiles, as small JPEG data URLs: of the file itself, or of the frame
+ * the host made for a video or a still sharp cannot open. Null where neither can be drawn, and
+ * for any path that is not a file of the export under review, which is all this reads.
+ */
+export async function importThumbnails(paths: string[]): Promise<(string | null)[]> {
+  const current = review;
+  if (!current) return paths.map(() => null);
+  const known = new Set(current.items.map((i) => i.path));
+  const frames = new Map(Object.entries(current.frames).map(([path, frame]) => [frameKey(path), frame]));
+  const asked = paths.slice(0, 32);
+  const out: (string | null)[] = asked.map(() => null);
+  // A few at a time: the review's own check reads the export on the same threads.
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const k = next++;
+      if (k >= asked.length) return;
+      const path = asked[k];
+      if (!known.has(path)) continue;
+      const source = frames.get(frameKey(path)) ?? path;
+      try {
+        const jpeg = await sharp(source, { failOn: "none", limitInputPixels: 300_000_000 })
+          .rotate()
+          .resize(REVIEW_THUMB_EDGE, REVIEW_THUMB_EDGE, { fit: "inside", withoutEnlargement: true })
+          .flatten({ background: "#ffffff" })
+          .jpeg({ quality: 72 })
+          .toBuffer();
+        out[k] = `data:image/jpeg;base64,${jpeg.toString("base64")}`;
+      } catch {
+        /* no picture to draw */
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: 4 }, worker));
+  return out;
+}
+
 /** The export under review, for the review screen; null when there is none. */
 export function getImportReview(): { items: ReviewItem[] } | null {
   return review ? { items: review.items } : null;

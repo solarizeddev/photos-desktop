@@ -327,5 +327,20 @@ describe("an export imported against the library", () => {
     const albums = w.added.filter((a) => a.uids.includes(w.uploads[0].uid)).map((a) => a.album).sort();
     expect(albums).toEqual(["A", "B", "C"].filter((a) => a !== firstAlbum).map((a) => `album-${a}`));
   });
+
+  it("draws the review's tile pictures from the export, and reads nothing else", async () => {
+    const P = await picture(95);
+    const root = tree("thumbs", { "Trip/p.jpg": P });
+    const w = world([]);
+    up.startImport([root]);
+    await settle((s) => s.importing?.phase === "ready");
+    up.prepareImport(w.photos, {}, {}, w.library);
+    await settle((s) => s.importing?.phase === "review" && s.importing.checked === s.importing.items);
+    const path = up.getImportReview()!.items[0].path;
+    const [own, other] = await up.importThumbnails([path, join(root, "..", "elsewhere.jpg")]);
+    expect(own).toMatch(/^data:image\/jpeg;base64,/);
+    expect(other).toBeNull();
+    up.discardImport();
+  });
 });
 

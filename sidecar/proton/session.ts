@@ -194,6 +194,7 @@ import {
   prepareImport as runPrepareImport,
   getImportReview as readImportReview,
   getImportChecks as readImportChecks,
+  importThumbnails as readImportThumbnails,
   confirmImport as runConfirmImport,
   discardImport as runDiscardImport,
   startDropUpload as runDropUpload,
@@ -3082,6 +3083,11 @@ export class ProtonSession {
 
   getImportChecks() {
     return readImportChecks();
+  }
+
+  /** Pictures for the import review's tiles: see `importThumbnails`. */
+  importThumbnails(paths: string[]) {
+    return readImportThumbnails(paths);
   }
 
   /** Uploads the reviewed export, less the items left out. */
