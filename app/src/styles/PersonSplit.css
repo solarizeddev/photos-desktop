@@ -196,6 +196,14 @@
   gap: 8px;
   justify-content: center;
 }
+.ps-pair-both {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
 .ps-pair-pick {
   min-height: 32px;
   border-radius: 8px;

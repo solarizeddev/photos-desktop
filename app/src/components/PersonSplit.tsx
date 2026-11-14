@@ -409,6 +409,24 @@ export function PersonSplit({
                   {start.pairs.map((p) => {
                     const leftA = picks.get(p.left.faceId) === "a" && picks.get(p.right.faceId) === "b";
                     const leftB = picks.get(p.left.faceId) === "b" && picks.get(p.right.faceId) === "a";
+                    // Two faces of one of them in one photo (a collage, a mirror, a photo of a photo).
+                    const bothSide =
+                      picks.get(p.left.faceId) && picks.get(p.left.faceId) === picks.get(p.right.faceId)
+                        ? picks.get(p.left.faceId)!
+                        : null;
+                    const setBoth = (side: Side) =>
+                      setPicks((before) => {
+                        const next = new Map(before);
+                        const was = before.get(p.left.faceId);
+                        if (was && was === before.get(p.right.faceId) && was === side) {
+                          next.delete(p.left.faceId);
+                          next.delete(p.right.faceId);
+                        } else {
+                          next.set(p.left.faceId, side);
+                          next.set(p.right.faceId, side);
+                        }
+                        return next;
+                      });
                     const set = (l: Side | null) =>
                       setPicks((before) => {
                         const next = new Map(before);
@@ -422,10 +440,10 @@ export function PersonSplit({
                         return next;
                       });
                     return (
-                      <div key={p.left.faceId} className={`ps-pair${leftA || leftB ? " on" : ""}`}>
+                      <div key={p.left.faceId} className={`ps-pair${leftA || leftB || bothSide ? " on" : ""}`}>
                         <span className="ps-pair-faces">
-                          {face(p.left, leftA ? "a" : leftB ? "b" : undefined)}
-                          {face(p.right, leftA ? "b" : leftB ? "a" : undefined)}
+                          {face(p.left, leftA ? "a" : leftB ? "b" : (bothSide ?? undefined))}
+                          {face(p.right, leftA ? "b" : leftB ? "a" : (bothSide ?? undefined))}
                         </span>
                         <button className="ps-pair-pick" aria-pressed={leftA || leftB} disabled={!otherName} onClick={() => set(leftA ? "b" : leftB ? null : "a")}>
                           {leftA
@@ -434,6 +452,20 @@ export function PersonSplit({
                               ? t("faces.split.leftRight", { left: otherName, right: here })
                               : t("faces.split.whoIsWho")}
                         </button>
+                        <span className="ps-pair-both">
+                          <span>{t("faces.split.bothAre")}</span>
+                          <button className={`ps-side a${bothSide === "a" ? " on" : ""}`} aria-pressed={bothSide === "a"} onClick={() => setBoth("a")}>
+                            {here}
+                          </button>
+                          <button
+                            className={`ps-side b${bothSide === "b" ? " on" : ""}`}
+                            aria-pressed={bothSide === "b"}
+                            disabled={!otherName}
+                            onClick={() => setBoth("b")}
+                          >
+                            {otherName || "…"}
+                          </button>
+                        </span>
                       </div>
                     );
                   })}
