@@ -29,6 +29,7 @@ import { useLang, useT } from "../lib/i18n";
 import { groupByCity, loadCities, type Place } from "../lib/geocoder";
 import citiesUrl from "../assets/geo/cities15000.tsv?url";
 import { foldWord } from "../lib/dateQuery";
+import { smoothZoom } from "../lib/smoothZoom";
 import { ChevronRightIcon, CloseIcon, SearchIcon } from "./icons";
 import "../styles/Map.css";
 
@@ -194,10 +195,14 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
       // New tiles take their place at once rather than cross-fading over the old level (which
       // still shows, scaled, until they arrive): two levels half-showing at a zoom's end.
       fadeAnimation: false,
+      // Zooms are drawn a frame at a time instead (see smoothZoom): WebKitGTK showed the
+      // view from before a zoom for a frame as Leaflet's CSS zoom ended.
+      zoomAnimation: false,
       maxBounds: WORLD,
       maxBoundsViscosity: 1,
       maxZoom: 19,
     }).setView([30, 10], 2);
+    smoothZoom(map);
     map.attributionControl.setPrefix(false);
     // Bottom right, beside the credit: the top corners belong to the page's title and the
     // places search.
@@ -217,8 +222,8 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
     const sized = new ResizeObserver(() => {
       asApp(() => {
         map.invalidateSize();
-        // Not setMinZoom: below the new floor it zooms with an animation, whose start comes a
-        // frame later, after this is over, and would be taken for the user's.
+        // Not setMinZoom: below the new floor it zooms with an animation, and the floor holds
+        // at once.
         const floor = fillZoom(map);
         map.options.minZoom = floor;
         if (map.getZoom() < floor) map.setZoom(floor, { animate: false });
@@ -265,7 +270,7 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
       settle = setTimeout(() => settleRegroup.current?.(), REGROUP_AFTER_MS);
     };
     const holdOff = () => clearTimeout(settle);
-    // A flight cut short (a drag, a wheel at the zoom's limit) ends with no zoomend: the zoom it
+    // A flight cut short (by a drag, say) ends with no zoomend: the zoom it
     // stopped at is grouped once the map has stopped.
     let grouped = map.getZoom();
     const regroupNow = regroup;
