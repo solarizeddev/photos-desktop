@@ -20,7 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { CheckIcon, ChevronRightIcon } from "./icons";
 import { FaceNamer } from "./FaceNamer";
@@ -100,25 +100,41 @@ export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box
   // the window decodes a small square rather than a 1920 px preview per person, and a
   // cover off screen is never asked for (the image loads lazily).
   const base = useThumbServerBase();
-  const cut = base && box ? faceCoverUrl(base, uid, box) : null;
+  // The circle's size on screen, so a small one is cut small (from the grid thumbnail): it is
+  // measured once, from the box it fills.
+  const [px, setPx] = useState<number | null>(null);
+  const measure = useCallback((el: HTMLSpanElement | null) => {
+    const frame = el?.parentElement;
+    if (!frame) return;
+    const side = Math.max(frame.clientWidth, frame.clientHeight);
+    // Not laid out (hidden as it mounted): the largest cut, as before sizes were asked.
+    setPx(side > 0 ? Math.ceil(side * (window.devicePixelRatio || 1)) : 1e6);
+  }, []);
+  const cut = base && box && px ? faceCoverUrl(base, uid, box, px) : null;
   const [cutFailed, setCutFailed] = useState<string | null>(null);
   const [cutShown, setCutShown] = useState<string | null>(null);
-  if (!cut || cutFailed === cut) return <ThumbFaceCover thumb={thumb} box={box} />;
-  // The grid thumbnail, already in, is cut to the face at once and stays until the sharp
-  // cut has loaded over it, so a card is never blank while its cut is made.
-  const ready = cutShown === cut;
+  // The same three places every time, so measuring or the cut arriving never remounts the
+  // stand-in under it: the grid thumbnail cut to the face, the sharp cut, and the probe.
+  const usable = cut && cutFailed !== cut ? cut : null;
+  const ready = !!usable && cutShown === usable;
   return (
     <>
-      {!ready && <ThumbFaceCover thumb={thumb} box={box} />}
-      <img
-        src={cut}
-        alt=""
-        draggable={false}
-        loading="lazy"
-        style={ready ? undefined : { opacity: 0 }}
-        onLoad={() => setCutShown(cut)}
-        onError={() => setCutFailed(cut)}
-      />
+      {!ready && <ThumbFaceCover key="thumb" thumb={thumb} box={box} />}
+      {usable && (
+        <img
+          key="cut"
+          src={usable}
+          alt=""
+          draggable={false}
+          loading="lazy"
+          style={ready ? undefined : { opacity: 0 }}
+          onLoad={() => setCutShown(usable)}
+          onError={() => setCutFailed(usable)}
+        />
+      )}
+      {px === null && (
+        <span key="probe" ref={measure} aria-hidden style={{ position: "absolute", inset: 0, pointerEvents: "none" }} />
+      )}
     </>
   );
 }

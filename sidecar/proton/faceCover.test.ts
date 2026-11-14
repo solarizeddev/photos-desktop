@@ -274,3 +274,89 @@ describe("the cover cache", () => {
     expect(covers.size()).toBe(0);
   });
 });
+
+describe("a small cover", () => {
+  const box: FaceBox = [0.4, 0.3, 0.6, 0.6];
+
+  it("is cut from the grid thumbnail when the face has pixels enough there, without a preview", async () => {
+    const thumb = await picture(512, 384, box);
+    let previews = 0;
+    const covers = new FaceCovers(
+      async () => {
+        previews++;
+        return { bytes: await picture(2000, 1500, box), keep: true };
+      },
+      { thumbnail: async () => thumb },
+    );
+    const cut = await covers.get("vol~a", box, new AbortController().signal, 128);
+    expect(previews).toBe(0);
+    expect((await sharp(cut!).metadata()).width).toBe(128);
+  });
+
+  it("waits for the preview when the face is too small in the thumbnail for the size asked", async () => {
+    const tiny: FaceBox = [0.45, 0.45, 0.5, 0.5];
+    let previews = 0;
+    const covers = new FaceCovers(
+      async () => {
+        previews++;
+        return { bytes: await picture(2000, 1500, tiny), keep: true };
+      },
+      { thumbnail: async () => picture(512, 384, tiny) },
+    );
+    await covers.get("vol~a", tiny, new AbortController().signal, 256);
+    expect(previews).toBe(1);
+  });
+
+  it("is kept sealed for the next run, by its size", async () => {
+    const disk = new Map<string, Buffer>();
+    const store = { get: (k: string) => disk.get(k) ?? null, put: (k: string, b: Buffer) => void disk.set(k, b) };
+    const thumb = await picture(512, 384, box);
+    let thumbs = 0;
+    const first = new FaceCovers(async () => null, {
+      thumbnail: async () => {
+        thumbs++;
+        return thumb;
+      },
+      disk: store,
+    });
+    await first.get("vol~a", box, new AbortController().signal, 128);
+    expect(disk.size).toBe(1);
+    // A new run: the cut comes from the disk, nothing fetched.
+    const second = new FaceCovers(async () => null, {
+      thumbnail: async () => {
+        thumbs++;
+        return thumb;
+      },
+      disk: store,
+    });
+    expect(await second.get("vol~a", box, new AbortController().signal, 128)).not.toBeNull();
+    expect(thumbs).toBe(1);
+    // Another size is another cut.
+    await second.get("vol~a", box, new AbortController().signal, 192);
+    expect(disk.size).toBe(2);
+  });
+});
+
+describe("an ask given up while the thumbnail is tried", () => {
+  it("fetches no preview, and its answer settles", async () => {
+    const tiny: FaceBox = [0.45, 0.45, 0.5, 0.5];
+    let previews = 0;
+    const covers = new FaceCovers(
+      async () => {
+        previews++;
+        return null;
+      },
+      {
+        thumbnail: async (_uid, gone) => {
+          await new Promise((r) => setTimeout(r, 5));
+          return gone.aborted ? null : picture(512, 384, tiny);
+        },
+      },
+    );
+    const leaving = new AbortController();
+    const asked = covers.get("vol~a", tiny, leaving.signal, 256);
+    leaving.abort();
+    expect(await asked).toBeNull();
+    expect(previews).toBe(0);
+  });
+});
