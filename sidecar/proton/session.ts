@@ -356,6 +356,12 @@ const OCR_FETCH_GIVE_UP_MS = 3 * 60 * 1000;
  * of the SDK's download slots while it is open.
  */
 const MAX_STREAMED_VIDEO = 300 * 1024 * 1024;
+/** How long a face scan waits for the window's read of the timeline before reading its own. */
+const SCAN_WAITS_FOR_TIMELINE_MS = 3 * 60_000;
+/** How long a session's first scan waits for the window's read to begin. */
+const SCAN_WAITS_FOR_RUN_TO_START_MS = 15_000;
+/** How old a window's read may be (from its start) for a scan to take it. */
+const SCAN_REUSES_TIMELINE_FOR_MS = 10 * 60_000;
 /** Albums shared with this account listed at once for the Explorer folder. */
 const MOUNT_ALBUMS_AT_ONCE = 3;
 /** A copy's save that fails on the network is tried again after these pauses. */
@@ -437,7 +443,18 @@ async function readPictureFile(path: string): Promise<Buffer | null> {
   }
 }
 /** `offline`: only the photos kept on this computer, read while Proton could not be reached. */
-type TimelineRun = { id: number; items: TimelineItem[]; done: boolean; error: string | null; offline?: boolean };
+type TimelineRun = {
+  id: number;
+  items: TimelineItem[];
+  done: boolean;
+  error: string | null;
+  offline?: boolean;
+  /** When it began reading (ms): a photo added later may be missing from it. */
+  startedAt?: number;
+  /** When it finished reading (ms); and settled once it stops, finished or replaced. */
+  finishedAt?: number;
+  ended?: Promise<void>;
+};
 type TimelinePage = { items: TimelineItem[]; done: boolean; error: string | null };
 
 type LoginResult =
@@ -1619,13 +1636,65 @@ export class ProtonSession {
     };
   }
 
+  /** When the face scan's last listing of the library began, the window's read or its own (ms). */
+  private scanListedAt = 0;
+
+  /**
+   * The library for a face scan pass: the window's own read of the timeline when it is newer
+   * than the scan's last listing (waited for if still under way), else read afresh. After an
+   * unlock both read it at once, and the scan's own read took half a minute beside the
+   * window's; but a read older than the scan's last would hide photos added since, whose
+   * faces the pass would then forget, so a later pass lists again.
+   */
+  private async timelineForScan(): Promise<TimelineItem[]> {
+    const deadline = Date.now() + SCAN_WAITS_FOR_TIMELINE_MS;
+    // The first listing of a session: the window starts its read as it opens, perhaps a
+    // moment after the scan is handed the library, so a little while is given for it to begin.
+    if (!this.timelineRun && this.scanListedAt === 0) {
+      const appears = Date.now() + SCAN_WAITS_FOR_RUN_TO_START_MS;
+      while (!this.timelineRun && Date.now() < appears) await new Promise((r) => setTimeout(r, 250));
+    }
+    // The run under way is followed to its end, the one replacing it as well.
+    for (let run = this.timelineRun; run && !run.offline; run = this.timelineRun) {
+      if (!run.done && run.ended) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          run.ended,
+          new Promise<void>((resolve) => (timer = setTimeout(resolve, Math.max(0, deadline - Date.now())))),
+        ]).finally(() => clearTimeout(timer));
+      }
+      if (this.timelineRun !== run) {
+        if (Date.now() < deadline) continue;
+        break;
+      }
+      // Begun after the scan's last listing began, and lately: it holds everything that one
+      // did, and is not so old that photos added since would be missing from it.
+      if (
+        run.done &&
+        !run.error &&
+        (run.startedAt ?? 0) > this.scanListedAt &&
+        Date.now() - (run.startedAt ?? 0) < SCAN_REUSES_TIMELINE_FOR_MS
+      ) {
+        this.scanListedAt = run.startedAt!;
+        return run.items;
+      }
+      break;
+    }
+    const started = Date.now();
+    const items = await this.getTimeline();
+    this.scanListedAt = started;
+    return items;
+  }
+
   /** Hands the face scan this account's library to read, and the way to its copy on Drive. */
   private attachFaceScan(): void {
+    // A new session's library: whatever the scan listed before is not of it.
+    this.scanListedAt = 0;
     const photos = this.photos;
     const base = this.sdkBase;
     if (!photos || !base) return;
     faceScanner.setSource({
-      listUids: async () => (await this.getTimeline()).map((item) => item.uid),
+      listUids: async () => (await this.timelineForScan()).map((item) => item.uid),
       // The timeline the window has read, when it has read all of it: listing it again from
       // Drive takes as long as the library is large, and a split waits on it.
       listTimes: async () => {
@@ -1981,9 +2050,9 @@ export class ProtonSession {
       return { run: run.id };
     }
     if (!this.photos) throw new Error("Not signed in");
-    const run: TimelineRun = { id: ++this.timelineRuns, items: [], done: false, error: null };
+    const run: TimelineRun = { id: ++this.timelineRuns, items: [], done: false, error: null, startedAt: Date.now() };
     this.timelineRun = run;
-    void (async () => {
+    run.ended = (async () => {
       try {
         for await (const item of this.timelineItems()) {
           if (this.timelineRun !== run) return;
@@ -1994,6 +2063,7 @@ export class ProtonSession {
       } catch (e) {
         run.error = (e as Error).message;
       }
+      run.finishedAt = Date.now();
       run.done = true;
     })();
     return { run: run.id };
