@@ -316,6 +316,16 @@ export class SeekingVideo implements VideoSource {
     if (this.closed) return;
     this.closed = true;
     this.pieces.clear();
+    this.letGo();
+  }
+
+  private fail(e: Error): void {
+    this.failed = e;
+    this.letGo();
+  }
+
+  /** Every lane let go (each slot back), and every reader waiting for one woken. */
+  private letGo(): void {
     for (const lane of this.lanes.splice(0)) lane.close();
     for (const wake of this.queue.splice(0)) wake();
   }
@@ -369,11 +379,11 @@ export class SeekingVideo implements VideoSource {
         () => true,
       );
       if (!(await Promise.race([ended, leave]))) return null;
-      if (this.failed) throw this.failed;
-      if (this.closed) return null;
     }
+    const kept = this.pieces.get(index);
+    if (kept) return kept;
     if (this.failed) throw this.failed;
-    return this.pieces.get(index) ?? null;
+    return null;
   }
 
   /** Reads ahead of the player on the lanes that are free now. */
@@ -405,6 +415,7 @@ export class SeekingVideo implements VideoSource {
   private async readSpan(span: number, wait: boolean): Promise<void> {
     const lane = await this.lane(wait);
     if (!lane) return;
+    let aheadFailed = false;
     try {
       if (this.closed) return;
       const from = span * SPAN;
@@ -426,18 +437,17 @@ export class SeekingVideo implements VideoSource {
         const first = from / PIECE;
         for (let i = 0; i * PIECE < value.length; i++) this.keep(first + i, value.subarray(i * PIECE, (i + 1) * PIECE));
       } catch (e) {
-        // A read ahead that failed costs only its lane (not the first): the player's own read
-        // of that span tries again, and fails the video only if that fails too.
-        if (!wait && !this.closed) {
-          if (!lane.first) lane.leaving = true;
+        // A read ahead that failed on a lane added later costs only that lane (a stream the
+        // SDK errored stays errored): the player's own read of the span tries again. On the
+        // first lane it fails the video, as any other read does.
+        if (!wait && !lane.first && !this.closed) {
+          lane.leaving = true;
+          aheadFailed = true;
           throw e;
         }
-        // The stream is no use any more (failed, ended short, or hung): the video is closed,
-        // which lets every lane go, and the next ask opens it afresh.
-        if (!this.failed && !this.closed) {
-          this.failed = e instanceof Error ? e : new Error("video read failed");
-          this.close();
-        }
+        // The stream is no use any more (failed, ended short, or hung): every lane goes, and
+        // the next ask opens the video afresh. What was read is still served meanwhile.
+        if (!this.failed && !this.closed) this.fail(e instanceof Error ? e : new Error("video read failed"));
         throw this.failed ?? e;
       } finally {
         clearTimeout(stall);
@@ -445,7 +455,8 @@ export class SeekingVideo implements VideoSource {
     } finally {
       lane.busy = false;
       if (lane.leaving) this.drop(lane);
-      this.freed();
+      // After a failed read ahead only a waiting player is woken, not more reads ahead.
+      this.freed(!aheadFailed);
     }
   }
 
@@ -464,10 +475,10 @@ export class SeekingVideo implements VideoSource {
   }
 
   /** A lane came free (or was added): the player first, then reads ahead. */
-  private freed(): void {
+  private freed(readAhead = true): void {
     const next = this.queue.shift();
     if (next) next();
-    else this.ahead();
+    else if (readAhead) this.ahead();
   }
 
   private drop(lane: Lane): void {

@@ -356,8 +356,9 @@ describe("a video read range by range from Proton", () => {
     await expect(collect(video.read(9 * MB, 10 * MB, gone))).rejects.toThrow();
     expect(video.broken()).toBe(true);
     expect(closed).toBe(1);
-    // A read after that gives nothing: the server's answer ends short and the player asks again.
-    expect((await collect(video.read(0, 100, gone))).length).toBe(0);
+    // A read of what it does not hold fails too: the server cuts the answer short and the
+    // player asks again, which opens it afresh.
+    await expect(collect(video.read(0, 100, gone))).rejects.toThrow();
     let loads = 0;
     const open = new OpenVideos(async () =>
       ++loads === 1 ? video : new SeekingVideo(20 * MB, "video/mp4", seekable(20 * MB).stream, () => {}),
@@ -436,6 +437,22 @@ describe("a video read range by range from Proton", () => {
     expect(video.broken()).toBe(false);
     await vi.waitFor(() => expect(left).toBe(1));
     video.close();
+  });
+
+  it("is broken, not spinning, when a read ahead fails on its only stream", async () => {
+    const one = seekable(64 * MB);
+    const video = new SeekingVideo(64 * MB, "video/mp4", one.stream, () => {});
+    // The SDK's stream stays errored once a read has failed.
+    let reads = 0;
+    const read = one.stream.read;
+    one.stream.read = async (n: number) => {
+      if (++reads > 1) throw new Error("stream errored");
+      return read(n);
+    };
+    const first = await collect(video.read(0, 100, new AbortController().signal));
+    expect(first.length).toBe(101);
+    await vi.waitFor(() => expect(video.broken()).toBe(true));
+    expect(reads).toBeLessThan(10);
   });
 
   it("lets a lane added after it closed go at once", () => {

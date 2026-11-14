@@ -2375,7 +2375,7 @@ export class ProtonSession {
     while (!video.done()) {
       if (video.idleFor() > LANE_IDLE_MS) video.shed();
       else await this.addLanes(uid, video);
-      await new Promise((resolve) => setTimeout(resolve, LANE_CHECK_MS));
+      await new Promise((resolve) => setTimeout(resolve, LANE_CHECK_MS).unref?.());
     }
   }
 

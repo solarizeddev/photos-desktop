@@ -50,6 +50,8 @@ const lent: Array<() => void> = [];
 let opening = 0;
 /** How often a download still waiting for a slot takes back one more lent slot. */
 const RECLAIM_EVERY_MS = 500;
+/** How long a download may take to be made before lent slots are taken back regardless. */
+const RECLAIM_AFTER_MS = 1_500;
 
 /** Lends a slot, given back by `giveBack` when another download needs it. Returns how to
  * take it off the list (when it is let go some other way). */
@@ -152,7 +154,12 @@ export async function openDownloader(
   // when every slot is counted taken, and one more every so often while this still waits
   // (some downloads take slots this does not count).
   if (!borrow && holding.size + opening >= SDK_SLOTS) lent.pop()?.();
-  const reclaim = borrow ? undefined : setInterval(() => lent.pop()?.(), RECLAIM_EVERY_MS);
+  const since = Date.now();
+  const reclaim = borrow
+    ? undefined
+    : setInterval(() => {
+        if (holding.size + opening >= SDK_SLOTS || Date.now() - since >= RECLAIM_AFTER_MS) lent.pop()?.();
+      }, RECLAIM_EVERY_MS);
   const stop = new AbortController();
   const timer = setTimeout(() => stop.abort(), waitMs);
   let downloader: any;
