@@ -20,6 +20,8 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { diag } from "./diag.ts";
+
 /**
  * A video played the way a web page plays one: the window's player asks the loopback
  * thumbnail server for byte ranges, and each is answered as soon as its bytes are here.
@@ -209,6 +211,14 @@ export function downloadVideo(downloader: any, size: number, mime: string, stop:
   return video;
 }
 
+/** Why a read failed, as a word for the log: never the error's own text, which may name the file. */
+function failure(e: unknown): string {
+  const text = e instanceof Error ? e.message : "";
+  if (text === "video read stalled") return "stalled";
+  if (text === "video shorter than stated") return "short";
+  return e instanceof Error ? e.name || "Error" : "unknown";
+}
+
 /** What one seekable read asks of the SDK: one Proton block. */
 const SPAN = 16 * PIECE;
 /** How many spans are read ahead of the player, and how many pieces are kept in all. */
@@ -321,6 +331,7 @@ export class SeekingVideo implements VideoSource {
 
   private fail(e: Error): void {
     this.failed = e;
+    diag.log("drive", "video_failed", { why: failure(e), lanes: this.lanes.length });
     this.letGo();
   }
 
@@ -441,6 +452,7 @@ export class SeekingVideo implements VideoSource {
         // SDK errored stays errored): the player's own read of the span tries again. On the
         // first lane it fails the video, as any other read does.
         if (!wait && !lane.first && !this.closed) {
+          diag.log("drive", "video_lane_failed", { why: failure(e) });
           lane.leaving = true;
           aheadFailed = true;
           throw e;

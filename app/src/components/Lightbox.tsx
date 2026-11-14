@@ -150,6 +150,8 @@ type Props = {
  * always has.
  */
 const SETTLE_MS = 250;
+/** How many times a stream that failed while playing is opened again before the whole file is tried. */
+const STREAM_RETRIES = 2;
 
 /** Decode base64 video bytes (from the sidecar) into a playable Blob. */
 function b64ToBlob(b64: string, mime: string): Blob {
@@ -200,6 +202,11 @@ export function Lightbox({
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   // The video whose stream would not play, so it is fetched whole instead.
   const [streamFailed, setStreamFailed] = useState<string | null>(null);
+  // A stream that failed while playing (a block that would not come, after a seek, say) is
+  // opened again from where it was, up to STREAM_RETRIES times, before the whole file is
+  // tried: that route refuses a large video, and showed "too large" for one that was playing.
+  const streamRetries = useRef<{ uid: string; n: number }>({ uid: "", n: 0 });
+  const [resumeAt, setResumeAt] = useState<{ uid: string; at: number } | null>(null);
   const [videoState, setVideoState] = useState<"idle" | "loading" | "ready" | "toolarge" | "error">(
     "idle",
   );
@@ -266,6 +273,10 @@ export function Lightbox({
     setError("");
     setConfirming(false);
     setSharing(false);
+    if (streamRetries.current.uid !== uid) {
+      streamRetries.current = { uid, n: 0 };
+      setResumeAt(null);
+    }
     setDetails(null);
     setFavOverride(null);
     setVideoUrl(null);
@@ -548,6 +559,7 @@ export function Lightbox({
         kind: "video",
         url: videoState === "ready" ? videoUrl : null,
         poster: stillSrc,
+        startAt: resumeAt?.uid === uid ? resumeAt.at : undefined,
         note:
           videoState === "toolarge"
             ? t("viewer.videoTooLarge")
@@ -679,9 +691,19 @@ export function Lightbox({
         onClose();
       }}
       onRename={rename}
-      onVideoError={() => {
+      onVideoError={(at) => {
+        const stream = videoStreamUrl(uid);
+        const streaming = !!videoUrl && !!stream && videoUrl.startsWith(stream) && streamFailed !== uid;
+        const tries = streamRetries.current.uid === uid ? streamRetries.current.n : 0;
+        if (streaming && tries < STREAM_RETRIES) {
+          streamRetries.current = { uid, n: tries + 1 };
+          setResumeAt({ uid, at });
+          // A new address is a new element (keyed by it): the sidecar opens the video afresh.
+          setVideoUrl(`${stream}?again=${tries + 1}`);
+          return;
+        }
         // The stream would not play: try the whole file once before saying so.
-        if (videoUrl && videoUrl === videoStreamUrl(uid) && streamFailed !== uid) {
+        if (streaming) {
           // Let go of the stream at once, so a second error from it cannot show before the
           // whole file is in.
           setVideoUrl(null);

@@ -50,7 +50,7 @@ import "../styles/Lightbox.css";
 export type ViewerStage =
   | { kind: "image"; src?: string; loading?: boolean }
   /** `url` null means the video cannot play yet, and `note` says why. */
-  | { kind: "video"; url: string | null; poster?: string; note?: string | null }
+  | { kind: "video"; url: string | null; poster?: string; note?: string | null; startAt?: number }
   /** Nothing to draw, only something to say: the file would not open at all. */
   | { kind: "message"; text: string; detail?: string };
 
@@ -141,7 +141,8 @@ type Props = {
   onRename?: (name: string) => void | Promise<void>;
   /** Keys this shell did not claim, for the caller's own shortcuts. */
   onKey?: (e: KeyboardEvent) => void;
-  onVideoError?: () => void;
+  /** The video would not play; `at` is where it had got to (seconds). */
+  onVideoError?: (at: number) => void;
   /** Right-click on the stage, so the caller can raise a context menu. Called with the
    *  native menu already prevented and the shell's own dead menu suppressed. */
   onContextMenu?: (e: MouseEvent) => void;
@@ -520,9 +521,13 @@ export function ViewerShell({
                 preload="metadata"
                 disablePictureInPicture
                 onContextMenu={(e) => e.preventDefault()}
-                onLoadedMetadata={(e) => void e.currentTarget.play().catch(() => {})}
+                onLoadedMetadata={(e) => {
+                  // Opened again after its stream failed: on from where it had got to.
+                  if (stage.startAt) e.currentTarget.currentTime = stage.startAt;
+                  void e.currentTarget.play().catch(() => {});
+                }}
                 onClick={(e) => e.stopPropagation()}
-                onError={onVideoError}
+                onError={(e) => onVideoError?.(e.currentTarget.currentTime || 0)}
               />
               <VideoControls video={videoEl} />
             </>
