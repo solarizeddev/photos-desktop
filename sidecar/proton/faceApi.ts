@@ -39,6 +39,7 @@ import {
   setPersonCover,
 } from "./facePeople.ts";
 import { faceScanner } from "./faceScan.ts";
+import { applySplit, planSplit, splitStart, undoSplit } from "./faceSplit.ts";
 import { isScanSpeed } from "./scanPipeline.ts";
 import { isReady } from "./store.ts";
 
@@ -107,4 +108,14 @@ export const faceHandlers: Record<string, (p: any) => unknown> = {
       ),
     })),
   facePersonCover: (p) => change(() => setPersonCover(store(), str(p?.id), str(p?.uid))),
+  // Splitting a person in two (see faceSplit): what to pick examples from, the split those
+  // examples give, carrying it out, and taking it back.
+  faceSplitStart: (p) => splitStart(store(), str(p?.id)),
+  faceSplitPlan: (p) => planSplit(store(), str(p?.id), str(p?.other, 100), { a: ids(p?.a), b: ids(p?.b) }),
+  faceSplitApply: async (p) => {
+    const out = await applySplit(store(), str(p?.id), str(p?.other, 100), { a: ids(p?.a), b: ids(p?.b) });
+    faceScanner.changed();
+    return out;
+  },
+  faceSplitUndo: (p) => change(() => ({ ok: undoSplit(store(), str(p?.token, 64)) })),
 };

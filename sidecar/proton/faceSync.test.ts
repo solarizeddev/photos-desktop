@@ -681,7 +681,7 @@ describe("a face fixed by hand on one device", () => {
     addFacesToPerson(store, bela.id, ["vol~p1#0"], 77);
     expect(store.people.blocked["vol~p1#0"]).toEqual(["Anna"]);
     expect(store.people.curation[curationKey(2, "Anna", "p1#0")]).toMatchObject({ removed: false, at: 77 });
-    const written = copyForDrive(store);
+    const written = copyForDrive(store, "Desk", 100);
     expect(written.notPerson).toContainEqual(expect.objectContaining({ name: "Anna", key: "p1", index: 0, at: 77 }));
   });
 

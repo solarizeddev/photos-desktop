@@ -79,7 +79,7 @@ function sampleOf(face: FaceRecord, people: PeopleState): FaceSample {
   };
 }
 
-function mint(people: PeopleState): string {
+export function mint(people: PeopleState): string {
   return `p${people.nextId++}`;
 }
 
@@ -717,7 +717,7 @@ export function listPeople(store: FaceStore, uidOfLink?: (link: string) => strin
   return { named, unnamed, leftover, suggestions: listSuggestions(store), loose: listLoose(store) };
 }
 
-function personOf(p: PeopleState, id: string): Person {
+export function personOf(p: PeopleState, id: string): Person {
   const person = p.people.find((x) => x.id === id);
   if (!person) throw new Error("This person is no longer here");
   return person;
