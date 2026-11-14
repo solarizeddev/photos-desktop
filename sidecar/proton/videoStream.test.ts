@@ -14,6 +14,8 @@ import {
   parseRange,
   releaseUnusedDownloader,
   videoFromBytes,
+  SeekingVideo,
+  seekVideo,
 } from "./videoStream.ts";
 
 const live = () => new AbortController().signal;
@@ -257,5 +259,136 @@ describe("the videos kept open", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(await open.get("u")).not.toBeNull();
     open.clear();
+  });
+});
+
+describe("a video read range by range from Proton", () => {
+  /** A file of `size` bytes, each the low byte of its position, behind a fake seekable stream. */
+  function seekable(size: number) {
+    let position = 0;
+    const log = { seeks: [] as number[], reads: 0, cancels: 0 };
+    let failAt: number | null = null;
+    const stream = {
+      seek(p: number) {
+        log.seeks.push(p);
+        position = p;
+      },
+      async read(n: number) {
+        log.reads++;
+        await new Promise((r) => setTimeout(r, 1));
+        if (failAt !== null && position <= failAt && failAt < position + n) throw new Error("block failed");
+        const len = Math.max(0, Math.min(n, size - position));
+        const value = Uint8Array.from({ length: len }, (_, i) => (position + i) & 0xff);
+        position += len;
+        return { value, done: position >= size };
+      },
+      // As the SDK's: its reader is held, so a cancel is refused.
+      async cancel() {
+        log.cancels++;
+        throw new TypeError("ReadableStream is locked");
+      },
+    };
+    return { stream, log, fail: (at: number) => (failAt = at) };
+  }
+  const collect = async (gen: AsyncGenerator<Uint8Array>) => {
+    const parts: Uint8Array[] = [];
+    for await (const piece of gen) parts.push(Uint8Array.from(piece));
+    return Array.from(Buffer.concat(parts));
+  };
+  const MB = 1024 * 1024;
+
+  it("answers any range with the right bytes, the end of the file included", async () => {
+    const { stream } = seekable(10 * MB + 123);
+    const video = new SeekingVideo(10 * MB + 123, "video/mp4", stream, () => {});
+    const gone = new AbortController().signal;
+    const middle = await collect(video.read(3 * MB + 7, 3 * MB + 300_000, gone));
+    expect(middle.length).toBe(300_000 - 7 + 1);
+    expect(middle.every((b, i) => b === ((3 * MB + 7 + i) & 0xff))).toBe(true);
+    const tail = await collect(video.read(10 * MB, 10 * MB + 500, gone));
+    expect(tail.length).toBe(123);
+    expect(tail[122]).toBe((10 * MB + 122) & 0xff);
+  });
+
+  it("reads a span ahead and serves what it kept without asking again", async () => {
+    const { stream, log } = seekable(20 * MB);
+    const video = new SeekingVideo(20 * MB, "video/mp4", stream, () => {});
+    const gone = new AbortController().signal;
+    await collect(video.read(0, 1 * MB, gone));
+    const reads = log.reads;
+    await collect(video.read(100, 2 * MB, gone));
+    expect(log.reads).toBe(reads);
+  });
+
+  it("takes turns on the one stream when two ranges are read at once", async () => {
+    const { stream } = seekable(30 * MB);
+    const video = new SeekingVideo(30 * MB, "video/mp4", stream, () => {});
+    const gone = new AbortController().signal;
+    const [a, b] = await Promise.all([collect(video.read(0, 6 * MB, gone)), collect(video.read(25 * MB, 30 * MB - 1, gone))]);
+    expect(a.every((x, i) => x === (i & 0xff))).toBe(true);
+    expect(b.every((x, i) => x === ((25 * MB + i) & 0xff))).toBe(true);
+  });
+
+  it("stops a read the player gave up, and lets the slot go once on close", async () => {
+    const { stream, log } = seekable(20 * MB);
+    let closed = 0;
+    const video = new SeekingVideo(20 * MB, "video/mp4", stream, () => closed++);
+    const stop = new AbortController();
+    let got = 0;
+    for await (const piece of video.read(0, 20 * MB - 1, stop.signal)) {
+      got += piece.length;
+      if (got > MB) stop.abort();
+    }
+    expect(got).toBeLessThan(20 * MB);
+    video.close();
+    video.close();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(closed).toBe(1);
+    // The slot goes back through the downloader's signal (onClose), not the stream's cancel.
+    expect(log.cancels).toBe(0);
+  });
+
+  it("is broken and closed once a read fails, and opened afresh on the next ask", async () => {
+    const { stream, fail } = seekable(20 * MB);
+    fail(9 * MB);
+    let closed = 0;
+    const video = new SeekingVideo(20 * MB, "video/mp4", stream, () => closed++);
+    const gone = new AbortController().signal;
+    await expect(collect(video.read(9 * MB, 10 * MB, gone))).rejects.toThrow();
+    expect(video.broken()).toBe(true);
+    expect(closed).toBe(1);
+    // A read after that gives nothing: the server's answer ends short and the player asks again.
+    expect((await collect(video.read(0, 100, gone))).length).toBe(0);
+    let loads = 0;
+    const open = new OpenVideos(async () =>
+      ++loads === 1 ? video : new SeekingVideo(20 * MB, "video/mp4", seekable(20 * MB).stream, () => {}),
+    );
+    await open.get("u");
+    const again = await open.get("u");
+    expect(loads).toBe(2);
+    expect(again!.broken!()).toBe(false);
+  });
+
+  it("lets a reader the player gave up leave while it waits its turn", async () => {
+    const { stream } = seekable(40 * MB);
+    const video = new SeekingVideo(40 * MB, "video/mp4", stream, () => {});
+    const first = collect(video.read(0, 8 * MB, new AbortController().signal));
+    const leaving = new AbortController();
+    const second = collect(video.read(30 * MB, 31 * MB, leaving.signal));
+    leaving.abort();
+    expect((await second).length).toBe(0);
+    expect((await first).length).toBe(8 * MB + 1);
+  });
+
+  it("is not used for a file with no block sizes on record, and its slot goes back", () => {
+    let given = 0;
+    const downloader = {
+      getSeekableStream() {
+        throw new Error("Revision does not have defined claimed block sizes");
+      },
+    };
+    expect(
+      seekVideo(downloader, 500 * MB, "video/mp4", { stop: new AbortController(), unused: () => given++, released: () => {} }),
+    ).toBeNull();
+    expect(given).toBe(1);
   });
 });

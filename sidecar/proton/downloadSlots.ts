@@ -43,6 +43,11 @@ export type OpenedDownloader = {
   unused(): void;
   /** Fired to stop a download of it under way, which then ends and gives the slot back. */
   stop: AbortController;
+  /**
+   * For a downloader read some other way than a whole download (the seekable stream, whose
+   * slot the SDK gives back when `stop` fires): tells the slot log it is let go.
+   */
+  released(): void;
 };
 
 /** Downloaders holding a slot, by when each took it: what the slot log reports. */
@@ -92,12 +97,12 @@ function watchSlots(): void {
  * Follows a downloader's slot: held from now, and let go when a download of it ends, which
  * is when the SDK gives the slot back.
  */
-function follow(downloader: any): void {
+function follow(downloader: any): number {
   const id = nextHolder++;
   holding.set(id, Date.now());
   watchSlots();
   const start = downloader.downloadToStream?.bind(downloader);
-  if (!start) return;
+  if (!start) return id;
   downloader.downloadToStream = (...args: unknown[]) => {
     const controller = start(...args);
     void Promise.resolve()
@@ -106,6 +111,7 @@ function follow(downloader: any): void {
       .finally(() => holding.delete(id));
     return controller;
   };
+  return id;
 }
 
 /**
@@ -121,11 +127,14 @@ export async function openDownloader(client: any, uid: string, waitMs = SLOT_WAI
   } finally {
     clearTimeout(timer);
   }
-  follow(downloader);
+  const held = follow(downloader);
   let done = false;
   return {
     downloader,
     stop,
+    released() {
+      holding.delete(held);
+    },
     unused() {
       if (done) return;
       done = true;

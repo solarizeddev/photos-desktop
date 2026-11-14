@@ -51,6 +51,8 @@ export type VideoSource = {
   read(start: number, end: number, gone: AbortSignal): AsyncGenerator<Uint8Array>;
   /** Stops anything still fetching for it and lets its memory go. */
   close?(): void;
+  /** True once it can serve nothing more (its download failed): opened afresh on the next ask. */
+  broken?(): boolean;
 };
 
 /** How much is handed to the server's response at once. */
@@ -207,6 +209,172 @@ export function downloadVideo(downloader: any, size: number, mime: string, stop:
   return video;
 }
 
+/** What a seekable read asks of the SDK at once, and how much of what it read is kept. */
+const SPAN = 16 * PIECE;
+const KEPT_PIECES = 128;
+/** A seekable read that has not answered in this long is given up, and the video with it. */
+const READ_STALL_MS = 60_000;
+
+/**
+ * The SDK's seekable stream, as the SDK hands it out: seek to a position, then read so many
+ * bytes from there. One per video: closing it gives the download slot back, once.
+ */
+export type SeekableStream = {
+  seek(position: number): void | Promise<void>;
+  read(numBytes: number): Promise<{ value: Uint8Array; done: boolean }>;
+};
+
+/**
+ * A video too large to hold whole, played through the SDK's seekable stream: each range the
+ * player asks for is read from Proton as it is asked, a block at a time, and only the last
+ * KEPT_PIECES pieces read are kept. Reads take turns on the one stream, a piece-aligned span
+ * at a time, so a player reading in two places (the start and the index at the end, or a seek
+ * while a read is open) costs a re-read of a block now and then, not one per piece.
+ *
+ * The seekable stream does not check the file's signature, as the whole-file download does;
+ * for playing it back that is the SDK's own advice. Nothing is written to disk, and this is
+ * never a source for saving or exporting the file.
+ *
+ * It holds one of the SDK's download slots from open to close (a whole download gives its
+ * slot back when done): `onClose` gives it back, by firing the downloader's signal, which is
+ * the only way the SDK's seekable stream lets go of it (its own cancel is refused, its reader
+ * being held). A read that fails, or hangs past READ_STALL_MS, ends the video: `broken` then
+ * says so, and the next ask opens it afresh.
+ */
+export class SeekingVideo implements VideoSource {
+  private pieces = new Map<number, Uint8Array>();
+  private turn: Promise<void> = Promise.resolve();
+  private closed = false;
+  private failed: Error | null = null;
+
+  constructor(
+    readonly size: number,
+    readonly mime: string,
+    private stream: SeekableStream,
+    private onClose: () => void,
+  ) {}
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.pieces.clear();
+    this.onClose();
+  }
+
+  broken(): boolean {
+    return this.failed !== null;
+  }
+
+  async *read(start: number, end: number, gone: AbortSignal): AsyncGenerator<Uint8Array> {
+    let at = start;
+    const last = Math.min(end, this.size - 1);
+    while (at <= last && !gone.aborted) {
+      const index = Math.floor(at / PIECE);
+      const piece = await this.piece(index, gone);
+      if (!piece) return;
+      const from = at - index * PIECE;
+      const upTo = Math.min(piece.length, last - index * PIECE + 1);
+      if (upTo <= from) throw new Error("video shorter than stated");
+      yield piece.subarray(from, upTo);
+      at = index * PIECE + upTo;
+    }
+  }
+
+  /** Piece `index`, from those kept or read now (with the span after it); null if given up. */
+  private async piece(index: number, gone: AbortSignal): Promise<Uint8Array | null> {
+    const kept = this.pieces.get(index);
+    if (kept) {
+      this.pieces.delete(index);
+      this.pieces.set(index, kept);
+      return kept;
+    }
+    // One read of the stream at a time: it has one position. A reader the player gave up
+    // while it waited leaves at once, its turn passed on when the one before it ends.
+    const before = this.turn;
+    let release!: () => void;
+    this.turn = new Promise<void>((resolve) => (release = resolve));
+    const leave = new Promise<false>((resolve) => {
+      if (gone.aborted) resolve(false);
+      else gone.addEventListener("abort", () => resolve(false), { once: true });
+    });
+    if (!(await Promise.race([before.then(() => true), leave]))) {
+      void before.then(release);
+      return null;
+    }
+    try {
+      if (gone.aborted || this.closed) return null;
+      if (this.failed) throw this.failed;
+      // Another reader may have read it while this one waited.
+      const now = this.pieces.get(index);
+      if (now) return now;
+      const from = index * PIECE;
+      const length = Math.min(SPAN, this.size - from);
+      if (length <= 0) throw new Error("video shorter than stated");
+      let stall: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const value = await Promise.race([
+          (async () => {
+            await this.stream.seek(from);
+            return (await this.stream.read(length)).value;
+          })(),
+          new Promise<never>((_, reject) => {
+            stall = setTimeout(() => reject(new Error("video read stalled")), READ_STALL_MS);
+          }),
+        ]);
+        if (this.closed) return null;
+        if (value.length < length) throw new Error("video shorter than stated");
+        for (let i = 0; i * PIECE < value.length; i++) this.keep(index + i, value.subarray(i * PIECE, (i + 1) * PIECE));
+      } catch (e) {
+        // The stream is no use any more (failed, ended short, or hung): the video is closed,
+        // which gives the slot back, and the next ask opens it afresh.
+        this.failed = e instanceof Error ? e : new Error("video read failed");
+        this.close();
+        throw this.failed;
+      } finally {
+        clearTimeout(stall);
+      }
+      return this.pieces.get(index) ?? null;
+    } finally {
+      release();
+    }
+  }
+
+  private keep(index: number, bytes: Uint8Array): void {
+    this.pieces.delete(index);
+    // A copy, so the SDK's buffer the span came from can go.
+    this.pieces.set(index, Uint8Array.from(bytes));
+    while (this.pieces.size > KEPT_PIECES) {
+      const oldest = this.pieces.keys().next().value;
+      if (oldest === undefined) break;
+      this.pieces.delete(oldest);
+    }
+  }
+}
+
+/**
+ * A video played through the SDK's seekable stream (see `SeekingVideo`), or null where the
+ * file cannot be read that way (an old one, with no block sizes on record), in which case the
+ * downloader's slot is given back.
+ */
+export function seekVideo(
+  downloader: any,
+  size: number,
+  mime: string,
+  opened: { stop: AbortController; unused: () => void; released: () => void },
+): SeekingVideo | null {
+  let stream: SeekableStream;
+  try {
+    stream = downloader.getSeekableStream();
+  } catch {
+    opened.unused();
+    return null;
+  }
+  return new SeekingVideo(size, mime, stream, () => {
+    opened.stop.abort();
+    opened.released();
+  });
+}
+
 /** Hands back the slot of a downloader that will not be used: see `downloadSlots`. */
 export { releaseUnusedDownloader } from "./downloadSlots.ts";
 
@@ -223,7 +391,7 @@ const IDLE_MS = 90_000;
  * download stops and its memory goes.
  */
 export class OpenVideos {
-  private open = new Map<string, { video: Promise<VideoSource | null>; used: number; reading: number }>();
+  private open = new Map<string, { video: Promise<VideoSource | null>; used: number; reading: number; opened?: VideoSource }>();
   private sweep: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -233,18 +401,30 @@ export class OpenVideos {
   ) {}
 
   get(uid: string): Promise<VideoSource | null> {
-    const known = this.open.get(uid);
+    let known = this.open.get(uid);
+    // One whose download failed is let go and opened afresh.
+    if (known?.opened?.broken?.()) {
+      this.drop(uid);
+      known = undefined;
+    }
     if (known) {
       this.open.delete(uid);
       known.used = this.now();
       this.open.set(uid, known);
       return known.video;
     }
-    const entry = { video: Promise.resolve<VideoSource | null>(null), used: this.now(), reading: 0 };
+    const entry: { video: Promise<VideoSource | null>; used: number; reading: number; opened?: VideoSource } = {
+      video: Promise.resolve<VideoSource | null>(null),
+      used: this.now(),
+      reading: 0,
+    };
     // Every piece written out counts as use, so a video still playing is never idle.
     entry.video = this.load(uid)
       .catch(() => null)
-      .then((v) => (v ? this.keptInUse(v, entry) : null));
+      .then((v) => {
+        entry.opened = v ?? undefined;
+        return v ? this.keptInUse(v, entry) : null;
+      });
     const video = entry.video;
     this.open.set(uid, entry);
     // A video that could not be opened is not kept: the next ask tries again.
@@ -271,6 +451,7 @@ export class OpenVideos {
       size: v.size,
       mime: v.mime,
       close: () => v.close?.(),
+      broken: () => v.broken?.() ?? false,
       async *read(start, end, gone) {
         entry.reading++;
         try {
