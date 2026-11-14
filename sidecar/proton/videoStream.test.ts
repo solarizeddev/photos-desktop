@@ -471,6 +471,26 @@ describe("a video read range by range from Proton", () => {
     video.close();
   });
 
+  it("serves a live ask whose block the asks before it gave up on", async () => {
+    const { stream } = seekable(64 * MB);
+    const video = new SeekingVideo(64 * MB, "video/mp4", stream, () => {});
+    const busy = collect(video.read(0, 100, new AbortController().signal));
+    const leaving = [new AbortController(), new AbortController(), new AbortController()];
+    const gaveUp = leaving.map((c, i) => collect(video.read(40 * MB + i * 1000, 40 * MB + i * 1000 + 10, c.signal)));
+    const live = collect(video.read(40 * MB + 5000, 40 * MB + 5010, new AbortController().signal));
+    for (const c of leaving) {
+      c.abort();
+      await new Promise((r) => setTimeout(r, 2));
+    }
+    await Promise.all(gaveUp);
+    const bytes = await live;
+    expect(bytes.length).toBe(11);
+    expect(bytes[0]).toBe((40 * MB + 5000) & 0xff);
+    await busy;
+    expect(video.broken()).toBe(false);
+    video.close();
+  });
+
   it("lets a lane added after it closed go at once", () => {
     const video = new SeekingVideo(20 * MB, "video/mp4", seekable(20 * MB).stream, () => {});
     video.close();

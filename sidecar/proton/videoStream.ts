@@ -264,7 +264,7 @@ type Lane = { stream: SeekableStream; close: () => void; busy: boolean; leaving:
  */
 export class SeekingVideo implements VideoSource {
   private pieces = new Map<number, Uint8Array>();
-  private loading = new Map<number, Promise<void>>();
+  private loading = new Map<number, Promise<boolean>>();
   private lanes: Lane[] = [];
   /** Readers the player waits on, for a lane to come free. Reads ahead never wait. */
   private queue: Array<() => void> = [];
@@ -371,8 +371,9 @@ export class SeekingVideo implements VideoSource {
     this.wanted = span;
     this.readAt = Date.now();
     // A piece kept may still be thrown out by reads ahead, and a read ahead it waited on may
-    // have failed on its lane: it is read again then.
-    for (let tries = 0; tries < 3; tries++) {
+    // have failed on its lane: it is read again then. A read that never ran (the player that
+    // asked for it first gave up waiting) is not a try: this one asks again itself.
+    for (let tries = 0; tries < 3; ) {
       const kept = this.pieces.get(index);
       if (kept) {
         this.pieces.delete(index);
@@ -382,19 +383,21 @@ export class SeekingVideo implements VideoSource {
       }
       if (this.closed || gone.aborted) return null;
       if (this.failed) throw this.failed;
-      const leave = new Promise<false>((resolve) => {
-        if (gone.aborted) resolve(false);
-        else gone.addEventListener("abort", () => resolve(false), { once: true });
+      const leave = new Promise<"left">((resolve) => {
+        if (gone.aborted) resolve("left");
+        else gone.addEventListener("abort", () => resolve("left"), { once: true });
       });
       const loaded = this.load(span, true, gone);
       void loaded.catch(() => {});
       // The lanes left free read on from here meanwhile (at the start, and after a seek).
       this.ahead();
       const ended = loaded.then(
-        () => true,
-        () => true,
+        (ran) => (ran ? "ran" : "skipped"),
+        () => "ran" as const,
       );
-      if (!(await Promise.race([ended, leave]))) return null;
+      const outcome = await Promise.race([ended, leave]);
+      if (outcome === "left") return null;
+      if (outcome === "ran") tries++;
     }
     const kept = this.pieces.get(index);
     if (kept) return kept;
@@ -418,7 +421,8 @@ export class SeekingVideo implements VideoSource {
   }
 
   /** Span `span` read into the pieces kept, once however many ask for it. */
-  private load(span: number, wait: boolean, gone?: AbortSignal): Promise<void> {
+  /** Resolves true once the span was read, false if no read ran (no lane, or given up). */
+  private load(span: number, wait: boolean, gone?: AbortSignal): Promise<boolean> {
     const known = this.loading.get(span);
     if (known) return known;
     const loading = this.readSpan(span, wait, gone).finally(() => {
@@ -428,12 +432,12 @@ export class SeekingVideo implements VideoSource {
     return loading;
   }
 
-  private async readSpan(span: number, wait: boolean, gone?: AbortSignal): Promise<void> {
+  private async readSpan(span: number, wait: boolean, gone?: AbortSignal): Promise<boolean> {
     const lane = await this.lane(wait, gone);
-    if (!lane) return;
+    if (!lane) return false;
     let aheadFailed = false;
     try {
-      if (this.closed) return;
+      if (this.closed) return true;
       const from = span * SPAN;
       const length = Math.min(SPAN, this.size - from);
       if (length <= 0) throw new Error("video shorter than stated");
@@ -448,10 +452,11 @@ export class SeekingVideo implements VideoSource {
             stall = setTimeout(() => reject(new Error("video read stalled")), READ_STALL_MS);
           }),
         ]);
-        if (this.closed) return;
+        if (this.closed) return true;
         if (value.length < length) throw new Error("video shorter than stated");
         const first = from / PIECE;
         for (let i = 0; i * PIECE < value.length; i++) this.keep(first + i, value.subarray(i * PIECE, (i + 1) * PIECE));
+        return true;
       } catch (e) {
         // A read ahead that failed on a lane added later costs only that lane (a stream the
         // SDK errored stays errored): the player's own read of the span tries again. On the

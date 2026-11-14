@@ -245,6 +245,9 @@ export function VideoControls({ video }: Props) {
     setPositionS(ratio * durationS);
   }
 
+  const lastSeek = useRef(0);
+  const pendingRatio = useRef<number | null>(null);
+
   function beginScrub(e: ReactPointerEvent<HTMLDivElement>): void {
     if (durationS <= 0) return;
     // Capture, so the rest of the drag keeps coming here once the pointer leaves the
@@ -254,14 +257,13 @@ export function VideoControls({ video }: Props) {
     setScrubbing(true);
     const r = ratioAt(e.clientX);
     setScrubRatio(r);
+    lastSeek.current = performance.now();
     seekTo(r);
   }
 
   // A drag moves the thumb at once but seeks at most every SCRUB_SEEK_MS, and once more
   // where it is let go: each seek is a new range from Proton, and one per pointer move queued
   // reads nobody wanted ahead of the one that was.
-  const lastSeek = useRef(0);
-  const pendingRatio = useRef<number | null>(null);
 
   function moveScrub(e: ReactPointerEvent<HTMLDivElement>): void {
     if (!scrubbingRef.current) return;
