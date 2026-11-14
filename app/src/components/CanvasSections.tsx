@@ -61,6 +61,7 @@ export function CanvasSections({
   onOpen,
   onContext,
   showBadges = true,
+  covered = false,
 }: {
   scrollRef: RefObject<HTMLElement | null>;
   sections: VirtualSection<GridItem>[];
@@ -76,6 +77,12 @@ export function CanvasSections({
   onOpen?: (uid: string, e: MouseEvent) => void;
   onContext?: (uid: string, e: MouseEvent) => void;
   showBadges?: boolean;
+  /**
+   * A page of the app (Settings, Upload) lies over the grid. It is then not drawn at all:
+   * WebKitGTK appears to put the canvas's own layer over such a page when the canvas comes into
+   * being under it (the library finishing its load while Settings was open).
+   */
+  covered?: boolean;
 }) {
   const t = useT();
   const benchFrom = bench.on ? performance.now() : 0;
@@ -255,7 +262,7 @@ export function CanvasSections({
       className="g-canvasgrid"
       // The browser's own scroll anchoring would move the scroll a second time on top of
       // the place kept above, so this list keeps it out.
-      style={{ height: layout.height, overflowAnchor: "none" }}
+      style={{ height: layout.height, overflowAnchor: "none", visibility: covered ? "hidden" : undefined }}
       onMouseMove={(e) => track(e.clientX, e.clientY)}
       onMouseLeave={() => {
         pointerRef.current = null;
