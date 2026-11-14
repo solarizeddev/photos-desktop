@@ -653,12 +653,43 @@ describe("a face fixed by hand on one device", () => {
   }
   const nameHere = (store: FaceStore) => store.people.people.find((x) => x.id === store.people.assign["vol~p1#0"])?.name;
 
-  it("takes the name confirmed there over a name that is only this computer's grouping", async () => {
+  it("keeps this computer's grouping over a name confirmed there, and keeps the face as a conflict", async () => {
+    // Naming a group there confirms every face in it: no proof of a hand decision, and taking
+    // it would undo this computer's grouping, or a split made here.
     const { store, face } = await groupedAnna();
+    applyCopy(store, { ...copy([{ ...face, person: "Bela", confirmed: "Bela" }]), createdAt: 10 });
+    expect(nameHere(store)).toBe("Anna");
+    expect(store.people.conflicts["vol~p1#0"]).toMatchObject({ there: "Bela", at: 10 });
+  });
+
+  it("follows the device a confirmation here came from, when it changes its mind there", async () => {
+    const rand = seeded(133);
+    const a = direction(rand);
+    const store = new FaceStore();
+    store.load();
+    store.put("vol~p1", [local("vol~p1", 0, [0.1, 0.1, 0.3, 0.4], a)]);
+    const face = phone("p1", 0, [0.1, 0.1, 0.3, 0.4], a);
+    applyCopy(store, { ...copy([{ ...face, person: "Anna", confirmed: "Anna" }]), createdAt: 5 });
+    expect(store.people.confirmedFrom["vol~p1#0"]).toBe(copy([]).deviceId);
     applyCopy(store, { ...copy([{ ...face, person: "Bela", confirmed: "Bela" }]), createdAt: 10 });
     expect(nameHere(store)).toBe("Bela");
     expect(store.people.confirmed["vol~p1#0"]).toBe("Bela");
-    expect(store.people.conflicts["vol~p1#0"]).toBeUndefined();
+  });
+
+  it("keeps a later hand decision here over an older mark from there", async () => {
+    const { store, face } = await groupedAnna();
+    const bela = { id: "pB", name: "Bela", isOther: false };
+    store.people.people.push(bela);
+    // Moved to Bela there at 100; moved back to Anna here, by hand, at 200.
+    addFacesToPerson(store, store.people.assign["vol~p1#0"], ["vol~p1#0"], 200);
+    applyCopy(store, {
+      ...copy([{ ...face, person: "Bela", confirmed: "Bela" }]),
+      createdAt: 150,
+      notPerson: [{ name: "Anna", key: "p1", index: 0, at: 100 }],
+    });
+    expect(nameHere(store)).toBe("Anna");
+    expect(store.people.confirmed["vol~p1#0"]).toBe("Anna");
+    expect(store.people.blocked["vol~p1#0"]).toBeUndefined();
   });
 
   it("keeps a name confirmed on both sides, and keeps the face as a conflict until both agree", async () => {

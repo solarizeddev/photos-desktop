@@ -619,6 +619,8 @@ export function rejectFaces(store: FaceStore, faceIds: string[]): number {
     rejected.add(id);
     delete p.assign[id];
     delete p.confirmed[id];
+    delete p.conflicts[id];
+    delete p.confirmedFrom[id];
     count++;
   }
   p.rejected = [...rejected];
@@ -745,7 +747,7 @@ function noteRenamed(p: PeopleState, from: string, to: string, at: number): void
 }
 
 /** The removals kept, and carried in a face copy; older ones have long reached every device. */
-export const MAX_CURATION_REMOVALS = 2000;
+export const MAX_CURATION_REMOVALS = 20000;
 
 /** Where the time of a piece of curation is kept: its kind, the person's name, and the photo or face. */
 
@@ -780,6 +782,8 @@ export function rekeyPeople(
       if (from in p.assign) p.assign[to] = p.assign[from];
       if (from in p.confirmed) p.confirmed[to] = p.confirmed[from];
       if (from in p.blocked) p.blocked[to] = p.blocked[from];
+      if (from in p.conflicts) p.conflicts[to] = p.conflicts[from];
+      if (from in p.confirmedFrom) p.confirmedFrom[to] = p.confirmedFrom[from];
     } else {
       if (!rejected.has(to) && p.confirmed[to] === undefined) {
         const confirmed = p.confirmed[from];
@@ -806,6 +810,8 @@ export function rekeyPeople(
     delete p.assign[from];
     delete p.confirmed[from];
     delete p.blocked[from];
+    delete p.conflicts[from];
+    delete p.confirmedFrom[from];
   }
   p.rejected = [...p.rejected.flatMap((id) => (merged.has(id) ? [] : [ids.get(id) ?? id])), ...rejectedToo];
   for (const name of Object.keys(p.covers)) if (p.covers[name] === oldUid) p.covers[name] = newUid;
@@ -974,6 +980,8 @@ export function rejectPerson(store: FaceStore, id: string): number {
     rejected.add(face.id);
     delete p.assign[face.id];
     delete p.confirmed[face.id];
+    delete p.conflicts[face.id];
+    delete p.confirmedFrom[face.id];
     count++;
   };
   for (const face of own) reject(face);
@@ -1066,6 +1074,7 @@ export function notThisPerson(store: FaceStore, faceId: string, at = Date.now())
   p.assign[faceId] = otherPerson(p).id;
   delete p.confirmed[faceId];
   delete p.conflicts[faceId];
+  delete p.confirmedFrom[faceId];
   if (person.name) {
     const list = p.blocked[faceId] ?? [];
     if (!list.includes(person.name)) list.push(person.name);
@@ -1135,12 +1144,15 @@ export function addFacesToPerson(store: FaceStore, id: string, faceIds: string[]
       noteCuration(p, 2, was, [portableFaceId(faceId)], false, at);
     }
     delete p.conflicts[faceId];
+    delete p.confirmedFrom[faceId];
     p.assign[faceId] = id;
     p.rejected = p.rejected.filter((x) => x !== faceId);
     if (person.name) {
       p.confirmed[faceId] = person.name;
-      if (p.blocked[faceId]?.includes(person.name)) unmarked.push(portableFaceId(faceId));
-      const blocked = p.blocked[faceId]?.filter((n) => n !== person.name);
+      // Taken back with a time even when no mark is held here: a mark that it is not them, set
+      // earlier on another device, must not outrank this later decision when it arrives.
+      unmarked.push(portableFaceId(faceId));
+      const blocked = p.blocked[faceId]?.filter((n) => foldPersonName(n) !== foldPersonName(person.name!));
       if (blocked?.length) p.blocked[faceId] = blocked;
       else delete p.blocked[faceId];
     }

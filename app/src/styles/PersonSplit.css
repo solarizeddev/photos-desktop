@@ -357,3 +357,17 @@
   width: 64px;
   height: 64px;
 }
+
+.ps-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  color: var(--fg-primary);
+  cursor: pointer;
+}
+.ps-check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}

@@ -105,7 +105,6 @@ describe("siblings grouped as one person", () => {
     for (const [id, s] of sides) if (truth.get(id) !== s) wrong++;
     expect(wrong).toBe(0);
     expect(plan.counts.a + plan.counts.b).toBeGreaterThan(truth.size * 0.8);
-    expect(plan.counts.neither).toBe(0);
   });
 
   it("keep two faces of one photo apart", async () => {
@@ -139,19 +138,69 @@ describe("siblings grouped as one person", () => {
     expect(after.sort()).toEqual(moved.sort());
   });
 
-  it("go back as they were on undo, with the marks taken back for the other device", async () => {
+  it("go back as they were on undo, marked off the other person for the other device", async () => {
     const { store, truth } = merged(0.6);
     const before = JSON.stringify({ assign: store.people.assign, confirmed: store.people.confirmed });
     const applied = await applySplit(store, "pA", "Sam", { a: pick(truth, "a", 5), b: pick(truth, "b", 5) }, 50);
-    expect(undoSplit(store, applied.undo, 60)).toBe(true);
+    const sam = store.people.people.find((x) => x.name === "Sam")!.id;
+    const moved = Object.entries(store.people.assign).filter(([, id]) => id === sam).map(([id]) => id);
+    const undone = undoSplit(store, applied.undo, 60);
+    expect(undone).toMatchObject({ ok: true, skipped: 0 });
     const p = store.people;
     expect(JSON.stringify({ assign: p.assign, confirmed: p.confirmed })).toBe(before);
-    expect(Object.keys(p.blocked)).toEqual([]);
+    // Each face that went to Sam is marked not Sam, now, so a device that took the split moves it back.
+    for (const id of moved) {
+      expect(p.blocked[id]).toEqual(["Sam"]);
+      expect(p.curation[curationKey(2, "Sam", id.slice(id.indexOf("~") + 1))]).toMatchObject({ removed: false, at: 60 });
+      expect(p.curation[curationKey(2, "Alex", id.slice(id.indexOf("~") + 1))]).toMatchObject({ removed: true, at: 60 });
+    }
     expect(p.people.some((x) => x.name === "Sam")).toBe(false);
-    const marks = Object.values(p.curation).filter((c) => c.kind === 2);
-    expect(marks.length).toBeGreaterThan(0);
-    expect(marks.every((c) => c.removed && c.at === 60)).toBe(true);
-    expect(undoSplit(store, applied.undo, 70)).toBe(false);
+    expect(undoSplit(store, applied.undo, 70).ok).toBe(false);
+  });
+
+  it("leave a face changed after the split as it is on undo", async () => {
+    const { store, truth } = merged(0.6);
+    const applied = await applySplit(store, "pA", "Sam", { a: pick(truth, "a", 5), b: pick(truth, "b", 5) }, 50);
+    const sam = store.people.people.find((x) => x.name === "Sam")!.id;
+    const movedBack = Object.entries(store.people.assign).find(([, id]) => id === sam)![0];
+    store.people.assign[movedBack] = "pA";
+    store.people.confirmed[movedBack] = "Alex";
+    const undone = undoSplit(store, applied.undo, 60);
+    expect(undone.skipped).toBe(1);
+    expect(store.people.blocked[movedBack]).toEqual(["Alex"]);
+  });
+
+  it("leave the unsure faces exactly as they were, confirmations and all", async () => {
+    const { store, truth } = merged(0.25);
+    const plan = await planSplit(store, "pA", "Sam", { a: pick(truth, "a", 3), b: pick(truth, "b", 3) });
+    expect(plan.counts.unsure).toBeGreaterThan(0);
+    await applySplit(store, "pA", "Sam", { a: pick(truth, "a", 3), b: pick(truth, "b", 3) }, 50);
+    for (const f of plan.unsure) {
+      expect(store.people.assign[f.faceId]).toBe("pA");
+      expect(store.people.confirmed[f.faceId]).toBe("Alex");
+    }
+  });
+});
+
+describe("a split from few or uneven examples", () => {
+  it("sorts most faces with three of one and sixty of the other, the other already named", async () => {
+    const { store, truth } = merged(0.6);
+    const p = store.people;
+    p.people.push({ id: "pS", name: "Sam", isOther: false });
+    // Sixty of Sam's faces already moved and confirmed by hand.
+    for (const id of pick(truth, "b", 60)) {
+      p.assign[id] = "pS";
+      p.confirmed[id] = "Sam";
+    }
+    const plan = await planSplit(store, "pA", "Sam", { a: pick(truth, "a", 3), b: [] });
+    expect(plan.counts.a).toBeGreaterThan(80);
+    expect(plan.verdict).not.toBe("few");
+  });
+
+  it("asks for more examples when one side has a single one", async () => {
+    const { store, truth } = merged(0.6);
+    const plan = await planSplit(store, "pA", "Sam", { a: pick(truth, "a", 4), b: pick(truth, "b", 1) });
+    expect(plan.verdict).toBe("few");
   });
 });
 

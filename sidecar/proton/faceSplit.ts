@@ -22,8 +22,7 @@
  *     faces that clearly lean that way; a face's margin is how much closer it is to A than B.
  *   - A face goes to a side when its margin is clear (a stricter bar for a weak face, as the
  *     grouping has) and its nearest examples agree. Otherwise it is unsure, and is not guessed:
- *     it stays with A, unconfirmed, for the user to answer. One that is near neither side at
- *     all goes to the leftovers.
+ *     it stays with A as it was, for the user to answer.
  *   - Two faces in one photo are two people: if both lean the same way, the clearer one keeps
  *     that side and the other takes the other, or both are unsure when neither is clear.
  *   - How far to trust it: each example is left out in turn and sorted like the rest. If the
@@ -32,14 +31,15 @@
  *
  * Applied, the result is kept in the one form both this computer's regroup and the phone's
  * keep: the faces of each side confirmed as that side, and B's also marked as not A, with the
- * time, so the other device moves them too (see faceSync).
+ * time, so the other device moves them too (see faceSync). The unsure ones are left exactly
+ * as they were.
  */
 
 import { randomBytes } from "node:crypto";
-import { dot, FACE_SUGGEST_THRESHOLD } from "./faceCluster.ts";
+import { dot } from "./faceCluster.ts";
 import { isConfidentFace } from "./faceAlign.ts";
-import { curationKey, foldPersonName, mint, noteCuration, otherPerson, personOf, portableFaceId } from "./facePeople.ts";
-import type { Curation, FaceRecord, FaceStore, Person } from "./faceStore.ts";
+import { curationKey, foldPersonName, mint, noteCuration, personOf, portableFaceId } from "./facePeople.ts";
+import type { Conflict, Curation, FaceRecord, FaceStore, Person } from "./faceStore.ts";
 
 /** A face as the window shows one: its photo and where it sits. */
 export type SplitFace = { faceId: string; uid: string; box: [number, number, number, number] };
@@ -57,7 +57,7 @@ export type SplitStart = {
   elsewhere: { name: string; faceIds: string[]; sample: SplitFace[] }[];
 };
 
-export type SplitSide = "a" | "b" | "unsure" | "neither";
+export type SplitSide = "a" | "b" | "unsure";
 
 export type SplitPlan = {
   counts: Record<SplitSide, number>;
@@ -73,7 +73,7 @@ export type SplitPlan = {
   unsure: (SplitFace & { lean: "a" | "b" | "even" })[];
 };
 
-export type SplitApplied = { stayed: number; moved: number; others: number; unsure: number; undo: string };
+export type SplitApplied = { stayed: number; moved: number; unsure: number; undo: string };
 
 /** Margins below these are not clear: confident faces, and weak ones (as the grouping's strict delta). */
 const MARGIN = 0.05;
@@ -272,15 +272,20 @@ async function label(
     await yieldNow();
   }
 
-  // The examples the nearest-neighbour check asks: the user's picks first, then the clearest.
+  // The examples the nearest-neighbour check asks: as many from each side, the user's picks
+  // first, then the clearest. Uneven sides would make the vote the count of examples rather
+  // than who the face is near: with three of A and sixty of B, no face could get four A votes.
+  const even = Math.min(NEIGHBOUR_POOL, aSeeds.length, bSeeds.length);
   const pool = (seeds: FaceRecord[], picks: Set<string>) =>
-    [...seeds].sort((x, y) => Number(picks.has(y.id)) - Number(picks.has(x.id)) || y.score - x.score).slice(0, NEIGHBOUR_POOL);
+    [...seeds].sort((x, y) => Number(picks.has(y.id)) - Number(picks.has(x.id)) || y.score - x.score).slice(0, even);
   const voters = [
     ...pool(aSeeds, new Set(picked.a)).map((f) => ({ f, a: true })),
     ...pool(bSeeds, new Set(picked.b)).map((f) => ({ f, a: false })),
   ];
+  // An odd number of neighbours, fewer than each side has: with two of each, the nearest three.
+  const neighbours = Math.min(NEIGHBOURS, 2 * even - 1);
   const nearestAgree = (f: FaceRecord, towardA: boolean): boolean => {
-    const k = Math.min(NEIGHBOURS, voters.length);
+    const k = neighbours;
     const best: { s: number; a: boolean }[] = [];
     for (const v of voters) {
       const s = dot(f.embedding, v.f.embedding);
@@ -307,8 +312,7 @@ async function label(
     const m = sa - sb;
     margins.set(f.id, m);
     const bar = confident(f) ? MARGIN : MARGIN_WEAK;
-    if (Math.max(sa, sb) < FACE_SUGGEST_THRESHOLD) sides.set(f.id, "neither");
-    else if (Math.abs(m) < bar || !nearestAgree(f, m > 0)) sides.set(f.id, "unsure");
+    if (Math.abs(m) < bar || !nearestAgree(f, m > 0)) sides.set(f.id, "unsure");
     else sides.set(f.id, m > 0 ? "a" : "b");
     if ((++done & 0xff) === 0) await yieldNow();
   }
@@ -330,49 +334,54 @@ async function label(
     const seedX = aIds.has(x.id) || bIds.has(x.id);
     const seedY = aIds.has(y.id) || bIds.has(y.id);
     if (seedX && seedY) continue;
-    const [hi, lo] = margins.get(x.id)! >= margins.get(y.id)! ? [x, y] : [y, x];
-    const gap = margins.get(hi.id)! - margins.get(lo.id)!;
-    const flip = (f: FaceRecord, to: SplitSide) => {
-      if (!aIds.has(f.id) && !bIds.has(f.id)) sides.set(f.id, to);
-    };
-    if (gap >= MARGIN || seedX || seedY) {
-      flip(hi, "a");
-      flip(lo, "b");
-    } else {
-      flip(x, "unsure");
-      flip(y, "unsure");
+    if (seedX || seedY) {
+      // The example is who the user said; the other face in the photo is the other person.
+      sides.set((seedX ? y : x).id, sx === "a" ? "b" : "a");
+      continue;
     }
+    // Neither is an example: the one leaning harder that way keeps the side, the other is unsure
+    // rather than forced to the other side against its own margin.
+    const mx = margins.get(x.id)!;
+    const my = margins.get(y.id)!;
+    const keep = sx === "a" ? (mx >= my ? x : y) : mx <= my ? x : y;
+    sides.set((keep === x ? y : x).id, "unsure");
   }
 
-  // How far to trust it: each example left out and sorted by the other examples alone.
-  let right = 0;
-  let tried = 0;
+  // How far to trust it: each example left out and sorted by the other examples alone, on
+  // each side; and the share of the other faces that went to a side at all.
   const check = (seeds: FaceRecord[], own: Float32Array, other: Float32Array) => {
     const cOther = direction(other);
+    let right = 0;
+    let tried = 0;
     // An example alone on its side has nothing left to be sorted against.
-    if (seeds.length < 2) return;
+    if (seeds.length < 2) return { right, tried };
     for (const f of seeds.slice(0, CHECK_POOL)) {
       const without = Float32Array.from(own);
       addInto(without, f.embedding, -EXAMPLE_WEIGHT);
-      const cOwn = direction(without);
       tried++;
-      if (dot(f.embedding, cOwn) > dot(f.embedding, cOther)) right++;
+      if (dot(f.embedding, direction(without)) > dot(f.embedding, cOther)) right++;
     }
+    return { right, tried };
   };
-  check(aSeeds, aSeedSum, bSeedSum);
-  check(bSeeds, bSeedSum, aSeedSum);
+  const checkA = check(aSeeds, aSeedSum, bSeedSum);
+  const checkB = check(bSeeds, bSeedSum, aSeedSum);
+  const right = checkA.right + checkB.right;
+  const tried = checkA.tried + checkB.tried;
 
-  const counts: Record<SplitSide, number> = { a: 0, b: 0, unsure: 0, neither: 0 };
+  const counts: Record<SplitSide, number> = { a: 0, b: 0, unsure: 0 };
   for (const s of sides.values()) counts[s]++;
-  const judged = rest.filter((f) => sides.get(f.id) !== "neither");
-  const clear = judged.filter((f) => {
-    const m = Math.abs(margins.get(f.id)!);
-    return m >= (confident(f) ? MARGIN : MARGIN_WEAK);
-  }).length;
-  const clearShare = judged.length ? clear / judged.length : 1;
-  const accuracy = tried ? right / tried : 0;
+  const sorted = rest.filter((f) => sides.get(f.id) !== "unsure").length;
+  const clearShare = rest.length ? sorted / rest.length : 1;
+  // Judged by the weaker side: a side whose examples do not hold together is not a person.
+  const accuracy = Math.min(checkA.right / Math.max(1, checkA.tried), checkB.right / Math.max(1, checkB.tried));
   const verdict: SplitPlan["verdict"] =
-    tried < 4 ? "few" : accuracy >= 0.95 && clearShare >= 0.75 ? "reliable" : accuracy < 0.85 || clearShare < 0.5 ? "unreliable" : "weak";
+    checkA.tried < 2 || checkB.tried < 2
+      ? "few"
+      : accuracy >= 0.95 && clearShare >= 0.75
+        ? "reliable"
+        : accuracy < 0.85 || clearShare < 0.5
+          ? "unreliable"
+          : "weak";
 
   const ofSide = (side: SplitSide) =>
     rest
@@ -399,10 +408,20 @@ async function label(
 /** What a split changed, kept so it can be taken back. */
 type SplitUndo = {
   personId: string;
+  /** The other person, and whether the split made them. */
+  otherId: string;
+  otherName: string;
   createdId: string | null;
-  faces: Record<string, { assign?: string; confirmed?: string; blocked?: string[]; conflict?: unknown }>;
+  /** Each face the split changed: as it was, and as the split left it. */
+  faces: Record<
+    string,
+    {
+      was: { assign?: string; confirmed?: string; blocked?: string[]; conflict?: Conflict; from?: string };
+      left: { assign?: string; confirmed?: string };
+    }
+  >;
   /** Each "not this person" mark the split set or took away, and what was held for it before. */
-  marks: { key: string; name: string; ref: string; before: Curation | undefined }[];
+  marks: { faceId: string; key: string; name: string; ref: string; before: Curation | undefined }[];
 };
 
 const undos = new Map<string, SplitUndo>();
@@ -431,20 +450,24 @@ export async function applySplit(
     p.namedAt[fold] = at;
     createdId = other.id;
   }
-  const undo: SplitUndo = { personId, createdId, faces: {}, marks: [] };
+  const undo: SplitUndo = { personId, otherId: other.id, otherName: other.name!, createdId, faces: {}, marks: [] };
   const remember = (faceId: string) => {
     if (undo.faces[faceId]) return;
     undo.faces[faceId] = {
-      assign: p.assign[faceId],
-      confirmed: p.confirmed[faceId],
-      blocked: p.blocked[faceId] ? [...p.blocked[faceId]] : undefined,
-      conflict: p.conflicts[faceId],
+      was: {
+        assign: p.assign[faceId],
+        confirmed: p.confirmed[faceId],
+        blocked: p.blocked[faceId] ? [...p.blocked[faceId]] : undefined,
+        conflict: p.conflicts[faceId],
+        from: p.confirmedFrom[faceId],
+      },
+      left: {},
     };
   };
   const mark = (faceId: string, markName: string, removed: boolean) => {
     const ref = portableFaceId(faceId);
     const key = curationKey(2, markName, ref);
-    undo.marks.push({ key, name: markName, ref, before: p.curation[key] ? { ...p.curation[key] } : undefined });
+    undo.marks.push({ faceId, key, name: markName, ref, before: p.curation[key] ? { ...p.curation[key] } : undefined });
     noteCuration(p, 2, markName, [ref], removed, at);
   };
   const block = (faceId: string, blockName: string) => {
@@ -460,75 +483,93 @@ export async function applySplit(
     else delete p.blocked[faceId];
     mark(faceId, blockName, true);
   };
-  const leftovers = otherPerson(p);
   let stayed = 0;
   let moved = 0;
-  let others = 0;
   let unsure = 0;
   for (const f of faces) {
     const side = sides.get(f.id);
     // Sorting yields to the rest of the sidecar, and a scan or a hand may have moved a face
     // meanwhile: only the faces still in the person are split.
     if (!side || p.assign[f.id] !== person.id) continue;
+    if (side === "unsure") {
+      // Not guessed, and left exactly as it was: with its confirmation, if it had one.
+      unsure++;
+      continue;
+    }
     remember(f.id);
     if (side === "a") {
       p.assign[f.id] = person.id;
       if (person.name) p.confirmed[f.id] = person.name;
-      delete p.conflicts[f.id];
       stayed++;
-    } else if (side === "b") {
+    } else {
       p.assign[f.id] = other.id;
       p.confirmed[f.id] = other.name!;
       unblock(f.id, other.name!);
       if (person.name) block(f.id, person.name);
-      delete p.conflicts[f.id];
       moved++;
-    } else if (side === "neither") {
-      p.assign[f.id] = leftovers.id;
-      delete p.confirmed[f.id];
-      if (person.name) block(f.id, person.name);
-      delete p.conflicts[f.id];
-      others++;
-    } else {
-      // Not guessed: it stays, unconfirmed, so a regroup or the user can still move it.
-      delete p.confirmed[f.id];
-      unsure++;
     }
+    delete p.conflicts[f.id];
+    delete p.confirmedFrom[f.id];
+    undo.faces[f.id].left = { assign: p.assign[f.id], confirmed: p.confirmed[f.id] };
   }
   store.markPeople();
   store.edits++;
   const token = randomBytes(9).toString("base64url");
   undos.set(token, undo);
   while (undos.size > UNDO_KEPT) undos.delete(undos.keys().next().value!);
-  return { stayed, moved, others, unsure, undo: token };
+  return { stayed, moved, unsure, undo: token };
 }
 
-/** Takes a split back, as long as the app has not been closed since. */
-export function undoSplit(store: FaceStore, token: string, at = Date.now()): boolean {
+export type SplitUndone = { ok: boolean; restored: number; skipped: number };
+
+/**
+ * Takes a split back, as long as the app has not been closed since. A face changed after the
+ * split (moved by hand, or by a regroup to a person that is no longer there) is left as it is
+ * now. A face moved to the other person is marked as not them, with this time, so a device
+ * that took the split in moves it back too.
+ */
+export function undoSplit(store: FaceStore, token: string, at = Date.now()): SplitUndone {
   const undo = undos.get(token);
-  if (!undo) return false;
+  if (!undo) return { ok: false, restored: 0, skipped: 0 };
   undos.delete(token);
   const p = store.people;
   const ids = new Set(p.people.map((x) => x.id));
-  for (const [faceId, was] of Object.entries(undo.faces)) {
-    if (was.assign && ids.has(was.assign)) p.assign[faceId] = was.assign;
-    else if (was.assign === undefined) delete p.assign[faceId];
+  const restored = new Set<string>();
+  let skipped = 0;
+  for (const [faceId, { was, left }] of Object.entries(undo.faces)) {
+    const now = { assign: p.assign[faceId], confirmed: p.confirmed[faceId] };
+    if (now.assign !== left.assign || now.confirmed !== left.confirmed || !was.assign || !ids.has(was.assign)) {
+      skipped++;
+      continue;
+    }
+    p.assign[faceId] = was.assign;
     if (was.confirmed !== undefined) p.confirmed[faceId] = was.confirmed;
     else delete p.confirmed[faceId];
     if (was.blocked) p.blocked[faceId] = [...was.blocked];
     else delete p.blocked[faceId];
-    if (was.conflict) p.conflicts[faceId] = was.conflict as (typeof p.conflicts)[string];
+    if (was.conflict) p.conflicts[faceId] = was.conflict;
+    if (was.from) p.confirmedFrom[faceId] = was.from;
+    restored.add(faceId);
   }
-  // A mark held before the split goes back to what it was. One the split set is taken back,
-  // with a time of its own, so another device that took it in takes it back too.
+  // A mark held before the split goes back to what it was, with this time so it outranks the
+  // split's on a device that took the split in. One the split set is taken back, likewise.
   for (const m of [...undo.marks].reverse()) {
-    if (m.before) p.curation[m.key] = m.before;
+    if (!restored.has(m.faceId)) continue;
+    if (m.before) p.curation[m.key] = { ...m.before, at };
     else noteCuration(p, 2, m.name, [m.ref], true, at);
+  }
+  // Moved back off the other person: said so, with this time, for the other devices.
+  for (const faceId of restored) {
+    if (undo.faces[faceId].left.assign !== undo.otherId) continue;
+    const list = p.blocked[faceId] ?? [];
+    if (!list.some((n) => foldPersonName(n) === foldPersonName(undo.otherName))) p.blocked[faceId] = [...list, undo.otherName];
+    noteCuration(p, 2, undo.otherName, [portableFaceId(faceId)], false, at);
   }
   if (undo.createdId && !Object.values(p.assign).includes(undo.createdId)) {
     p.people = p.people.filter((x) => x.id !== undo.createdId);
+    delete p.namedAt[foldPersonName(undo.otherName)];
   }
   store.markPeople();
   store.edits++;
-  return true;
+  return { ok: true, restored: restored.size, skipped };
 }

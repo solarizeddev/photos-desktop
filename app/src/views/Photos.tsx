@@ -1141,6 +1141,8 @@ export function Photos({
   const [findOpen, setFindOpen] = useState(false);
   // The split of the person open on the page into two people (see PersonSplit).
   const [splitOpen, setSplitOpen] = useState(false);
+  // A split belongs to the person it was opened on: another person's page starts without one.
+  useEffect(() => setSplitOpen(false), [uidFilter?.personId]);
   // The photos the date editor is open for, and the run it started, followed while it lasts.
   const [dateEditUids, setDateEditUids] = useState<string[] | null>(null);
   const [dateStatus, setDateStatus] = useState<DateEditStatus | null>(null);
@@ -3556,6 +3558,7 @@ export function Photos({
       )}
       {splitOpen && view === "photos" && uidFilter?.personId && settings.localFaces && (
         <PersonSplit
+          key={uidFilter.personId}
           personId={uidFilter.personId}
           name={localEntries.named.some((e) => e.personId === uidFilter.personId) ? uidFilter.name : null}
           names={localEntries.named.filter((e) => e.personId !== uidFilter.personId).map((e) => e.name)}

@@ -117,5 +117,5 @@ export const faceHandlers: Record<string, (p: any) => unknown> = {
     faceScanner.changed();
     return out;
   },
-  faceSplitUndo: (p) => change(() => ({ ok: undoSplit(store(), str(p?.token, 64)) })),
+  faceSplitUndo: (p) => change(() => undoSplit(store(), str(p?.token, 64))),
 };

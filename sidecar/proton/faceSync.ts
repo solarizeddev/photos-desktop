@@ -525,6 +525,7 @@ export function applyCopy(store: FaceStore, copy: FaceCopy, ownToo = false): App
     }
     if (confirmedHere) {
       delete p.confirmed[local.id];
+      delete p.confirmedFrom[local.id];
       const owner = p.people.find((x) => x.id === p.assign[local.id]);
       if (owner?.name && foldPersonName(owner.name) === foldPersonName(mark.name)) p.assign[local.id] = otherPerson(p).id;
     }
@@ -545,36 +546,50 @@ export function applyCopy(store: FaceStore, copy: FaceCopy, ownToo = false): App
       }
       continue;
     }
+    const conflict = p.conflicts[local.id];
     const name = phone.confirmed ?? phone.person;
-    if (!name || nameTakenOffSince(p, name, copy.createdAt)) continue;
+    if (!name) {
+      // That device no longer names it: a conflict it raised is over.
+      if (conflict?.device === copy.deviceId) delete p.conflicts[local.id];
+      continue;
+    }
+    if (nameTakenOffSince(p, name, copy.createdAt)) continue;
     if (p.blocked[local.id]?.some((n) => foldPersonName(n) === foldPersonName(name))) continue;
     const ownerName = p.assign[local.id] ? nameOf.get(p.assign[local.id]) : undefined;
     if (ownerName !== undefined && foldPersonName(ownerName) === foldPersonName(name)) {
-      delete p.conflicts[local.id];
+      // Agreed now, by that device, or by a confirmation from any.
+      if (conflict && (conflict.device === copy.deviceId || phone.confirmed)) delete p.conflicts[local.id];
       continue;
     }
     if (ownerName !== undefined || decided) {
-      // Named differently on the two sides. A face confirmed there and only grouped here takes the
-      // name it was confirmed as: a hand there outranks this computer's own guess, which is all an
-      // unconfirmed name here is. Confirmed on both sides, neither outranks the other: the name here
-      // stays, and the face is kept as a conflict for someone to decide.
-      if (!phone.confirmed) {
+      // Named differently on the two sides. A confirmation here that was itself taken in from
+      // this device follows it: that device changed its mind. Otherwise the name here stays:
+      // naming a group confirms every face in it, on both devices, so a confirmation there may
+      // well be no hand decision, and taking it would undo this computer's own grouping or a
+      // split made here. A hand decision there that should move it comes with a timed "not
+      // this person" mark, taken in above. A confirmation there is kept as a conflict, for the
+      // split of the person here to offer and for someone to decide.
+      if (phone.confirmed && decided && p.confirmedFrom[local.id] === copy.deviceId) {
+        const person = personNamed(p, phone.confirmed);
+        nameOf.set(person.id, person.name!);
+        p.assign[local.id] = person.id;
+        p.confirmed[local.id] = person.name!;
+        delete p.conflicts[local.id];
+        result.named++;
+      } else {
+        if (phone.confirmed) p.conflicts[local.id] = { there: phone.confirmed, device: copy.deviceId, at: copy.createdAt };
         result.conflicts++;
-        continue;
       }
-      if (decided) {
-        if (foldPersonName(p.confirmed[local.id]) !== foldPersonName(phone.confirmed)) {
-          p.conflicts[local.id] = { there: phone.confirmed, device: copy.deviceId, at: copy.createdAt };
-          result.conflicts++;
-        }
-        continue;
-      }
+      continue;
     }
     const person = personNamed(p, name);
     nameOf.set(person.id, person.name!);
     p.assign[local.id] = person.id;
     // Only a name confirmed there is confirmed here: the other device's grouping is as automatic as this one's.
-    if (phone.confirmed) p.confirmed[local.id] = person.name!;
+    if (phone.confirmed) {
+      p.confirmed[local.id] = person.name!;
+      p.confirmedFrom[local.id] = copy.deviceId;
+    }
     delete p.conflicts[local.id];
     result.named++;
   }

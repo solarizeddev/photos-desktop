@@ -12,6 +12,7 @@ import { CloseIcon, FaceIcon } from "./icons";
 import { rpc } from "../lib/rpc";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { useT } from "../lib/i18n";
+import { personNameKey } from "../lib/personName";
 import "../styles/Confirm.css";
 import "../styles/AlbumDialogs.css";
 import "../styles/PersonSplit.css";
@@ -27,7 +28,7 @@ type Start = {
   elsewhere: { name: string; faceIds: string[]; sample: SplitFace[] }[];
 };
 type Plan = {
-  counts: { a: number; b: number; unsure: number; neither: number };
+  counts: { a: number; b: number; unsure: number };
   checked: { right: number; tried: number };
   clearShare: number;
   verdict: "reliable" | "weak" | "unreliable" | "few";
@@ -35,13 +36,20 @@ type Plan = {
   leastSureB: SplitFace[];
   unsure: (SplitFace & { lean: "a" | "b" | "even" })[];
 };
-type Applied = { stayed: number; moved: number; others: number; unsure: number; undo: string };
+type Applied = { stayed: number; moved: number; unsure: number; undo: string };
+type Undone = { ok: boolean; restored: number; skipped: number };
 type Side = "a" | "b";
 
 /** Unsure faces shown at once in the review. */
 const REVIEW_PAGE = 12;
 
-const fold = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase().trim();
+/** Faces another device named as the other person used as examples, at most. */
+const ELSEWHERE_KEPT = 200;
+
+/** Names compared as the people code compares them (accents kept). */
+const same = (x: string, y: string) => personNameKey(x) === personNameKey(y);
+/** Loose matching for the suggestions as the name is typed, accents aside. */
+const loose = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase().trim();
 
 /**
  * Splitting a person in two (see the sidecar's faceSplit): naming the other person, picking a
@@ -76,6 +84,8 @@ export function PersonSplit({
   const [applied, setApplied] = useState<Applied | null>(null);
   const [busy, setBusy] = useState(false);
   const [reviewed, setReviewed] = useState<Set<string>>(new Set());
+  // Whether the faces another device named as the other person count as examples of them.
+  const [useElsewhere, setUseElsewhere] = useState<boolean | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -94,37 +104,49 @@ export function PersonSplit({
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
       e.stopPropagation();
-      if (step !== "done") onClose();
+      if (step !== "done" && !busy) onClose();
     }
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [step, onClose]);
+  }, [step, onClose, busy]);
 
   const suggestions = useMemo(() => {
-    const q = fold(other);
+    const q = loose(other);
     const pool = [...new Set([...(start?.elsewhere.map((e) => e.name) ?? []), ...names])];
-    return pool.filter((n) => fold(n) !== fold(here) && (!q || fold(n).includes(q))).slice(0, 6);
+    return pool.filter((n) => !same(n, here) && (!q || loose(n).includes(q))).slice(0, 6);
   }, [other, names, start, here]);
 
-  const a = [...picks].filter(([, s]) => s === "a").map(([id]) => id);
-  const b = [...picks].filter(([, s]) => s === "b").map(([id]) => id);
+  // Kept as the same arrays from one draw to the next, so the split is worked out again only
+  // when the picks change.
+  const a = useMemo(() => [...picks].filter(([, s]) => s === "a").map(([id]) => id), [picks]);
+  const b = useMemo(() => [...picks].filter(([, s]) => s === "b").map(([id]) => id), [picks]);
   const otherName = other.trim();
-  const sameName = !!otherName && fold(otherName) === fold(here);
+  const sameName = !!otherName && same(otherName, here);
 
-  // What another device said, for the name chosen, counts as examples of that person.
+  // What another device said, for the name chosen: offered as examples of that person. On at
+  // first only when they are a small share of the person; a device that named the whole merged
+  // group the other name would otherwise make everything an example of them.
+  const elsewhere = useMemo(() => start?.elsewhere.find((e) => same(e.name, otherName)) ?? null, [start, otherName]);
+  const elsewhereByDefault = !!elsewhere && !!start && elsewhere.faceIds.length <= Math.max(25, start.faces * 0.25);
   const fromElsewhere = useMemo(
-    () => start?.elsewhere.find((e) => fold(e.name) === fold(otherName))?.faceIds ?? [],
-    [start, otherName],
+    () => ((useElsewhere ?? elsewhereByDefault) && elsewhere ? elsewhere.faceIds.slice(0, ELSEWHERE_KEPT) : []),
+    [useElsewhere, elsewhereByDefault, elsewhere],
   );
   const bWithElsewhere = useMemo(() => [...new Set([...b, ...fromElsewhere])], [b, fromElsewhere]);
+  const picksKey = `${a.join(",")}|${bWithElsewhere.join(",")}`;
 
   // The split worked out again as examples change, a moment after the last change.
   const planned = useRef(0);
   useEffect(() => {
     if (step !== "preview" && step !== "review") return;
-    if (a.length === 0 || bWithElsewhere.length === 0) return;
+    if (a.length === 0 || bWithElsewhere.length === 0) {
+      planned.current++;
+      setPlanning(false);
+      return;
+    }
     const ticket = ++planned.current;
     setPlanning(true);
+    setError("");
     const timer = window.setTimeout(() => {
       rpc<Plan>("faceSplitPlan", { id: personId, other: otherName, a, b: bWithElsewhere }).then(
         (p) => {
@@ -140,9 +162,9 @@ export function PersonSplit({
       );
     }, 300);
     return () => window.clearTimeout(timer);
-    // The picks are read through `a` and `b`, which are new arrays on each draw.
+    // The picks are read through `picksKey`, which changes exactly when they do.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, picks, personId, otherName, bWithElsewhere]);
+  }, [step, picksKey, personId, otherName]);
 
   const shown = useMemo(() => {
     const faces: SplitFace[] = [];
@@ -183,7 +205,12 @@ export function PersonSplit({
     if (!applied || busy) return;
     setBusy(true);
     try {
-      await act("faceSplitUndo", { token: applied.undo });
+      const out = await act<Undone>("faceSplitUndo", { token: applied.undo });
+      if (!out.ok) {
+        setError(t("faces.split.undoGone"));
+        setBusy(false);
+        return;
+      }
       onClose();
     } catch (e) {
       setError(String(e));
@@ -207,11 +234,12 @@ export function PersonSplit({
 
   const sideButtons = (faceId: string) => (
     <span className="ps-sides">
-      <button className={`ps-side a${picks.get(faceId) === "a" ? " on" : ""}`} onClick={() => choose(faceId, "a")}>
+      <button className={`ps-side a${picks.get(faceId) === "a" ? " on" : ""}`} aria-pressed={picks.get(faceId) === "a"} onClick={() => choose(faceId, "a")}>
         {here}
       </button>
       <button
         className={`ps-side b${picks.get(faceId) === "b" ? " on" : ""}`}
+        aria-pressed={picks.get(faceId) === "b"}
         disabled={!otherName}
         onClick={() => choose(faceId, "b")}
       >
@@ -228,17 +256,17 @@ export function PersonSplit({
     <div
       className="cf-backdrop"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget && step !== "done") onClose();
+        if (e.target === e.currentTarget && step !== "done" && !busy) onClose();
       }}
     >
-      <div className="cf-panel ad-picker ps-panel" role="dialog" aria-label={t("faces.split.title", { name: here })} onClick={(e) => e.stopPropagation()}>
+      <div className="cf-panel ad-picker ps-panel" role="dialog" aria-modal="true" aria-label={t("faces.split.title", { name: here })} onClick={(e) => e.stopPropagation()}>
         <div className="ad-picker-head">
           <div className="ad-picker-titles">
             <h3 className="cf-title">{t("faces.split.title", { name: here })}</h3>
             {start && <p className="cf-msg">{t("faces.split.faceCount", { count: start.faces.toLocaleString() })}</p>}
           </div>
           {step !== "done" && (
-            <button className="ad-close" onClick={onClose} title={t("common.cancel")} aria-label={t("common.cancel")}>
+            <button className="ad-close" disabled={busy} onClick={onClose} title={t("common.cancel")} aria-label={t("common.cancel")}>
               <CloseIcon size={18} />
             </button>
           )}
@@ -283,6 +311,16 @@ export function PersonSplit({
                   </button>
                 ))}
                 <p className="ps-note">{t("faces.split.elsewhereHint")}</p>
+                {elsewhere && (
+                  <label className="ps-check">
+                    <input
+                      type="checkbox"
+                      checked={useElsewhere ?? elsewhereByDefault}
+                      onChange={(e) => setUseElsewhere(e.currentTarget.checked)}
+                    />
+                    <span>{t("faces.split.useElsewhere", { count: Math.min(elsewhere.faceIds.length, ELSEWHERE_KEPT).toLocaleString(), name: elsewhere.name })}</span>
+                  </label>
+                )}
               </div>
             )}
             <div className="ps-actions">
@@ -331,7 +369,7 @@ export function PersonSplit({
                           {face(p.left, leftA ? "a" : leftB ? "b" : undefined)}
                           {face(p.right, leftA ? "b" : leftB ? "a" : undefined)}
                         </span>
-                        <button className="ps-pair-pick" disabled={!otherName} onClick={() => set(leftA ? "b" : leftB ? null : "a")}>
+                        <button className="ps-pair-pick" aria-pressed={leftA || leftB} disabled={!otherName} onClick={() => set(leftA ? "b" : leftB ? null : "a")}>
                           {leftA
                             ? t("faces.split.leftRight", { left: here, right: otherName })
                             : leftB
@@ -375,15 +413,12 @@ export function PersonSplit({
                 <div className={`ps-bar${planning ? " busy" : ""}`} role="img" aria-label={`${here} ${plan.counts.a}, ${otherName} ${plan.counts.b}`}>
                   <span className="ps-bar-a" style={{ flexGrow: plan.counts.a }} />
                   <span className="ps-bar-b" style={{ flexGrow: plan.counts.b }} />
-                  <span className="ps-bar-u" style={{ flexGrow: plan.counts.unsure + plan.counts.neither }} />
+                  <span className="ps-bar-u" style={{ flexGrow: plan.counts.unsure }} />
                 </div>
                 <div className="ps-legend">
                   <span><strong className="a">{here}</strong> {plan.counts.a.toLocaleString()}</span>
                   <span><strong className="b">{otherName}</strong> {plan.counts.b.toLocaleString()}</span>
                   <span><strong>{t("faces.split.unsure")}</strong> {plan.counts.unsure.toLocaleString()}</span>
-                  {plan.counts.neither > 0 && (
-                    <span><strong>{t("faces.split.others")}</strong> {plan.counts.neither.toLocaleString()}</span>
-                  )}
                 </div>
                 <div className={`ps-verdict ${plan.verdict}`}>
                   <strong>{t(`faces.split.verdict.${plan.verdict}`)}</strong>
@@ -401,7 +436,7 @@ export function PersonSplit({
                     <h4 className="ps-h a">{t("faces.split.leastSure", { name: here })}</h4>
                     <div className="ps-strip wrap">
                       {plan.leastSureA.map((f) => (
-                        <button key={f.faceId} className="ps-move" title={t("faces.split.moveTo", { name: otherName })} onClick={() => choose(f.faceId, "b")}>
+                        <button key={f.faceId} className="ps-move" title={t("faces.split.moveTo", { name: otherName })} aria-label={t("faces.split.moveTo", { name: otherName })} onClick={() => choose(f.faceId, "b")}>
                           {face(f, picks.get(f.faceId) ?? "a")}
                         </button>
                       ))}
@@ -411,7 +446,7 @@ export function PersonSplit({
                     <h4 className="ps-h b">{t("faces.split.leastSure", { name: otherName })}</h4>
                     <div className="ps-strip wrap">
                       {plan.leastSureB.map((f) => (
-                        <button key={f.faceId} className="ps-move" title={t("faces.split.moveTo", { name: here })} onClick={() => choose(f.faceId, "a")}>
+                        <button key={f.faceId} className="ps-move" title={t("faces.split.moveTo", { name: here })} aria-label={t("faces.split.moveTo", { name: here })} onClick={() => choose(f.faceId, "a")}>
                           {face(f, picks.get(f.faceId) ?? "b")}
                         </button>
                       ))}
@@ -475,7 +510,6 @@ export function PersonSplit({
                 other: otherName,
                 stayed: applied.stayed.toLocaleString(),
                 moved: applied.moved.toLocaleString(),
-                others: applied.others.toLocaleString(),
                 unsure: applied.unsure.toLocaleString(),
               })}
             </p>

@@ -132,6 +132,12 @@ export type PeopleState = {
    * person here offers these first. Gone once both sides agree, or a hand decides it here.
    */
   conflicts: Record<string, Conflict>;
+  /**
+   * Faces whose confirmation here was taken in from another device's copy, by face id: that
+   * device. Such a confirmation follows that device when it changes there, as one made by hand
+   * here does not. Gone once the face is decided by hand here.
+   */
+  confirmedFrom: Record<string, string>;
 };
 
 /** A face confirmed differently on another device: see `PeopleState.conflicts`. */
@@ -200,6 +206,7 @@ export function emptyPeople(): PeopleState {
     heldOver: [],
     nameKeys: NAME_KEYS,
     conflicts: {},
+    confirmedFrom: {},
   };
 }
 
