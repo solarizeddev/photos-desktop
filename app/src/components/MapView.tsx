@@ -153,18 +153,29 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
   const mapRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.LayerGroup | null>(null);
   const moved = useRef(false);
+  /** Set while the map moves by itself (framing the photos, flying to a place), not by the user. */
+  const byApp = useRef(false);
   const pointsRef = useRef<MapPoint[]>([]);
+  /** Runs a move the app makes by itself, so it is not taken for the user's. */
+  const asApp = (move: () => void) => {
+    byApp.current = true;
+    try {
+      move();
+    } finally {
+      byApp.current = false;
+    }
+  };
   /** Frames every photo, or the whole world when there are none yet. */
   const frame = () => {
     const map = mapRef.current;
     if (!map) return;
     const pts = pointsRef.current;
     if (pts.length === 0) {
-      map.fitBounds(WORLD);
+      asApp(() => map.fitBounds(WORLD, { animate: false }));
       return;
     }
     const bounds = L.latLngBounds(pts.map((p) => [p.lat, p.lon] as [number, number]));
-    map.fitBounds(bounds, { padding: [60, 60], maxZoom: FIT_MAX_ZOOM });
+    asApp(() => map.fitBounds(bounds, { padding: [60, 60], maxZoom: FIT_MAX_ZOOM, animate: false }));
   };
   const [pins, setPins] = useState<Pin[]>([]);
   const onOpenRef = useRef(onOpen);
@@ -174,6 +185,9 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
     if (!host.current) return;
     const map = L.map(host.current, {
       zoomControl: false,
+      // New tiles take their place at once rather than cross-fading over the old level (which
+      // still shows, scaled, until they arrive): two levels half-showing at a zoom's end.
+      fadeAnimation: false,
       maxBounds: WORLD,
       maxBoundsViscosity: 1,
       maxZoom: 19,
@@ -191,12 +205,18 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
     }).addTo(map);
     layerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
-    map.setMinZoom(fillZoom(map));
+    asApp(() => map.setMinZoom(fillZoom(map)));
     // The map follows its box: a new size sets a new widest zoom, and frames the photos
     // again until the user has moved the map themselves.
     const sized = new ResizeObserver(() => {
-      map.invalidateSize();
-      map.setMinZoom(fillZoom(map));
+      asApp(() => {
+        map.invalidateSize();
+        // Not setMinZoom: below the new floor it zooms with an animation, whose start comes a
+        // frame later, after this is over, and would be taken for the user's.
+        const floor = fillZoom(map);
+        map.options.minZoom = floor;
+        if (map.getZoom() < floor) map.setZoom(floor, { animate: false });
+      });
       if (!moved.current) frame();
     });
     sized.observe(host.current);
@@ -204,10 +224,18 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
       moved.current = true;
     };
     map.on("dragstart", touched);
+    // Any zoom the app did not make is the user's: the buttons, a double-click, the keys, a
+    // pinch, as well as the wheel. Left unmarked, the next batch of photos framed the map again
+    // and threw it back to where it was.
+    map.on("zoomstart", () => {
+      if (!byApp.current) touched();
+    });
     map.getContainer().addEventListener("wheel", touched, { passive: true });
     return () => {
       sized.disconnect();
       map.remove();
+      // Their layer goes with the map: a map made again starts with no pins drawn.
+      markers.current.clear();
       mapRef.current = null;
       layerRef.current = null;
     };
@@ -229,17 +257,38 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
 
   const covers = useThumbnails(useMemo(() => pins.map((p) => p.cover), [pins]));
 
+  // The pins on the map, kept from one change to the next: a pin still there keeps its marker,
+  // and only one whose picture or count changed is drawn again. Clearing and rebuilding them
+  // all at every zoom and every arriving picture made them blink.
+  const markers = useRef(new Map<string, { marker: L.Marker; html: string; uids: string[] }>());
   useEffect(() => {
     const layer = layerRef.current;
     if (!layer) return;
-    layer.clearLayers();
+    const kept = markers.current;
+    const now = new Set<string>();
     for (const pin of pins) {
-      const marker = L.marker([pin.lat, pin.lon], {
-        icon: L.divIcon({ className: "map-pinwrap", html: pinHtml(covers[pin.cover], pin.uids.length), iconSize: [56, 64], iconAnchor: [28, 64] }),
-        keyboard: false,
-      });
-      marker.on("click", () => onOpenRef.current(pin.uids));
-      layer.addLayer(marker);
+      const key = `${pin.key}|${pin.lat}|${pin.lon}`;
+      now.add(key);
+      const html = pinHtml(covers[pin.cover], pin.uids.length);
+      const icon = () => L.divIcon({ className: "map-pinwrap", html, iconSize: [56, 64], iconAnchor: [28, 64] });
+      const have = kept.get(key);
+      if (have) {
+        have.uids = pin.uids;
+        if (have.html !== html) {
+          have.marker.setIcon(icon());
+          have.html = html;
+        }
+        continue;
+      }
+      const entry = { marker: L.marker([pin.lat, pin.lon], { icon: icon(), keyboard: false }), html, uids: pin.uids };
+      entry.marker.on("click", () => onOpenRef.current(entry.uids));
+      layer.addLayer(entry.marker);
+      kept.set(key, entry);
+    }
+    for (const [key, entry] of kept) {
+      if (now.has(key)) continue;
+      layer.removeLayer(entry.marker);
+      kept.delete(key);
     }
   }, [pins, covers]);
 
