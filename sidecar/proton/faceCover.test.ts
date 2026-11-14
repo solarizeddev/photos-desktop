@@ -31,9 +31,12 @@ describe("the face square", () => {
     expect(faceSquare([0.4, 0.4, 0.5, 0.5], 1000, 1000)).toEqual({ left: 380, top: 380, size: 140 });
   });
 
-  it("stays inside the picture at an edge", () => {
-    expect(faceSquare([0, 0, 0.1, 0.1], 1000, 500)).toEqual({ left: 0, top: 0, size: 140 });
-    expect(faceSquare([0.95, 0.9, 1, 1], 1000, 500)).toEqual({ left: 930, top: 430, size: 70 });
+  it("near an edge, zooms in to keep the face centred, down to 1.2 times it", () => {
+    // 65 px from the edge: a 130 px square around it, centred, rather than 140 moved aside.
+    expect(faceSquare([0.015, 0.4, 0.115, 0.5], 1000, 1000)).toEqual({ left: 0, top: 385, size: 130 });
+    // Touching the edge: 1.2 times the face, inside the picture, as near centre as it can be.
+    expect(faceSquare([0, 0, 0.1, 0.1], 1000, 500)).toEqual({ left: 0, top: 0, size: 120 });
+    expect(faceSquare([0.95, 0.9, 1, 1], 1000, 500)).toEqual({ left: 940, top: 440, size: 60 });
   });
 
   it("is never larger than the picture's shorter side", () => {

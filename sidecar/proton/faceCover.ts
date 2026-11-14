@@ -38,6 +38,8 @@ export type FaceBox = [number, number, number, number];
 
 /** The square around a face, as a multiple of the face's longer side (the Android app's). */
 export const FACE_ZOOM_OUT = 1.4;
+/** The least room around a face, as a multiple of its longer side, a zoom in near an edge keeps: in a circle, the face box's corners need about this much. */
+export const FACE_ZOOM_OUT_MIN = 1.2;
 
 /** The side of a cut cover, in pixels: sharp on a large card on a HiDPI screen. */
 export const COVER_SIZE = 320;
@@ -49,16 +51,21 @@ const KEPT = 400;
 const AT_ONCE = 2;
 
 /**
- * The square cut out of a `width` x `height` picture for `box`: FACE_ZOOM_OUT times the
- * face's longer side, centred on the face and moved (never shrunk below the picture's
- * shorter side) to stay inside the picture. The same square the window used to show.
+ * The square cut out of a `width` x `height` picture for `box`, shown in a circle: FACE_ZOOM_OUT
+ * times the face's longer side, centred on the face. A face near an edge is zoomed in on (down
+ * to FACE_ZOOM_OUT_MIN times it) rather than moved off centre; only past that is the square
+ * moved to stay inside the picture. Moving it first, as before, put a face near an edge at the
+ * circle's side.
  */
 export function faceSquare(box: FaceBox, width: number, height: number): { left: number; top: number; size: number } {
   const [l, t, r, b] = box;
-  const wanted = Math.max((r - l) * width, (b - t) * height) * FACE_ZOOM_OUT;
-  const size = Math.max(1, Math.round(Math.min(wanted, width, height)));
+  const face = Math.max((r - l) * width, (b - t) * height);
   const cx = ((l + r) / 2) * width;
   const cy = ((t + b) / 2) * height;
+  // As large as fits around the centre, between FACE_ZOOM_OUT_MIN and FACE_ZOOM_OUT times the face.
+  const room = 2 * Math.min(cx, width - cx, cy, height - cy);
+  const wanted = Math.max(face * FACE_ZOOM_OUT_MIN, Math.min(face * FACE_ZOOM_OUT, room));
+  const size = Math.max(1, Math.round(Math.min(wanted, width, height)));
   const left = Math.round(Math.min(Math.max(cx - size / 2, 0), width - size));
   const top = Math.round(Math.min(Math.max(cy - size / 2, 0), height - size));
   return { left, top, size };
