@@ -39,7 +39,7 @@ import {
   setPersonCover,
 } from "./facePeople.ts";
 import { faceScanner } from "./faceScan.ts";
-import { applySplit, planSplit, splitStart, undoSplit } from "./faceSplit.ts";
+import { applySplit, newPlanTicket, planSplit, splitStart, undoSplit } from "./faceSplit.ts";
 import { isScanSpeed } from "./scanPipeline.ts";
 import { isReady } from "./store.ts";
 
@@ -141,8 +141,11 @@ export const faceHandlers: Record<string, (p: any) => unknown> = {
     const id = str(p?.id);
     return splitStart(store(), id, await timesForSplit(id, true));
   },
-  faceSplitPlan: async (p) =>
-    planSplit(store(), str(p?.id), str(p?.other, 100), { a: ids(p?.a), b: ids(p?.b) }, await timesForSplit(str(p?.id))),
+  faceSplitPlan: async (p) => {
+    const stale = newPlanTicket();
+    const times = await timesForSplit(str(p?.id));
+    return planSplit(store(), str(p?.id), str(p?.other, 100), { a: ids(p?.a), b: ids(p?.b) }, times, stale);
+  },
   faceSplitApply: async (p) => {
     const times = await timesForSplit(str(p?.id));
     const out = await applySplit(store(), str(p?.id), str(p?.other, 100), { a: ids(p?.a), b: ids(p?.b) }, Date.now(), times);
