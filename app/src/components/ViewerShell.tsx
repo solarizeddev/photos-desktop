@@ -22,6 +22,7 @@
 
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
 import { setLightboxOpen } from "../lib/lightboxSignal";
 import { formatBytes } from "../lib/format";
 import { MIN_SCALE, PhotoViewer, ZOOM_STEP, type ZoomApi, type ZoomState } from "./PhotoViewer";
@@ -172,6 +173,37 @@ type Props = {
  * open with nobody signed in.
  */
 type SidePanel = "details" | "contents";
+
+/**
+ * One line in the app's log when the player gives up on a video: the player's error code,
+ * where it was, and how much it had loaded around there. Its message is cut to plain words,
+ * so no address or name in it reaches the log.
+ */
+function noteVideoError(video: HTMLVideoElement): void {
+  const err = video.error;
+  const at = video.currentTime || 0;
+  let ahead = 0;
+  for (let i = 0; i < video.buffered.length; i++) {
+    if (video.buffered.start(i) <= at && at <= video.buffered.end(i)) ahead = video.buffered.end(i) - at;
+  }
+  // Only whole plain words: an address, path or file name is one token with other characters
+  // in it, and goes whole.
+  const words = (err?.message ?? "")
+    .split(/\s+/)
+    .filter((w) => /^[A-Za-z]{1,20}[.,:;]?$/.test(w))
+    .join(" ")
+    .replace(/[^A-Za-z ]/g, "")
+    .slice(0, 80);
+  const waitedSince = Number(video.dataset.waiting || 0);
+  const end = video.buffered.length ? video.buffered.end(video.buffered.length - 1) : 0;
+  const line =
+    `[video] error code=${err?.code ?? 0} at=${at.toFixed(1)} duration=${(video.duration || 0).toFixed(1)}` +
+    ` seeking=${+video.seeking} ahead=${ahead.toFixed(1)} end=${end.toFixed(1)}` +
+    ` waited=${waitedSince ? ((performance.now() - waitedSince) / 1000).toFixed(1) : "-"}` +
+    ` ready=${video.readyState} network=${video.networkState}` +
+    ` again=${/[?&]again=(\d+)/.exec(video.currentSrc)?.[1] ?? 0} msg=${words || "-"}`;
+  void invoke("log_note", { message: line }).catch(() => {});
+}
 
 export function ViewerShell({
   itemKey,
@@ -530,8 +562,26 @@ export function ViewerShell({
                   void e.currentTarget.play().catch(() => {});
                 }}
                 onClick={(e) => e.stopPropagation()}
-                onError={(e) => onVideoError?.(e.currentTarget.currentTime || 0)}
-                onPlaying={onVideoPlaying}
+                onError={(e) => {
+                  try {
+                    noteVideoError(e.currentTarget);
+                  } catch {
+                    /* the log line is no reason not to retry */
+                  }
+                  onVideoError?.(e.currentTarget.currentTime || 0);
+                }}
+                // When it began waiting for data, for the log line above: a wait the player
+                // gave up on reads differently from a failure at once.
+                onWaiting={(e) => {
+                  if (!e.currentTarget.dataset.waiting) e.currentTarget.dataset.waiting = String(performance.now());
+                }}
+                onStalled={(e) => {
+                  if (!e.currentTarget.dataset.waiting) e.currentTarget.dataset.waiting = String(performance.now());
+                }}
+                onPlaying={(e) => {
+                  delete e.currentTarget.dataset.waiting;
+                  onVideoPlaying?.();
+                }}
               />
               <VideoControls video={videoEl} />
             </>
