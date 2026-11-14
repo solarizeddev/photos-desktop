@@ -81,7 +81,6 @@ import { EMBEDDING_DIM, SEARCH_MODEL_ID, type SearchCopy } from "./semantic.ts";
 import { markFreshInstall, readBackupFlags, writeBackupFlags } from "./backupFlags.ts";
 import { installDeviceId } from "./deviceId.ts";
 import { diag } from "./diag.ts";
-
 import { isReady } from "./store.ts";
 import {
   PowerWatch,
