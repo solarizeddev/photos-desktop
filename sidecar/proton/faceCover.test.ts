@@ -360,3 +360,28 @@ describe("an ask given up while the thumbnail is tried", () => {
     expect(previews).toBe(0);
   });
 });
+
+describe("cutting many small covers", () => {
+  it("cuts three at a time, in order, and one given up while waiting leaves its place", async () => {
+    const box: FaceBox = [0.4, 0.3, 0.6, 0.6];
+    const thumb = await picture(512, 384, box);
+    const covers = new FaceCovers(async () => null, { thumbnail: async () => thumb });
+    const inside = covers as unknown as { thumbBusy: number; thumbLine: unknown[] };
+    const leaving = new AbortController();
+    const asks = Array.from({ length: 12 }, (_, i) =>
+      covers.get(`vol~p${i}`, box, i === 7 ? leaving.signal : new AbortController().signal, 128),
+    );
+    // Let every ask reach the line.
+    for (let i = 0; i < 20 && inside.thumbLine.length < 9; i++) await new Promise((r) => setImmediate(r));
+    expect(inside.thumbBusy).toBe(3);
+    expect(inside.thumbLine.length).toBe(9);
+    leaving.abort();
+    expect(inside.thumbLine.length).toBe(8);
+    const got = await Promise.all(asks);
+    expect(got.filter((c) => c !== null)).toHaveLength(11);
+    expect(got[7]).toBeNull();
+    // Every turn given back.
+    expect(inside.thumbBusy).toBe(0);
+    expect(inside.thumbLine.length).toBe(0);
+  });
+});
