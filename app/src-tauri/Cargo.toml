@@ -203,15 +203,15 @@ winreg = "0.52"
 # created anywhere the system can enumerate (no credential store, no registry).
 windows-dpapi = "0.2"
 
-# Non-Windows (Linux): seal the same store key through the OS keyring, which on a Linux
-# desktop is the Secret Service (gnome-keyring / kwallet) over D-Bus. Under Flatpak this
-# needs the org.freedesktop.secrets talk permission. Pure-Rust crypto so no system
-# crypto library is linked into the sandbox.
 [dev-dependencies]
 # A single-threaded runtime for the gate's tests: many queued calls on one thread is what
 # shows that a call waiting for its turn holds no thread of its own.
 tokio = { version = "1", features = ["rt", "sync"] }
 
+# Non-Windows (Linux): seal the same store key through the OS keyring, which on a Linux
+# desktop is the Secret Service (gnome-keyring / kwallet) over D-Bus. Under Flatpak this
+# needs the org.freedesktop.secrets talk permission. Pure-Rust crypto so no system
+# crypto library is linked into the sandbox.
 [target.'cfg(not(windows))'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 # A video's frame and length for its upload, asked of GStreamer: the media framework a

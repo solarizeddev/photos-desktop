@@ -281,7 +281,7 @@ type CallId = u64;
 
 /// Calls that must run once asked for, whatever the window does meanwhile: locking and
 /// signing out (a lock screen shown over a session that stayed open is the one thing worse
-/// than a slow lock), unlocking, and the calls that stop or release something. The window's
+/// than a slow lock), and the calls that stop or release something. The window's
 /// cancel, or its own timeout, never drops one of these from the queue or stops it.
 ///
 /// Unlocking is deliberately not one: an unlock given up on is safer dropped (it is simply
