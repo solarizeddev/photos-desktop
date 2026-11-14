@@ -25,7 +25,7 @@ import { ScrollSpeed } from "./scrollSpeed";
 /**
  * The timeline drawn on a canvas, the way a native grid draws: no element per tile, so
  * nothing for the webview to style, lay out or paint tile by tile. Measured on the
- * reporter's 3440x1386 window (prototypes/native-grid): the DOM grid ran at 15 frames a
+ * reporter's 3440x1386 window: the DOM grid ran at 15 frames a
  * second with the window's thread 94% busy; this one at 60 with it 14% busy, as native.
  *
  *   - The canvas is a screen taller than the view on either side and moves with the list:
