@@ -125,7 +125,7 @@ import { activeRevisionOf, nodeDurationMs, nodeLocation, nodeName, toMillis } fr
 import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
 import { FaceCovers } from "./faceCover.ts";
-import { OpenVideos, downloadVideo, videoFromBytes, type VideoSource } from "./videoStream.ts";
+import { OpenVideos, downloadVideo, seekVideo, videoFromBytes, type VideoSource } from "./videoStream.ts";
 import { openDownloader } from "./downloadSlots.ts";
 import { SmallThumbs } from "./thumbSizes.ts";
 import { sameAccount } from "./accountSwitch.ts";
@@ -347,9 +347,10 @@ const OCR_FETCHES_AT_ONCE = 2;
 /** A read's fetch that has not answered in this long is given up. */
 const OCR_FETCH_GIVE_UP_MS = 3 * 60 * 1000;
 /**
- * The largest video played from the thumbnail server. It is held whole in the sidecar's
- * memory while it plays (at most two at once, so 600 MB at most); a larger one takes the
- * older route, which offers it as a download.
+ * The largest video downloaded whole to play from the thumbnail server, held in the sidecar's
+ * memory while it plays (at most two at once, so 600 MB at most), its signature checked; a
+ * larger one is read from Proton range by range as it plays (see `SeekingVideo`), holding one
+ * of the SDK's download slots while it is open.
  */
 const MAX_STREAMED_VIDEO = 300 * 1024 * 1024;
 /** A copy's save that fails on the network is tried again after these pauses. */
@@ -2258,12 +2259,15 @@ export class ProtonSession {
     // The downloader holds one of the SDK's few download slots from here until a download
     // of it ends: every way out below either downloads (whose end gives it back) or gives
     // it back without downloading.
-    const { downloader, unused, stop } = await openDownloader(this.photos, uid);
+    const opened = await openDownloader(this.photos, uid);
+    const { downloader, unused, stop } = opened;
     const size = downloader.getClaimedSizeInBytes?.() ?? 0;
-    if (!size || size > MAX_STREAMED_VIDEO) {
+    if (!size) {
       unused();
       return null;
     }
+    // Too large to hold whole while it plays: read from Proton range by range as it plays.
+    if (size > MAX_STREAMED_VIDEO) return seekVideo(downloader, size, mime, opened);
     return downloadVideo(downloader, size, mime, stop);
   }
 
