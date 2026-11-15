@@ -337,6 +337,13 @@ export const sk: Record<string, string> = {
   "settings.languageDesc": "Vyberte jazyk zobrazenia.",
   "settings.timeline": "Časová os",
   "settings.hideAlbum": "Skryť fotky v albumoch na Drive",
+  "burst.title": "Séria: {count}",
+  "burst.play": "Prehrať",
+  "burst.pause": "Pozastaviť",
+  "burst.shot": "Záber {n} z {count}",
+  "burst.showAll": "Ukázať všetky ({count})",
+  "settings.stackBursts": "Zoskupiť série",
+  "settings.stackBurstsDesc": "Zábery urobené s odstupom sekúnd sa na časovej osi ukážu ako jedna dlaždica. Otvorte ju a prehrajte ich alebo ukážte všetky.",
   "settings.hideAlbumDesc":
     "Fotky pridané do albumu na Drive sa nezobrazia vo vašej hlavnej časovej osi. Naďalej sa zobrazujú na kartách Albumy a Zdieľané a vo filtroch kategórií.",
   "settings.security": "Zabezpečenie",

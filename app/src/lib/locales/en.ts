@@ -337,6 +337,13 @@ export const en: Record<string, string> = {
   "settings.languageDesc": "Choose the display language.",
   "settings.timeline": "Timeline",
   "settings.hideAlbum": "Hide photos in Drive albums",
+  "burst.title": "Burst of {count} shots",
+  "burst.play": "Play",
+  "burst.pause": "Pause",
+  "burst.shot": "Shot {n} of {count}",
+  "burst.showAll": "Show all {count} shots",
+  "settings.stackBursts": "Stack bursts",
+  "settings.stackBurstsDesc": "Shots taken seconds apart show as one tile in the timeline. Open it to play them or show them all.",
   "settings.hideAlbumDesc":
     "Photos added to a Drive album will not appear in your main timeline. They still show in the Albums and Shared tabs, and in the category filters.",
   "settings.security": "Security",

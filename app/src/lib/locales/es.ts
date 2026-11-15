@@ -336,6 +336,13 @@ export const es: Record<string, string> = {
   "settings.languageDesc": "Elige el idioma de la interfaz.",
   "settings.timeline": "Línea de tiempo",
   "settings.hideAlbum": "Ocultar fotos en álbumes de Drive",
+  "burst.title": "Ráfaga de {count} fotos",
+  "burst.play": "Reproducir",
+  "burst.pause": "Pausa",
+  "burst.shot": "Foto {n} de {count}",
+  "burst.showAll": "Ver las {count} fotos",
+  "settings.stackBursts": "Agrupar ráfagas",
+  "settings.stackBurstsDesc": "Las fotos tomadas con segundos de diferencia se ven como una sola en la cronología. Ábrela para reproducirlas o verlas todas.",
   "settings.hideAlbumDesc":
     "Las fotos añadidas a un álbum de Drive no aparecerán en tu línea de tiempo principal. Siguen visibles en las pestañas Álbumes y Compartidos, y en los filtros de categorías.",
   "settings.security": "Seguridad",

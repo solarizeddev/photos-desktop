@@ -335,6 +335,13 @@ export const nl: Record<string, string> = {
   "settings.languageDesc": "Kies de weergavetaal.",
   "settings.timeline": "Tijdlijn",
   "settings.hideAlbum": "Foto's in Drive-albums verbergen",
+  "burst.title": "Reeks van {count} opnamen",
+  "burst.play": "Afspelen",
+  "burst.pause": "Pauze",
+  "burst.shot": "Opname {n} van {count}",
+  "burst.showAll": "Alle {count} opnamen tonen",
+  "settings.stackBursts": "Reeksen stapelen",
+  "settings.stackBurstsDesc": "Opnamen met seconden ertussen staan als één tegel in de tijdlijn. Open die om ze af te spelen of ze allemaal te tonen.",
   "settings.hideAlbumDesc":
     "Foto's die aan een Drive-album zijn toegevoegd, verschijnen niet in je hoofdtijdlijn. Ze blijven zichtbaar in de tabbladen Albums en Gedeeld, en in de categoriefilters.",
   "settings.security": "Beveiliging",

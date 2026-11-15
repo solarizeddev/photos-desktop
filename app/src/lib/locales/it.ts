@@ -336,6 +336,13 @@ export const it: Record<string, string> = {
   "settings.languageDesc": "Scegli la lingua dell'interfaccia.",
   "settings.timeline": "Sequenza",
   "settings.hideAlbum": "Nascondi le foto negli album Drive",
+  "burst.title": "Raffica di {count} scatti",
+  "burst.play": "Riproduci",
+  "burst.pause": "Pausa",
+  "burst.shot": "Scatto {n} di {count}",
+  "burst.showAll": "Mostra tutti i {count} scatti",
+  "settings.stackBursts": "Raggruppa le raffiche",
+  "settings.stackBurstsDesc": "Gli scatti a pochi secondi l’uno dall’altro appaiono come un’unica miniatura nella cronologia. Aprila per riprodurli o vederli tutti.",
   "settings.hideAlbumDesc":
     "Le foto aggiunte a un album Drive non appariranno nella tua sequenza principale. Restano visibili nelle schede Album e Condivisi e nei filtri per categoria.",
   "settings.security": "Sicurezza",

@@ -288,6 +288,16 @@ export class DuplicateFinder {
     return { ...this.status };
   }
 
+  /** How many photos the last scan listed. */
+  libraryCount(): number {
+    return this.library.size;
+  }
+
+  /** Whether the groups are still to be worked out again for what is known now. */
+  pending(): boolean {
+    return this.stale || this.computing !== null || this.regroupTimer !== null;
+  }
+
   /** The library to read, set on sign-in and cleared on sign-out or lock. */
   setSource(source: DuplicateSource | null): void {
     this.source = source;
