@@ -2064,18 +2064,68 @@ async function checkReview(
   if (signal.aborted) return;
 
   // Second pass: the same photo in other bytes, among the library photos left unclaimed.
+  // A video's length is what the host read off the file before the review. The export's own
+  // videos are looked at together first: a series in it, or many of one size and length.
+  const mediaByKey = new Map(Object.entries(current.media).map(([path, info]) => [frameKey(path), info]));
+  const takenOf = async (i: number) => {
+    const item = current.plan[i];
+    return current.myFiles ? await takenForMatch(item.file) : (item.sidecar?.takenMs ?? (await takenForMatch(item.file)));
+  };
+  const videoFacts = new Map<number, { size: number | null; durationMs: number | null; takenMs: number | null }>();
+  await pool(rest, CHECK_CONCURRENCY, async (i) => {
+    if (signal.aborted) return;
+    const item = current.plan[i];
+    if (!(mediaTypeOf(item.file) ?? "").startsWith("video/")) return;
+    const seconds = Number(mediaByKey.get(frameKey(item.file))?.durationSec);
+    videoFacts.set(i, {
+      size: await stat(item.file).then((s) => s.size).catch(() => null),
+      durationMs: Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : null,
+      // The same date the match goes by.
+      takenMs: await takenOf(i),
+    });
+  });
+  if (signal.aborted) return;
+  const sizeLengthCount = new Map<string, number>();
+  for (const f of videoFacts.values()) {
+    if (f.size && f.durationMs) sizeLengthCount.set(`${f.size}:${f.durationMs}`, (sizeLengthCount.get(`${f.size}:${f.durationMs}`) ?? 0) + 1);
+  }
+  // In time order, so a video's half hour either side is a short walk from it.
+  const dated = [...videoFacts.entries()]
+    .filter(([, f]) => f.takenMs !== null && !!f.durationMs)
+    .sort((a, b) => a[1].takenMs! - b[1].takenMs!);
+  const placeOf = new Map(dated.map(([i], at) => [i, at]));
+  const exportSeries = (i: number) => {
+    const at = placeOf.get(i);
+    if (at === undefined) return false;
+    const me = dated[at][1];
+    const near = (j: number) => {
+      const f = dated[j][1];
+      const apart = Math.abs(f.takenMs! - me.takenMs!);
+      return apart > 2_000 && Math.abs(f.durationMs! - me.durationMs!) <= 1_000;
+    };
+    for (let j = at - 1; j >= 0 && me.takenMs! - dated[j][1].takenMs! <= 30 * 60_000; j--) if (near(j)) return true;
+    for (let j = at + 1; j < dated.length && dated[j][1].takenMs! - me.takenMs! <= 30 * 60_000; j++) if (near(j)) return true;
+    return false;
+  };
   await pool(rest, CHECK_CONCURRENCY, async (i) => {
     const item = current.plan[i];
     const video = (mediaTypeOf(item.file) ?? "").startsWith("video/");
-    const takenMs = current.myFiles ? await takenForMatch(item.file) : (item.sidecar?.takenMs ?? (await takenForMatch(item.file)));
-    let match = await matchFile(
-      index,
-      { sha1: sha1s.get(i)!, takenMs, video, print: async () => (video ? null : fingerprintOf(item.file)) },
-      claimed,
-    );
+    const fact = videoFacts.get(i);
+    const takenMs = fact ? fact.takenMs : await takenOf(i);
+    const file = {
+      sha1: sha1s.get(i)!,
+      takenMs,
+      video,
+      size: fact?.size ?? null,
+      durationMs: fact?.durationMs ?? null,
+      inSeries: video && exportSeries(i),
+      crowded: !!fact?.size && !!fact.durationMs && (sizeLengthCount.get(`${fact.size}:${fact.durationMs}`) ?? 0) > 4,
+      print: async () => (video ? null : fingerprintOf(item.file)),
+    };
+    let match = await matchFile(index, file, claimed);
     // Two files that took the same library photo at once: the later one looks again without it.
     for (let tries = 0; match.verdict === "probable" && match.uid && claimed.has(match.uid) && tries < 3; tries++) {
-      match = await matchFile(index, { sha1: sha1s.get(i)!, takenMs, video, print: async () => (video ? null : fingerprintOf(item.file)) }, claimed);
+      match = await matchFile(index, file, claimed);
     }
     // Still taken by another file after three looks: held back rather than shared.
     if (match.verdict === "probable" && match.uid && claimed.has(match.uid)) match = { ...match, uid: null };
@@ -2098,8 +2148,9 @@ function record(current: NonNullable<typeof review>, i: number, match: Match): v
   current.reasons[i] = match.why;
   if (match.hidden) current.hiddenMatch.add(file);
   if (match.verdict === "already") current.found.set(file, match.uid);
-  // A video of the same second is shown, never put in an album on its own say-so.
-  else current.probable.set(file, match.why === "same_time_video" ? null : match.uid);
+  // A video of the same moment is shown, never put in an album on its own say-so; nor is a
+  // smaller library copy put there in place of the export's better file.
+  else current.probable.set(file, match.why === "same_time_video" || match.why === "smaller_in_library" ? null : match.uid);
 }
 
 /**

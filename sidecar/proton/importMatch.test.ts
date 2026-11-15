@@ -80,6 +80,55 @@ describe("the import's library check", () => {
     expect(m).toMatchObject({ verdict: "probable", why: "same_time" });
   });
 
+  it("holds back a video of the very same size and length whatever its date, unless many share it", async () => {
+    const H = 3_600_000;
+    const twin = { uid: "v~twin", captureTime: T + 300 * 86_400_000, video: true, size: 7_340_032, durationMs: 18_200 };
+    const file = { sha1: "x", takenMs: T, video: true, size: 7_340_032, durationMs: 18_200, print: async () => null };
+    expect(await matchFile(index([twin]), file)).toMatchObject({ verdict: "probable", uid: "v~twin", why: "same_size_video" });
+    // Five of one size and length: a dashcam's padded segments, not copies.
+    const segments = Array.from({ length: 5 }, (_, k) => ({ ...twin, uid: `v~seg${k}`, captureTime: T + 10 * H + k * 60_000 }));
+    expect((await matchFile(index(segments), file)).verdict).toBe("new");
+  });
+
+  it("matches a video whole hours off by its length, and tells another clip by a different length", async () => {
+    const H = 3_600_000;
+    const lib = index([{ uid: "v~utc", captureTime: T + 2 * H, video: true, size: 50_000_000, durationMs: 61_000 }]);
+    const same = { sha1: "x", takenMs: T, video: true, size: 50_000_000, durationMs: 61_040, print: async () => null };
+    expect(await matchFile(lib, same)).toMatchObject({ verdict: "probable", uid: "v~utc", why: "same_time_video" });
+    expect((await matchFile(lib, { ...same, durationMs: 12_000 })).verdict).toBe("new");
+    // Hours off with no length to go by: not held back.
+    expect((await matchFile(lib, { ...same, durationMs: null })).verdict).toBe("new");
+  });
+
+  it("tells another clip of the same second only by a clearly different length", async () => {
+    const lib = index([{ uid: "v~v", captureTime: T, video: true, size: 9_000_000, durationMs: 8_000 }]);
+    const file = { sha1: "x", takenMs: T, video: true, size: 9_100_000, durationMs: 8_900, print: async () => null };
+    // Read by two programs, 0.9 s apart: one clip still.
+    expect((await matchFile(lib, file)).verdict).toBe("probable");
+    expect((await matchFile(lib, { ...file, durationMs: 12_000 })).verdict).toBe("new");
+  });
+
+  it("does not match hours off against a series, nor a twin already claimed", async () => {
+    const H = 3_600_000;
+    const series = index([
+      { uid: "v~s1", captureTime: T + 3 * H, video: true, size: 5_000_000, durationMs: 10_000 },
+      { uid: "v~s2", captureTime: T + 3 * H + 600_000, video: true, size: 5_000_001, durationMs: 10_000 },
+    ]);
+    const file = { sha1: "x", takenMs: T, video: true, size: 5_000_002, durationMs: 10_000, print: async () => null };
+    expect((await matchFile(series, file)).verdict).toBe("new");
+    const twin = index([{ uid: "v~t", captureTime: T + 90 * 86_400_000, video: true, size: 7_000_000, durationMs: 20_000 }]);
+    const copy = { sha1: "y", takenMs: T, video: true, size: 7_000_000, durationMs: 20_000, print: async () => null };
+    expect((await matchFile(twin, copy, new Set(["v~t"]))).verdict).toBe("new");
+    // Many export files of that size and length: a camera's segments.
+    expect((await matchFile(twin, { ...copy, crowded: true })).verdict).toBe("new");
+  });
+
+  it("says so when the library only has a smaller copy of the video", async () => {
+    const lib = index([{ uid: "v~lite", captureTime: T, video: true, size: 4_000_000, durationMs: 30_000 }]);
+    const original = { sha1: "x", takenMs: T, video: true, size: 20_000_000, durationMs: 30_000, print: async () => null };
+    expect(await matchFile(lib, original)).toMatchObject({ verdict: "probable", uid: "v~lite", why: "smaller_in_library" });
+  });
+
   it("matches a video only with a video of the same second", async () => {
     const lib = index([
       { uid: "v~pic", captureTime: T, video: false },

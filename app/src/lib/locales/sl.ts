@@ -934,6 +934,8 @@ export const sl: Record<string, string> = {
   "importReview.why.same_file": "Ista datoteka je že v tvoji knjižnici",
   "importReview.why.same_time_look": "V tvoji knjižnici je fotografija iz istega trenutka, ki je videti enako",
   "importReview.why.same_time_video": "V tvoji knjižnici je video iz istega trenutka",
+  "importReview.why.same_size_video": "V tvoji knjižnici je video popolnoma enake velikosti in dolžine",
+  "importReview.why.smaller_in_library": "Tvoja knjižnica ima manjšo kopijo tega videa. Ta datoteka je morda izvirnik: vključi jo, da jo naložiš",
   "importReview.why.same_time": "V tvoji knjižnici je fotografija iz iste sekunde",
   "importReview.why.live_video": "Njen video je že v tvoji knjižnici",
   "importReview.why.same_in_export": "Ista datoteka je v tem izvozu večkrat: naloži se enkrat, v vsak album",

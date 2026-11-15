@@ -933,6 +933,8 @@ export const sk: Record<string, string> = {
   "importReview.why.same_file": "Rovnaký súbor už je vo vašej knižnici",
   "importReview.why.same_time_look": "Vo vašej knižnici je fotka z rovnakého okamihu, ktorá vyzerá rovnako",
   "importReview.why.same_time_video": "Vo vašej knižnici je video z rovnakého okamihu",
+  "importReview.why.same_size_video": "Vo vašej knižnici je video presne rovnakej veľkosti a dĺžky",
+  "importReview.why.smaller_in_library": "Vaša knižnica má menšiu kópiu tohto videa. Tento súbor môže byť originál: zahrňte ho, aby sa nahral",
   "importReview.why.same_time": "Vo vašej knižnici je fotka z rovnakej sekundy",
   "importReview.why.live_video": "Jeho video už je vo vašej knižnici",
   "importReview.why.same_in_export": "Rovnaký súbor je v tomto exporte viackrát: nahrá sa raz, do každého albumu",

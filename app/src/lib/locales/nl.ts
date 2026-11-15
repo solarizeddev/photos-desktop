@@ -933,6 +933,8 @@ export const nl: Record<string, string> = {
   "importReview.why.same_file": "Hetzelfde bestand staat al in je bibliotheek",
   "importReview.why.same_time_look": "Je bibliotheek heeft een foto van hetzelfde moment die er hetzelfde uitziet",
   "importReview.why.same_time_video": "Je bibliotheek heeft een video van hetzelfde moment",
+  "importReview.why.same_size_video": "Je bibliotheek heeft een video van precies dezelfde grootte en lengte",
+  "importReview.why.smaller_in_library": "Je bibliotheek heeft een kleinere kopie van deze video. Dit bestand is misschien het origineel: neem het mee om het te uploaden",
   "importReview.why.same_time": "Je bibliotheek heeft een foto van dezelfde seconde",
   "importReview.why.live_video": "De video staat al in je bibliotheek",
   "importReview.why.same_in_export": "Hetzelfde bestand staat meer dan eens in deze export: het wordt één keer geüpload, in elk album",
