@@ -29,20 +29,29 @@ type Answer = { scanning: boolean; version: number; stacks?: string[][] };
 /** How often the bursts are asked for again: soon while the finder is still working them out. */
 const WHILE_WORKING_MS = 15_000;
 const SETTLED_MS = 60_000;
+/** Before the first settled answer: the groups land a moment after the scan, not 15 s later. */
+const FIRST_MS = 2_000;
 
 /**
  * The last bursts read, kept outside the timeline: going to another view and back starts
  * stacked, not spread out until the next answer.
  */
-let kept: { version: number; stacks: string[][]; key: string } = { version: -1, stacks: [], key: "" };
+let kept: { version: number; stacks: string[][]; key: string; settled: boolean } = {
+  version: -1,
+  stacks: [],
+  key: "",
+  settled: false,
+};
 
 /**
  * The library's bursts, each oldest first, asked for while `enabled` and the window is in
  * view; `count` is how many photos the timeline holds, so a library that has grown is scanned
  * again. The answer changes only when the bursts do.
  */
-export function useBurstStacks(enabled: boolean, count: number | undefined): string[][] {
+export function useBurstStacks(enabled: boolean, count: number | undefined): { stacks: string[][]; settled: boolean } {
   const [stacks, setStacks] = useState<string[][]>(kept.stacks);
+  /** Whether the finder has once said its bursts are worked out: before, "none" is "not yet". */
+  const [settled, setSettled] = useState(kept.settled);
   const countNow = useRef(count);
   countNow.current = count;
   useEffect(() => {
@@ -57,11 +66,17 @@ export function useBurstStacks(enabled: boolean, count: number | undefined): str
         if (got?.stacks) {
           const key = got.stacks.map((s) => s.join(",")).join("|");
           if (key !== kept.key) {
-            kept = { version: got.version, stacks: got.stacks, key };
+            kept = { ...kept, version: got.version, stacks: got.stacks, key };
             setStacks(got.stacks);
           } else kept = { ...kept, version: got.version };
         }
-        if (got && !got.scanning) next = SETTLED_MS;
+        if (got && !got.scanning) {
+          next = SETTLED_MS;
+          if (!kept.settled) {
+            kept = { ...kept, settled: true };
+            setSettled(true);
+          }
+        } else if (!kept.settled) next = FIRST_MS;
       }
       timer = setTimeout(() => void ask(), next);
     };
@@ -73,12 +88,12 @@ export function useBurstStacks(enabled: boolean, count: number | undefined): str
     // `count` is read when asking, not followed: a new count waits for the next round.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);
-  return stacks;
+  return { stacks, settled };
 }
 
 /** Forgets the bursts read: at sign-out and lock. */
 export function forgetBurstStacks(): void {
-  kept = { version: -1, stacks: [], key: "" };
+  kept = { version: -1, stacks: [], key: "", settled: false };
 }
 
 /**
