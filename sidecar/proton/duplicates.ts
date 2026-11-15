@@ -43,7 +43,9 @@ import {
   distance,
   fingerprintFromPixels,
   isUsable,
+  looksLikePage,
   matches,
+  PAGE_MATCH_THRESHOLD,
   type Fingerprint,
 } from "./pdq.ts";
 import { DUPLICATES_FILE, readSealedOrDiscard, storeDir, writeSealedAtomic } from "./store.ts";
@@ -550,6 +552,12 @@ export class DuplicateFinder {
       distance(cand[i].fp.bits, cand[j].fp.bits) <= SAME_DISTANCE && colorDistance(cand[i].fp.color, cand[j].fp.color) <= SAME_COLOR;
 
     const placed = new Uint8Array(n);
+    // Pages photographed one after another are not a burst: two pages join only when nearly
+    // the same frame (a retake held steady).
+    const pageLike = cand.map((c) => looksLikePage(c.fp));
+    const burstLike = (i: number, j: number) =>
+      matches(cand[i].fp, cand[j].fp) &&
+      (!(pageLike[i] && pageLike[j]) || distance(cand[i].fp.bits, cand[j].fp.bits) <= PAGE_MATCH_THRESHOLD);
     const timed = (i: number) => cand[i].t > 0 && !cand[i].video;
     const burstOut: DuplicateGroup[] = [];
     /**
@@ -565,7 +573,7 @@ export class DuplicateFinder {
         for (let j = i - 1, seen = 0; j >= 0 && cand[i].t - cand[j].t <= BURST_GAP_MS && seen < BURST_LOOK_BACK; j--) {
           if (placed[j] || !timed(j)) continue;
           seen++;
-          if (matches(cand[j].fp, cand[i].fp)) parent[find(i)] = find(j);
+          if (burstLike(j, i)) parent[find(i)] = find(j);
         }
       }
       const runs = new Map<number, number[]>();
