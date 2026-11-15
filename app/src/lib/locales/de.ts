@@ -1314,6 +1314,7 @@ export const de: Record<string, string> = {
   "duplicates.ignoredHint": "Diese Gruppen werden nicht in der Liste gezeigt. Hebe das Ignorieren auf, um eine zurückzuholen.",
   "duplicates.pickHint": "Klicke die Kopien an, die in den Papierkorb sollen; Doppelklick zeigt sie in voller Größe. Von jeder Gruppe bleibt eine Kopie.",
   "duplicates.scanning": "Suche nach ähnlichen Fotos: {done} von {total}",
+  "duplicates.moving": "Wird in den Papierkorb verschoben: {done} von {total}",
   "duplicates.reading": "Mediathek wird gelesen",
   "duplicates.failed": "Die Suche wurde vor dem Ende angehalten.",
   "duplicates.retry": "Erneut versuchen",

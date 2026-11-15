@@ -1373,6 +1373,7 @@ export const es: Record<string, string> = {
   "duplicates.ignoredHint": "Estos grupos no aparecen en la lista. Deja de ignorar uno para recuperarlo.",
   "duplicates.pickHint": "Haz clic en las copias que quieras mover a la papelera; doble clic para verlas a tamaño completo. De cada grupo queda una copia.",
   "duplicates.scanning": "Buscando fotos parecidas: {done} de {total}",
+  "duplicates.moving": "Moviendo a la papelera: {done} de {total}",
   "duplicates.reading": "Leyendo tu biblioteca",
   "duplicates.failed": "La búsqueda se detuvo antes de terminar.",
   "duplicates.retry": "Reintentar",

@@ -1309,6 +1309,7 @@ export const hu: Record<string, string> = {
   "duplicates.ignoredHint": "Ezek a csoportok kimaradnak a listából. A mellőzés megszüntetésével visszahozhatod őket.",
   "duplicates.pickHint": "Kattints a kukába szánt példányokra; dupla kattintással teljes méretben látod őket. Minden csoportból megmarad egy példány.",
   "duplicates.scanning": "Hasonló fotók keresése: {done} / {total}",
+  "duplicates.moving": "Áthelyezés a kukába: {done} / {total}",
   "duplicates.reading": "A könyvtár beolvasása",
   "duplicates.failed": "A keresés megállt, mielőtt végzett.",
   "duplicates.retry": "Újra",

@@ -1311,6 +1311,7 @@ export const it: Record<string, string> = {
   "duplicates.ignoredHint": "Questi gruppi sono esclusi dall’elenco. Smetti di ignorarne uno per riportarlo.",
   "duplicates.pickHint": "Fai clic sulle copie da spostare nel cestino; doppio clic per vederle a dimensione intera. Di ogni gruppo resta una copia.",
   "duplicates.scanning": "Ricerca di foto simili: {done} di {total}",
+  "duplicates.moving": "Spostamento nel cestino: {done} di {total}",
   "duplicates.reading": "Lettura della libreria",
   "duplicates.failed": "La ricerca si è fermata prima di finire.",
   "duplicates.retry": "Riprova",
