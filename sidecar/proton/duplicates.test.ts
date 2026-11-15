@@ -89,8 +89,10 @@ const fpOf = (seed: number): Fingerprint => ({
 
 /** "seed" or "seed.flips": the seed's fingerprint with that many of its bits turned over. */
 function lookOf(text: string): Fingerprint {
-  const [seed, flips = "0"] = text.split(".");
-  const fp = fpOf(Number(seed));
+  // A trailing "p": a page, bright and colourless in the middle.
+  const page = text.endsWith("p");
+  const [seed, flips = "0"] = text.replace(/p$/, "").split(".");
+  const fp = page ? { ...fpOf(Number(seed)), color: new Uint8Array(COLOR_BYTES).fill(235) } : fpOf(Number(seed));
   const bits = Uint32Array.from(fp.bits);
   for (let b = 0; b < Number(flips); b++) bits[b % 8] ^= 1 << Math.floor(b / 8);
   return { ...fp, bits };
@@ -287,6 +289,31 @@ describe("the duplicate finder", () => {
     f.start();
     await f.settled();
     expect(f.groups().same).toEqual([]);
+  });
+
+  it("does not take pages photographed one after another for a burst", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      // Three pages of one book, a second apart: alike at the usual bar.
+      { uid: "v~pg1", t: 0, look: "23.0p", ms: T },
+      { uid: "v~pg2", t: 0, look: "23.30p", ms: T + 1_000 },
+      { uid: "v~pg3", t: 0, look: "23.60p", ms: T + 2_000 },
+      // A page retaken held steady: one shot of it.
+      { uid: "v~rt1", t: 0, look: "24.0p", ms: T + 600_000 },
+      { uid: "v~rt2", t: 0, look: "24.8p", ms: T + 601_000 },
+      // The same distances between ordinary shots are a burst as before.
+      { uid: "v~ph1", t: 0, look: "25", ms: T + 1_200_000 },
+      { uid: "v~ph2", t: 0, look: "25.30", ms: T + 1_201_000 },
+      { uid: "v~ph3", t: 0, look: "25.60", ms: T + 1_202_000 },
+    ]);
+    f.start();
+    await f.settled();
+    expect(f.groups().burst.map((x) => x.uids)).toEqual([
+      ["v~ph1", "v~ph2", "v~ph3"],
+      ["v~rt1", "v~rt2"],
+    ]);
+    // Pages of one book still look alike: shown as similar, not as a burst.
+    expect(f.groups().similar.map((x) => x.uids)).toEqual([["v~pg1", "v~pg2", "v~pg3"]]);
   });
 
   it("finds a burst when another scene shot the same second sorts in between", async () => {
