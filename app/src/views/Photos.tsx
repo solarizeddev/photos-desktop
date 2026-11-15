@@ -1191,11 +1191,15 @@ export function Photos({
   const [dateStatus, setDateStatus] = useState<DateEditStatus | null>(null);
   const [dateRun, setDateRun] = useState(false);
   const [dateEditMode, setDateEditMode] = useState<DateEditMode>("set");
+  /** Counts the opens, so each one starts the panel afresh rather than on the last run's result. */
+  const [dateEditOpens, setDateEditOpens] = useState(0);
   /** Opens the date editor beside the grid for `uids`; the viewer opens its own beside the photo. */
   const openDateEdit = (uids: string[], mode: DateEditMode = "set") => {
     if (uids.length === 0) return;
     setDateEditMode(mode);
     setDateEditUids(uids);
+    // While a run goes on the panel keeps following it, and shows how it ended.
+    if (!dateRun) setDateEditOpens((n) => n + 1);
   };
   // A run a restart cut short carries on by itself in the sidecar: followed here too.
   useEffect(() => {
@@ -2641,7 +2645,7 @@ export function Photos({
           key: "editDate",
           label: t("selection.editDate"),
           icon: <CalendarIcon size={14} />,
-          onSelect: () => setDateEditUids([...selected]),
+          onSelect: () => openDateEdit([...selected]),
         },
         {
           key: "favorite",
@@ -3641,11 +3645,12 @@ export function Photos({
       </div>
       {dateEditUids && (view === "photos" || view === "albums") && (
         <DateEditPanel
-          key={dateEditMode}
+          key={`${dateEditMode}-${dateEditOpens}`}
           initialMode={dateEditMode}
           uids={dateEditUids}
           status={dateStatus}
           onStarted={() => {
+            setDateStatus(null); // not the last run's result until the first reading of this one
             setDateRun(true);
             sel.clear();
           }}
@@ -3848,7 +3853,7 @@ export function Photos({
             onCancel={sel.clear}
             onAddToAlbum={() => setPickAlbum(true)}
             onLabels={settings.driveLabels ? openLabelPicker : undefined}
-            onEditDate={() => setDateEditUids([...selected])}
+            onEditDate={() => openDateEdit([...selected])}
             onDownload={() => void runSelection(downloadSelected)}
             // Local copies to free exist only in the File Explorer folder, on Windows.
             onFreeUp={isWindows ? () => void runSelection(freeUpSelected) : undefined}
