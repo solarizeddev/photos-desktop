@@ -33,7 +33,8 @@ import { canMark, picksFrom, toggleMark, type Marks } from "../lib/duplicateMark
 import "../styles/Duplicates.css";
 
 type Kind = "identical" | "same" | "burst" | "similar";
-type Group = { key: string; kind: Kind; uids: string[]; times: number[] };
+/** `keep`: the copy to keep when one is preferred, the largest file of one photo in several. */
+type Group = { key: string; kind: Kind; uids: string[]; times: number[]; keep?: number };
 /** `ready` is false until the finder has worked the groups out once. */
 type Groups = { identical: Group[]; same: Group[]; burst: Group[]; similar: Group[]; ignored: Group[]; ready: boolean };
 type Status = { state: "idle" | "scanning" | "done" | "failed"; done: number; total: number; version: number };
@@ -45,6 +46,9 @@ const TABS: Tab[] = ["identical", "same", "burst", "similar", "ignored"];
  * call's time limit (the SDK trashes ten per request).
  */
 const TRASH_CHUNK = 500;
+/** The copy a group keeps when its extras are marked: the preferred one, else the oldest. */
+const keeperOf = (g: Group): number => g.keep ?? 0;
+const allBut = (g: Group): Set<string> => new Set(g.uids.filter((_, i) => i !== keeperOf(g)));
 
 /** Groups drawn at first, and added with each "show more". */
 const PAGE = 40;
@@ -205,16 +209,16 @@ export function Duplicates({
     setMarks(toggleMark(marks, group, uid));
   }
 
-  function allButFirst(group: Group) {
+  function allButKeeper(group: Group) {
     const next: Marks = new Map(marks);
-    next.set(group.key, new Set(group.uids.slice(1)));
+    next.set(group.key, allBut(group));
     setMarks(next);
   }
 
-  /** Marks the extras of every group in the tab, each keeping its oldest copy. */
+  /** Marks the extras of every group in the tab, each keeping its largest file, else its oldest. */
   function markEvery() {
     const next: Marks = new Map(marks);
-    for (const group of list) next.set(group.key, new Set(group.uids.slice(1)));
+    for (const group of list) next.set(group.key, allBut(group));
     setMarks(next);
   }
 
@@ -375,8 +379,8 @@ export function Duplicates({
                   <div className="g-spacer" />
                   {tab !== "ignored" ? (
                     <>
-                      <button className="g-chip" onClick={() => allButFirst(group)}>
-                        {t("duplicates.allButFirst")}
+                      <button className="g-chip" onClick={() => allButKeeper(group)}>
+                        {t(group.keep !== undefined ? "duplicates.allButLargest" : "duplicates.allButFirst")}
                       </button>
                       <button className="g-chip" onClick={() => void ignore(group, true)}>
                         {t("duplicates.ignore")}
@@ -406,6 +410,7 @@ export function Duplicates({
                           aria-pressed={tab !== "ignored" ? going : undefined}
                         >
                           {src ? <img src={src} alt="" draggable={false} loading="lazy" /> : <span className="dp-thumbph" />}
+                          {group.keep === i && <span className="dp-largest">{t("duplicates.largest")}</span>}
                           {m?.mediaType?.startsWith("video/") && (
                             <span className="dp-video">
                               <PlayArrowIcon size={16} />

@@ -54,8 +54,14 @@ import { DUPLICATES_FILE, readSealedOrDiscard, storeDir, writeSealedAtomic } fro
  * the rest that look alike.
  */
 export type DuplicateKind = "identical" | "same" | "burst" | "similar";
-/** A group's copies, oldest first, with each one's capture time in milliseconds. */
-export type DuplicateGroup = { key: string; kind: DuplicateKind; uids: string[]; times: number[] };
+/**
+ * A group's copies, oldest first, with each one's capture time in milliseconds. `keep` is the
+ * copy to keep when there is one to prefer: of one photo or video in several files, the largest,
+ * the one a lighter copy was made from.
+ */
+export type DuplicateGroup = { key: string; kind: DuplicateKind; uids: string[]; times: number[]; keep?: number };
+/** What the finder asks about the copies it groups as one photo: file size and a video's length. */
+export type CopyDetails = { uid: string; size: number | null; durationMs: number | null };
 export type DuplicateGroups = {
   identical: DuplicateGroup[];
   same: DuplicateGroup[];
@@ -84,6 +90,8 @@ export type DuplicateSource = {
   list(): Promise<{ uid: string; captureTime: number; video?: boolean }[]>;
   /** The small thumbnails of these photos; null for one that has none. A photo left out is asked for again. */
   thumbnails(uids: string[]): AsyncIterable<{ uid: string; bytes: Buffer | null }>;
+  /** Sizes and video lengths of these photos; one it cannot answer for is left out. */
+  details?(uids: string[]): Promise<CopyDetails[]>;
 };
 
 export type TrashOutcome = { uid: string; ok: boolean };
@@ -217,6 +225,14 @@ const BURST_GAP_MS = 2_000;
 const BURST_LOOK_BACK = 16;
 /** Photos compared with one other at most, so thousands dated the same second stay cheap. */
 const NEAR_MAX = 200;
+/** Two videos starting this close, alike, of one length, are one video in two files. */
+const VIDEO_SAME_MS = 2_000;
+/** How far the lengths of two files of one video may differ: a re-encode can trim a frame or two. */
+const VIDEO_LENGTH_SLACK_MS = 1_500;
+/** Copies asked about per call. */
+const DETAILS_BATCH = 200;
+/** Files of one size and length beyond this many are a camera's padded segments, not copies. */
+const SIZE_TWINS_MAX = 4;
 
 /** While the scan runs, the groups are worked out again at most this often. */
 const REGROUP_EVERY_MS = 15_000;
@@ -238,6 +254,8 @@ export class DuplicateFinder {
   private library = new Map<string, number>();
   /** The library's videos, as last listed. */
   private videos = new Set<string>();
+  /** Sizes and lengths asked about so far, by uid. */
+  private readonly details = new Map<string, CopyDetails>();
   /** Moved to the trash this session, kept out of every group. */
   private readonly gone = new Set<string>();
   private status: DuplicateStatus = { state: "idle", done: 0, total: 0, version: 0 };
@@ -280,6 +298,7 @@ export class DuplicateFinder {
       this.relatedHashes.clear();
       this.library.clear();
       this.videos.clear();
+      this.details.clear();
       this.gone.clear();
       this.prints.clear();
       this.unreadable.clear();
@@ -471,6 +490,8 @@ export class DuplicateFinder {
     for (const uid of this.prints.keys()) if (!this.library.has(uid)) this.prints.delete(uid);
     for (const uid of this.unreadable) if (!this.library.has(uid)) this.unreadable.delete(uid);
     this.save();
+    await this.learnVideoDetails(gen);
+    if (gen !== this.generation) return;
     this.status = { ...this.status, state: "done" };
     this.inputsChanged();
   }
@@ -617,6 +638,116 @@ export class DuplicateFinder {
       sameOut.push({ key: groupKey(uids), kind: "same", uids, times: uids.map(timeOf) });
     }
 
+    // One video in several files. Sizes and lengths come from what the scan has learned; a video
+    // not asked about yet is only matched by look and date, the strict way.
+    const detail = (i: number) => this.details.get(cand[i].uid);
+    const lengthOf = (i: number) => detail(i)?.durationMs ?? null;
+    const joinVideos = (i: number, j: number) => {
+      const ri = find(i);
+      const rj = find(j);
+      if (ri === rj) return;
+      parent[rj] = ri;
+    };
+    for (let i = 0; i < n; i++) parent[i] = i;
+    /**
+     * Whether a video has a look-alike video within half an hour other than those in `twins`:
+     * one of a series (a dashcam's segments, a timelapse), whose look-alikes are other clips.
+     */
+    const videoInSeries = (i: number, twins: (j: number) => boolean) => {
+      const near = (j: number) => cand[j].video && !twins(j) && matches(cand[i].fp, cand[j].fp);
+      for (let j = i - 1, seen = 0; j >= 0 && cand[i].t - cand[j].t <= SERIES_WITHIN_MS && seen < NEAR_MAX; j--, seen++) {
+        if (near(j)) return true;
+      }
+      for (let j = i + 1, seen = 0; j < n && cand[j].t - cand[i].t <= SERIES_WITHIN_MS && seen < NEAR_MAX; j++, seen++) {
+        if (near(j)) return true;
+      }
+      return false;
+    };
+
+    // First the strongest sign, whatever the dates say: the very same size in bytes and length,
+    // and one first frame. That is one file with a few header bytes rewritten (a date, a tag).
+    // A handful at most: a camera that pads every segment to one size makes many, and those are
+    // other clips, as are members of a series.
+    const bySize = new Map<string, number[]>();
+    for (let i = 0; i < n; i++) {
+      if (placed[i] || !cand[i].video) continue;
+      const d = detail(i);
+      if (!d?.size || !d.durationMs) continue;
+      const key = `${d.size}:${d.durationMs}`;
+      const list = bySize.get(key);
+      if (list) list.push(i);
+      else bySize.set(key, [i]);
+    }
+    for (const list of bySize.values()) {
+      if (list.length < 2 || list.length > SIZE_TWINS_MAX) continue;
+      // Its own twins, and a lighter copy dated the same moment, are not a series.
+      if (list.some((i) => videoInSeries(i, (j) => list.includes(j) || Math.abs(cand[j].t - cand[i].t) <= VIDEO_SAME_MS))) continue;
+      for (let a = 0; a < list.length; a++) {
+        for (let b = a + 1; b < list.length; b++) if (same(list[a], list[b])) joinVideos(list[a], list[b]);
+      }
+    }
+    const settleVideos = () => {
+      const groups = new Map<number, number[]>();
+      for (let i = 0; i < n; i++) {
+        if (placed[i] || !cand[i].video) continue;
+        const r = find(i);
+        const list = groups.get(r);
+        if (list) list.push(i);
+        else groups.set(r, [i]);
+      }
+      for (const members of groups.values()) {
+        if (members.length < 2) continue;
+        members.forEach((i) => (placed[i] = 1));
+        const uids = members.map((i) => cand[i].uid).sort(byTime);
+        const group: DuplicateGroup = { key: groupKey(uids), kind: "same", uids, times: uids.map(timeOf) };
+        const keep = this.largestOf(uids);
+        if (keep !== undefined) group.keep = keep;
+        sameOut.push(group);
+      }
+      for (let i = 0; i < n; i++) parent[i] = i;
+    };
+
+    // Then by date, joined into the same groups as the twins above, so an original with a twin
+    // and a lighter copy is one group of three: a lighter copy beside its original starts within seconds of it, or whole
+    // hours off when one app wrote UTC and another local time. The two recordings overlap (one
+    // camera does not film two clips at once) and their lengths differ by a trimmed frame or two.
+    const slack = (a: number, b: number) => Math.min(VIDEO_LENGTH_SLACK_MS, Math.max(200, 0.02 * Math.max(a, b)));
+    for (let i = 0; i < n; i++) {
+      if (i % 2000 === 0) await pause();
+      if (placed[i] || !cand[i].video || cand[i].t <= 0) continue;
+      for (let k = 0; k <= SAME_HOUR_SHIFTS; k++) {
+        const centre = cand[i].t + k * 3_600_000;
+        let j = k === 0 ? i + 1 : firstAt(centre - VIDEO_SAME_MS);
+        for (let seen = 0; j < n && cand[j].t <= centre + VIDEO_SAME_MS && seen < NEAR_MAX; j++, seen++) {
+          if (j === i || placed[j] || !cand[j].video) continue;
+          const a = lengthOf(i);
+          const b = lengthOf(j);
+          const off = Math.abs(cand[j].t - centre);
+          // Recordings that overlap, the dates being whole seconds: a second off is rounding,
+          // more than that must still leave the later one starting well inside the earlier.
+          const overlap = (x: number, y: number) => off <= 1_000 || off < Math.min(x, y) - 1_000;
+          let one: boolean;
+          if (a === null || b === null) {
+            // No length to go by: only the very same second, not hours off, and the strict look.
+            one = k === 0 && off === 0 && same(i, j);
+          } else if (k === 0) {
+            one = overlap(a, b) && Math.abs(a - b) <= slack(a, b) && matches(cand[i].fp, cand[j].fp);
+          } else {
+            // Hours off: the strict look and length, and neither one of a series.
+            const close = (x: number) => (y: number) => Math.abs(cand[y].t - cand[x].t) <= VIDEO_SAME_MS;
+            one =
+              overlap(a, b) &&
+              Math.abs(a - b) <= 200 &&
+              same(i, j) &&
+              !videoInSeries(i, close(i)) &&
+              !videoInSeries(j, close(j));
+          }
+          if (one) joinVideos(i, j);
+        }
+      }
+    }
+    settleVideos();
+
     // Two shots seconds apart that are not one photo twice.
     await bursts(2);
 
@@ -642,6 +773,41 @@ export class DuplicateFinder {
     return [...identical.sort(order), ...sameOut.sort(order), ...burstOut.sort(order), ...similar.sort(order)];
   }
 
+  /**
+   * Learns the size and length of every video in the library not asked about yet, during the
+   * scan, so working the groups out never waits on the network. One the source does not answer
+   * for is noted as unknown. A batch that fails is left for the next scan and the rest go on;
+   * three failing in a row is the connection gone, and the rest wait for the next scan too.
+   */
+  private async learnVideoDetails(gen: number): Promise<void> {
+    const source = this.source;
+    if (!source?.details) return;
+    const ask = [...this.videos].filter((u) => !this.details.has(u));
+    let failures = 0;
+    for (let at = 0; at < ask.length; at += DETAILS_BATCH) {
+      if (gen !== this.generation) return;
+      const batch = ask.slice(at, at + DETAILS_BATCH);
+      let got: CopyDetails[];
+      try {
+        got = await source.details(batch);
+        failures = 0;
+      } catch {
+        if (++failures >= 3) return;
+        continue;
+      }
+      for (const d of got) this.details.set(d.uid, d);
+      for (const u of batch) if (!this.details.has(u)) this.details.set(u, { uid: u, size: null, durationMs: null });
+    }
+  }
+
+  /** Of copies whose sizes are all known and not all equal, the index of the largest. */
+  private largestOf(uids: string[]): number | undefined {
+    const sizes = uids.map((u) => this.details.get(u)?.size ?? 0);
+    if (sizes.some((s) => s <= 0)) return undefined;
+    const largest = Math.max(...sizes);
+    return sizes.some((s) => s !== largest) ? sizes.indexOf(largest) : undefined;
+  }
+
   /** The groups as they stand, the trashed copies left out. */
   private live(): DuplicateGroup[] {
     if (!this.computed) return [];
@@ -655,7 +821,10 @@ export class DuplicateFinder {
       const left = g.uids.map((u, i) => [u, g.times[i]] as const).filter(([u]) => !this.gone.has(u));
       if (left.length < 2) continue;
       const uids = left.map(([u]) => u);
-      out.push({ key: groupKey(uids), kind: g.kind, uids, times: left.map(([, t]) => t) });
+      // The kept copy gone, the largest of those left is the one to keep.
+      const kept = g.keep === undefined ? -1 : uids.indexOf(g.uids[g.keep]);
+      const keep = g.keep === undefined ? undefined : kept >= 0 ? kept : this.largestOf(uids);
+      out.push({ key: groupKey(uids), kind: g.kind, uids, times: left.map(([, t]) => t), ...(keep !== undefined ? { keep } : {}) });
     }
     return out;
   }

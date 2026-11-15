@@ -107,7 +107,7 @@ const SPREAD = 7_777_777;
  * SPREAD; `ms` gives a capture time as it is.
  */
 function finder(
-  photos: { uid: string; t: number; look: number | string | null; ms?: number; video?: boolean }[],
+  photos: { uid: string; t: number; look: number | string | null; ms?: number; video?: boolean; size?: number; length?: number }[],
   unanswered: string[] = [],
 ) {
   const asked: string[] = [];
@@ -121,6 +121,10 @@ function finder(
         yield { uid, bytes: look === null ? null : Buffer.from(String(look)) };
       }
     },
+    details: async (uids) =>
+      photos
+        .filter((p) => uids.includes(p.uid))
+        .map((p) => ({ uid: p.uid, size: p.size ?? null, durationMs: p.length ?? null })),
   };
   const f = new DuplicateFinder(async (bytes) => lookOf(bytes.toString()), false, 0, 0);
   f.setSource(source);
@@ -173,6 +177,116 @@ describe("the duplicate finder", () => {
     const g = f.groups();
     expect(g.same).toEqual([]);
     expect(g.burst.map((x) => x.uids)).toEqual([["v~k1", "v~k2"]]);
+  });
+
+  it("pairs one video in two files and keeps the larger, but not two videos of other lengths", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      // The original and a lighter copy, its start a second off and a frame shorter.
+      { uid: "v~orig", t: 0, look: 11, ms: T, video: true, size: 20_000_000, length: 30_000 },
+      { uid: "v~lite", t: 0, look: "11.20", ms: T + 1_000, video: true, size: 4_000_000, length: 29_960 },
+      // The same again, a Google copy dated in local time against the file's UTC.
+      { uid: "v~utc", t: 0, look: 14, ms: T + 300_000, video: true, size: 50_000_000, length: 61_000 },
+      { uid: "v~local", t: 0, look: "14.10", ms: T + 300_000 + 2 * 3_600_000, video: true, size: 8_000_000, length: 61_000 },
+      // Two clips started the same second at one scene, of other lengths.
+      { uid: "v~c1", t: 0, look: 12, ms: T + 600_000, video: true, size: 9_000_000, length: 12_000 },
+      { uid: "v~c2", t: 0, look: 12, ms: T + 600_000, video: true, size: 5_000_000, length: 7_000 },
+    ]);
+    f.start();
+    await f.settled();
+    const g = f.groups();
+    expect(g.same).toEqual([
+      {
+        key: "v~local|v~utc",
+        kind: "same",
+        uids: ["v~utc", "v~local"],
+        times: [T + 300_000, T + 300_000 + 2 * 3_600_000],
+        keep: 0,
+      },
+      { key: "v~lite|v~orig", kind: "same", uids: ["v~orig", "v~lite"], times: [T, T + 1_000], keep: 0 },
+    ]);
+    expect(g.similar.map((x) => x.uids)).toEqual([["v~c1", "v~c2"]]);
+  });
+
+  it("pairs two videos of one size and length whatever their dates, and keeps the oldest", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      { uid: "v~first", t: 0, look: 15, ms: T, video: true, size: 7_340_032, length: 18_200 },
+      // The same file with a rewritten header, dated the day it was uploaded somewhere.
+      { uid: "v~again", t: 0, look: "15.2", ms: T + 400 * 86_400_000, video: true, size: 7_340_032, length: 18_200 },
+      // Another clip of that size and length that looks different: not paired.
+      { uid: "v~other", t: 0, look: 16, ms: T + 3_000, video: true, size: 7_340_032, length: 18_200 },
+    ]);
+    f.start();
+    await f.settled();
+    const same = f.groups().same;
+    expect(same.map((x) => x.uids)).toEqual([["v~first", "v~again"]]);
+    expect(same[0].keep).toBeUndefined();
+  });
+
+  it("puts an original, its same-size twin and its lighter copy in one group", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      { uid: "v~orig", t: 0, look: 22, ms: T, video: true, size: 20_000_000, length: 30_000 },
+      { uid: "v~twin", t: 0, look: "22.2", ms: T + 90 * 86_400_000, video: true, size: 20_000_000, length: 30_000 },
+      { uid: "v~lite", t: 0, look: "22.20", ms: T, video: true, size: 4_000_000, length: 29_960 },
+    ]);
+    f.start();
+    await f.settled();
+    const same = f.groups().same;
+    expect(same).toHaveLength(1);
+    expect(new Set(same[0].uids)).toEqual(new Set(["v~orig", "v~twin", "v~lite"]));
+    expect(same[0].uids[same[0].keep!]).not.toBe("v~lite");
+  });
+
+  it("suggests no keeper for photos: a larger export is not the original", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      { uid: "v~heic", t: 0, look: 13, ms: T, size: 900_000 },
+      { uid: "v~jpeg", t: 0, look: "13.4", ms: T, size: 5_000_000 },
+    ]);
+    f.start();
+    await f.settled();
+    expect(f.groups().same[0].keep).toBeUndefined();
+  });
+
+  it("keeps the next largest video once the largest is trashed, and none when a size is unknown", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      { uid: "v~20", t: 0, look: 17, ms: T, video: true, size: 20_000_000, length: 40_000 },
+      { uid: "v~10", t: 0, look: "17.4", ms: T + 500, video: true, size: 10_000_000, length: 40_000 },
+      { uid: "v~4", t: 0, look: "17.8", ms: T + 1_000, video: true, size: 4_000_000, length: 39_960 },
+      { uid: "v~u1", t: 0, look: 18, ms: T + 900_000, video: true, size: 9_000_000, length: 20_000 },
+      { uid: "v~u2", t: 0, look: "18.4", ms: T + 900_500, video: true, length: 20_000 },
+    ]);
+    f.start();
+    await f.settled();
+    const byKey = (key: string) => f.groups().same.find((g) => g.uids.includes(key))!;
+    expect(byKey("v~20")).toMatchObject({ uids: ["v~20", "v~10", "v~4"], keep: 0 });
+    expect(byKey("v~u1").keep).toBeUndefined();
+    f.removed(["v~20"]);
+    expect(byKey("v~10")).toMatchObject({ uids: ["v~10", "v~4"], keep: 0 });
+  });
+
+  it("does not pair a dashcam's segments, back-to-back short clips, or a timelapse hours apart", async () => {
+    const T = 1_700_000_000_000;
+    const H = 3_600_000;
+    const photos: Parameters<typeof finder>[0] = [];
+    // Five padded segments of one size and length, a minute apart, of one road at night.
+    for (let k = 0; k < 5; k++) {
+      photos.push({ uid: `v~seg${k}`, t: 0, look: 19, ms: T + k * 60_000, video: true, size: 104_857_600, length: 60_000 });
+    }
+    // Two 2.5 s clips, the second started 2 s after the first.
+    photos.push({ uid: "v~q1", t: 0, look: 20, ms: 2 * T, video: true, size: 3_000_000, length: 2_500 });
+    photos.push({ uid: "v~q2", t: 0, look: "20.2", ms: 2 * T + 2_000, video: true, size: 2_900_000, length: 2_400 });
+    // A timelapse of fixed clips every 10 minutes: clips whole hours apart are other clips.
+    for (let k = 0; k < 13; k++) {
+      photos.push({ uid: `v~tl${k}`, t: 0, look: 21, ms: 3 * T + k * 600_000, video: true, size: 5_000_000 + k, length: 10_000 });
+    }
+    const { f } = finder(photos);
+    f.start();
+    await f.settled();
+    expect(f.groups().same).toEqual([]);
   });
 
   it("finds a burst when another scene shot the same second sorts in between", async () => {
