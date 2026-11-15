@@ -335,6 +335,13 @@ export const de: Record<string, string> = {
   "settings.languageDesc": "Wähle die Anzeigesprache.",
   "settings.timeline": "Zeitleiste",
   "settings.hideAlbum": "Fotos in Drive-Alben ausblenden",
+  "burst.title": "Serie mit {count} Aufnahmen",
+  "burst.play": "Abspielen",
+  "burst.pause": "Pause",
+  "burst.shot": "Aufnahme {n} von {count}",
+  "burst.showAll": "Alle {count} Aufnahmen zeigen",
+  "settings.stackBursts": "Serien stapeln",
+  "settings.stackBurstsDesc": "Aufnahmen im Sekundenabstand erscheinen in der Zeitleiste als eine Kachel. Öffne sie, um sie abzuspielen oder alle zu zeigen.",
   "settings.hideAlbumDesc":
     "Fotos, die einem Drive-Album hinzugefügt wurden, erscheinen nicht in deiner Haupt-Zeitleiste. In den Tabs Alben und Geteilt sowie in den Kategoriefiltern bleiben sie sichtbar.",
   "settings.security": "Sicherheit",

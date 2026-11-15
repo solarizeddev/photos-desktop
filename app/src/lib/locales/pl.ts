@@ -337,6 +337,13 @@ export const pl: Record<string, string> = {
   "settings.languageDesc": "Wybierz język wyświetlania.",
   "settings.timeline": "Oś czasu",
   "settings.hideAlbum": "Ukrywaj zdjęcia w albumach Drive",
+  "burst.title": "Seria: {count}",
+  "burst.play": "Odtwórz",
+  "burst.pause": "Pauza",
+  "burst.shot": "Zdjęcie {n} z {count}",
+  "burst.showAll": "Pokaż wszystkie ({count})",
+  "settings.stackBursts": "Grupuj serie",
+  "settings.stackBurstsDesc": "Zdjęcia zrobione w odstępie sekund widać na osi czasu jako jeden kafelek. Otwórz go, aby je odtworzyć lub pokazać wszystkie.",
   "settings.hideAlbumDesc":
     "Zdjęcia dodane do albumu Drive nie pojawią się na Twojej głównej osi czasu. Nadal widać je w kartach Albumy i Udostępnione oraz w filtrach kategorii.",
   "settings.security": "Bezpieczeństwo",

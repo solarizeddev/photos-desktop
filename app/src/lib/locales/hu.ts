@@ -335,6 +335,13 @@ export const hu: Record<string, string> = {
   "settings.languageDesc": "Válaszd ki a megjelenítés nyelvét.",
   "settings.timeline": "Idővonal",
   "settings.hideAlbum": "Drive-albumok fotóinak elrejtése",
+  "burst.title": "Sorozat: {count} felvétel",
+  "burst.play": "Lejátszás",
+  "burst.pause": "Szünet",
+  "burst.shot": "{n}. felvétel / {count}",
+  "burst.showAll": "Mind a {count} felvétel megjelenítése",
+  "settings.stackBursts": "Sorozatok egymásra",
+  "settings.stackBurstsDesc": "A másodpercekkel egymás után készült felvételek egy csempeként jelennek meg az idővonalon. Nyisd meg a lejátszáshoz vagy az összes megjelenítéséhez.",
   "settings.hideAlbumDesc":
     "A Drive-albumba tett fotók nem jelennek meg a fő idővonalon. Az Albumok és a Megosztott lapon, valamint a kategóriaszűrőkben továbbra is láthatók.",
   "settings.security": "Biztonság",

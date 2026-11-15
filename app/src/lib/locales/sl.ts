@@ -337,6 +337,13 @@ export const sl: Record<string, string> = {
   "settings.languageDesc": "Izberi jezik prikaza.",
   "settings.timeline": "Časovnica",
   "settings.hideAlbum": "Skrij fotografije v albumih Drive",
+  "burst.title": "Rafal: {count}",
+  "burst.play": "Predvajaj",
+  "burst.pause": "Premor",
+  "burst.shot": "Posnetek {n} od {count}",
+  "burst.showAll": "Pokaži vse ({count})",
+  "settings.stackBursts": "Zloži rafale",
+  "settings.stackBurstsDesc": "Posnetki v razmiku nekaj sekund so na časovnici prikazani kot ena ploščica. Odpri jo, da jih predvajaš ali prikažeš vse.",
   "settings.hideAlbumDesc":
     "Fotografije, dodane v album Drive, se ne prikažejo na tvoji glavni časovnici. Še naprej so vidne v zavihkih Albumi in V skupni rabi ter v filtrih kategorij.",
   "settings.security": "Varnost",

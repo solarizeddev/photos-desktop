@@ -336,6 +336,13 @@ export const fr: Record<string, string> = {
   "settings.languageDesc": "Choisissez la langue d'affichage.",
   "settings.timeline": "Fil",
   "settings.hideAlbum": "Masquer les photos des albums Drive",
+  "burst.title": "Rafale de {count} prises",
+  "burst.play": "Lire",
+  "burst.pause": "Pause",
+  "burst.shot": "Prise {n} sur {count}",
+  "burst.showAll": "Afficher les {count} prises",
+  "settings.stackBursts": "Empiler les rafales",
+  "settings.stackBurstsDesc": "Les prises à quelques secondes d’intervalle apparaissent comme une seule vignette dans la chronologie. Ouvrez-la pour les lire ou toutes les afficher.",
   "settings.hideAlbumDesc":
     "Les photos ajoutées à un album Drive n'apparaissent pas dans votre fil principal. Elles restent visibles dans les onglets Albums et Partagés, ainsi que dans les filtres de catégories.",
   "settings.security": "Sécurité",

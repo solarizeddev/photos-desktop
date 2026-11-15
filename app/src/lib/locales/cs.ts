@@ -337,6 +337,13 @@ export const cs: Record<string, string> = {
   "settings.languageDesc": "Zvol jazyk zobrazení.",
   "settings.timeline": "Časová osa",
   "settings.hideAlbum": "Skrýt fotky v albech na Drive",
+  "burst.title": "Série: {count}",
+  "burst.play": "Přehrát",
+  "burst.pause": "Pozastavit",
+  "burst.shot": "Snímek {n} z {count}",
+  "burst.showAll": "Ukázat všechny ({count})",
+  "settings.stackBursts": "Seskupit série",
+  "settings.stackBurstsDesc": "Snímky pořízené s odstupem sekund se na časové ose ukážou jako jedna dlaždice. Otevři ji a přehraj je nebo ukaž všechny.",
   "settings.hideAlbumDesc":
     "Fotky přidané do alba na Drive se neobjeví na tvé hlavní časové ose. Stále se zobrazují v záložkách Alba a Sdílené a ve filtrech kategorií.",
   "settings.security": "Zabezpečení",
