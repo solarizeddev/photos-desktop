@@ -98,7 +98,15 @@ export type UploadStatus = {
   saved?: number;
   /** How many drops held nothing to upload. */
   emptyDrops?: number;
+  /** The album being filled after the files went up, which can take a while on a big import. */
+  albumStep?: { album: string; added: number; total: number };
+  /** Albums that went over the 10,000 limit and were split, or that missed photos. */
+  albumNotes?: AlbumNote[];
 };
+
+export type AlbumNote =
+  | { kind: "split"; album: string; part: string; moved: number }
+  | { kind: "failed"; album: string; count: number };
 
 /**
  * What the host prepared for one drop, keyed by the path each file was named by: a
@@ -445,6 +453,11 @@ export function useUploads(onFinished: () => void) {
     cancel,
     clear,
     running: status.running,
-    progressLabel: status.total > 0 ? `${settled}/${status.total}` : "",
+    progressLabel: status.albumStep
+      ? `${status.albumStep.added}/${status.albumStep.total}`
+      : status.total > 0
+        ? `${settled}/${status.total}`
+        : "",
+    albumStep: status.albumStep,
   };
 }

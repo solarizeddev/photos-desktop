@@ -500,6 +500,7 @@ export const sl: Record<string, string> = {
 
   // Avatar
   "avatar.uploading": "Nalaganje",
+  "avatar.addingToAlbum": "Dodajanje v album",
   "avatar.syncing": "Sinhroniziranje",
   "avatar.account": "Račun in nastavitve",
   "avatar.showUploads": "Pokaži nalaganja",
@@ -513,6 +514,7 @@ export const sl: Record<string, string> = {
   "photos.indexing": "Indeksiranje {done}/{total}",
   "photos.uploadTitle": "Naloži fotografije ali mapo kot album",
   "photos.uploadingProgress": "Nalaganje {progress}",
+  "photos.addingToAlbumProgress": "Dodajanje v album {progress}",
   "photos.noMatches": "Ni zadetkov",
   "photos.noPhotos": "Še ni fotografij",
   "photos.noPhotosSub": "Tvoje fotografije se bodo prikazale tukaj po sinhronizaciji.",
@@ -941,6 +943,9 @@ export const sl: Record<string, string> = {
   "upload.import": "Uvozi",
   "upload.progressRunning": "Nalaganje {settled} od {total} datotek",
   "upload.progressFinished": "Končano: {settled} od {total} datotek",
+  "upload.albumFailed": "{count} fotografij ni bilo mogoče dodati v {album}",
+  "upload.albumSplit": "{album} ima več kot 10.000 fotografij, zato jih je {moved} šlo v {part}",
+  "upload.albumStep": "Dodajanje v album {album}: {added} od {total}",
   "upload.doneCount": "Naloženo: {count}",
   "upload.waitingCount": "Čaka: {count}",
   "upload.showAll": "Pokaži vse",
