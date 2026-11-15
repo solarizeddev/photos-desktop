@@ -2546,7 +2546,7 @@ export function Photos({
     ? {
         kind: "upload",
         label: uploads.progressLabel
-          ? `${t("avatar.uploading")} ${uploads.progressLabel}`
+          ? `${t(uploads.albumStep ? "avatar.addingToAlbum" : "avatar.uploading")} ${uploads.progressLabel}`
           : t("avatar.uploading"),
       }
     : downloading
@@ -3149,7 +3149,9 @@ export function Photos({
             onClick={() => openUpload()}
             title={
               uploads.running
-                ? t("photos.uploadingProgress", { progress: uploads.progressLabel })
+                ? t(uploads.albumStep ? "photos.addingToAlbumProgress" : "photos.uploadingProgress", {
+                    progress: uploads.progressLabel,
+                  })
                 : t("photos.uploadTitle")
             }
           >

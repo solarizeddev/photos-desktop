@@ -50,7 +50,8 @@ import { Readable } from "node:stream";
 import exifr from "exifr";
 import sharp from "sharp";
 
-import { createAlbum, deleteAlbum, findAlbumByName, listAlbumPhotos } from "./albums.ts";
+import { createAlbum, deleteAlbum, findAlbumByName, listAlbumPhotos, listAlbums } from "./albums.ts";
+import { withStallGuard } from "./stallGuard.ts";
 import { compressForUpload, videoLaneBusy, wouldCompress, type PreparedCopy } from "./compression.ts";
 import { compressedUploadOf, rememberCompressedUpload } from "./compressedUploads.ts";
 import {
@@ -188,8 +189,19 @@ export type ImportState = {
   byContent?: boolean;
 };
 
+/** What happened to an album at the end of an upload, beyond the files themselves. */
+export type AlbumNote =
+  /** Fuller than an album may hold: the rest went into `part` ("Name (2)" and on). */
+  | { kind: "split"; album: string; part: string; moved: number }
+  /** Photos that could not be put in the album: they are in the library, not in it. */
+  | { kind: "failed"; album: string; count: number };
+
 export type UploadStatus = {
   running: boolean;
+  /** While the photos of a group go into its album, after its files: how far that has got. */
+  albumStep?: { album: string; added: number; total: number };
+  /** The album splits and failures of the last upload, until the record is cleared. */
+  albumNotes?: AlbumNote[];
   total: number;
   done: number;
   skipped: number;
@@ -466,6 +478,7 @@ export function clearFinishedUploads(): void {
   if (status.running || status.importing) return;
   status.importError = undefined;
   status.moveResult = undefined;
+  status.albumNotes = undefined;
   status.items = [];
   status.total = 0;
   status.done = 0;
@@ -1004,6 +1017,200 @@ const UPLOAD_CONCURRENCY = 4;
 // get too little of it to finish a block in time. Cleared when the queue next starts.
 let slowLink = false;
 
+/** The most photos a Proton album holds. */
+const ALBUM_MAX = 10_000;
+/** Photos sent to an album per step: a step that fails costs only these. */
+const ALBUM_CHUNK = 500;
+/** How long an album or favourite step may go without an answer before it is given up. */
+const STEP_STALL_MS = 120_000;
+/** The API's answer for a photo the album already holds. */
+const ALREADY_EXISTS = 2500;
+/** The most parts an album is split into ("Name (2)" and on). */
+const ALBUM_PARTS_MAX = 20;
+
+function noteAlbum(note: AlbumNote): void {
+  status.albumNotes = [...(status.albumNotes ?? []), note];
+}
+
+/**
+ * The parts an album was split into before ("Name (2)" and on), the fullest of each number,
+ * with the photos they hold, so photos already in one are not put in another.
+ */
+async function albumParts(
+  photos: any,
+  name: string,
+): Promise<{ parts: Map<number, { uid: string; held: number }>; members: Set<string> }> {
+  const base = name.trim().toLocaleLowerCase();
+  const found = new Map<number, { uid: string; count: number }>();
+  for (const album of await listAlbums(photos)) {
+    const m = /^(.*) \((\d+)\)$/.exec(album.name.trim());
+    if (!m || m[1].trim().toLocaleLowerCase() !== base) continue;
+    const n = Number(m[2]);
+    if (n < 2 || n > ALBUM_PARTS_MAX) continue;
+    const had = found.get(n);
+    if (!had || album.photoCount > had.count) found.set(n, { uid: album.uid, count: album.photoCount });
+  }
+  const parts = new Map<number, { uid: string; held: number }>();
+  const members = new Set<string>();
+  for (const [n, { uid }] of found) {
+    const inside = await listAlbumPhotos(photos, uid);
+    parts.set(n, { uid, held: inside.length });
+    for (const p of inside) members.add(p.uid);
+  }
+  return { parts, members };
+}
+
+/**
+ * Puts `uids` into an album that holds `already` photos, a chunk at a time, with its progress
+ * in the status and the log. Past what an album may hold, the rest go into "Name (2)" and on,
+ * found or made. A chunk that fails or stalls is tried once more for what it had not put in;
+ * what still will not go in is counted, and those photos stay in the library, not in the album.
+ */
+export async function addAllToAlbum(
+  photos: any,
+  albumUid: string,
+  name: string,
+  uids: string[],
+  already: number,
+  limits: { max: number; chunk: number; stallMs: number } = { max: ALBUM_MAX, chunk: ALBUM_CHUNK, stallMs: STEP_STALL_MS },
+): Promise<void> {
+  const { max, chunk: chunkSize, stallMs } = limits;
+  /** Still to put in. */
+  let rest = uids.slice();
+  /** How many have been dealt with: put in, found already there, or given up on. */
+  let dealt = 0;
+  let failed = 0;
+  const show = (inFlight = 0) => {
+    status.albumStep = { album: name, added: dealt + inFlight, total: uids.length };
+  };
+  show();
+  let target = albumUid;
+  let held = already;
+  let part = 1;
+  let putInPart = 0;
+  /** Whether this run made the part it is filling, so one left empty is taken away again. */
+  let madeHere = false;
+  let parts: Map<number, { uid: string; held: number }> | null = null;
+  let loggedAt = 0;
+  const leavePart = async () => {
+    if (part > 1 && putInPart > 0) noteAlbum({ kind: "split", album: name, part: `${name} (${part})`, moved: putInPart });
+    if (madeHere && putInPart === 0) {
+      await deleteAlbum(photos, target).catch((e) =>
+        process.stderr.write(`[upload] empty album part not removed: ${(e as Error).message}\n`),
+      );
+    }
+    putInPart = 0;
+    madeHere = false;
+  };
+  try {
+    while (rest.length > 0) {
+      if (held >= max) {
+        if (part >= ALBUM_PARTS_MAX) break;
+        if (!parts) {
+          // Read once, at the first split: an import run again finds its earlier parts here.
+          const found = await albumParts(photos, name);
+          parts = found.parts;
+          const before = rest.length;
+          rest = rest.filter((u) => !found.members.has(u));
+          dealt += before - rest.length;
+          show();
+          if (rest.length === 0) break;
+        }
+        await leavePart();
+        part++;
+        const known = parts.get(part);
+        if (known) {
+          target = known.uid;
+          held = known.held;
+        } else {
+          target = (await createAlbum(photos, `${name} (${part})`)).uid;
+          held = 0;
+          madeHere = true;
+        }
+        continue;
+      }
+      const chunk = rest.slice(0, Math.min(chunkSize, max - held));
+      const settled = new Set<string>();
+      let ok = 0;
+      /** Already in it: a step that stalled after its request went through, asked again. */
+      let there = 0;
+      let refused = 0;
+      let error: Error | null = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        // What the first try put in is not sent again: in the next part it would be in two.
+        const todo = chunk.filter((u) => !settled.has(u));
+        if (todo.length === 0) {
+          error = null;
+          break;
+        }
+        const stop = new AbortController();
+        try {
+          const added = photos.addPhotosToAlbum(target, todo, stop.signal);
+          for await (const result of withStallGuard<any>(added, stallMs, "addPhotosToAlbum")) {
+            settled.add(result.uid);
+            if (result.ok) ok++;
+            else if (result.error?.code === ALREADY_EXISTS || result.error?.name === "PhotoAlreadyInTargetError") there++;
+            else if (++refused === 1) {
+              process.stderr.write(`[upload] album add refused (${result.error?.name} ${result.error?.code ?? ""})\n`);
+            }
+            show(settled.size);
+          }
+          error = null;
+          break;
+        } catch (e) {
+          stop.abort();
+          error = e as Error;
+          process.stderr.write(`[upload] album add step failed (${error.name} ${(error as any).code ?? ""})\n`);
+          // The server's no (a full album among them) is not changed by asking again.
+          if (error.name === "ValidationError") break;
+        }
+      }
+      held += ok + there;
+      putInPart += ok;
+      failed += refused;
+      if (!error) {
+        // Every photo was answered for; one the SDK passed over without a word did not go in.
+        failed += chunk.length - settled.size;
+        for (const u of chunk) settled.add(u);
+      }
+      rest = rest.filter((u) => !settled.has(u));
+      dealt += settled.size;
+      show();
+      if (error) {
+        if (error.name === "ValidationError" && held >= max / 2 && part < ALBUM_PARTS_MAX) {
+          // Refused with the album well on: full sooner than counted (a Live Photo's video
+          // may count too). The rest go on in the next part.
+          held = max;
+          continue;
+        }
+        // Anything else that will not go in (no connection, no answer, the server saying no)
+        // would say no to the rest too: they are counted, and an import run again puts them in.
+        failed += rest.length;
+        dealt += rest.length;
+        rest = [];
+        show();
+        break;
+      }
+      if (dealt - loggedAt >= 500 || rest.length === 0) {
+        loggedAt = dealt;
+        process.stderr.write(`[upload] album add ${dealt}/${uids.length}\n`);
+      }
+    }
+    await leavePart();
+    failed += rest.length;
+    if (failed > 0) {
+      process.stderr.write(`[upload] add to album failed for ${failed} photo(s)\n`);
+      noteAlbum({ kind: "failed", album: name, count: failed });
+    }
+  } catch (e) {
+    process.stderr.write(`[upload] addPhotosToAlbum: ${(e as Error).message}\n`);
+    await leavePart().catch(() => {});
+    noteAlbum({ kind: "failed", album: name, count: rest.length + failed });
+  } finally {
+    status.albumStep = undefined;
+  }
+}
+
 async function drain(photos: any): Promise<void> {
   draining = true;
   status.running = true;
@@ -1081,6 +1288,7 @@ async function drain(photos: any): Promise<void> {
         // A photo the library already had, copied into the Favorites folder: what was
         // asked for is that photo as a favourite.
         const toFavorite: string[] = [];
+        const toFavoriteSet = new Set<string>();
 
         // A bounded worker pool over the group's files. The SDK's own queue caps the
         // uploads at 5 concurrent, but the expensive per-file PREP (hashing, EXIF read,
@@ -1169,7 +1377,10 @@ async function drain(photos: any): Promise<void> {
               if (duplicates[0]) intoAlbum(duplicates[0]);
               // A favourite in the export is one in the library too, whichever had it first.
               const favorite = group.favorite || !!group.sidecars?.get(file)?.favorited;
-              if (duplicates[0] && favorite && !toFavorite.includes(duplicates[0])) toFavorite.push(duplicates[0]);
+              if (duplicates[0] && favorite && !toFavoriteSet.has(duplicates[0])) {
+                toFavoriteSet.add(duplicates[0]);
+                toFavorite.push(duplicates[0]);
+              }
               item.status = "skipped";
               item.error = "already in your library";
               status.skipped++;
@@ -1290,7 +1501,7 @@ async function drain(photos: any): Promise<void> {
         if (toFavorite.length > 0) {
           try {
             const updates = toFavorite.map((nodeUid) => ({ nodeUid, tagsToAdd: [PhotoTag.Favorites], tagsToRemove: [] }));
-            for await (const result of photos.updatePhotos(updates)) {
+            for await (const result of withStallGuard<any>(photos.updatePhotos(updates), STEP_STALL_MS, "updatePhotos")) {
               if (!(result as any).ok) process.stderr.write(`[upload] favourite not set on a photo already there
 `);
             }
@@ -1303,20 +1514,8 @@ async function drain(photos: any): Promise<void> {
         if (albumUid && toAlbum.length > 0) {
           // Add the files that DID upload to their album even if the user cancelled:
           // they are already in the cloud, so finishing this beats leaving an empty
-          // album with the photos orphaned on the timeline. A fresh signal, so the
-          // cancel that stopped the uploads does not also abort this last step.
-          const addSignal = new AbortController().signal;
-          try {
-            let failed = 0;
-            for await (const result of photos.addPhotosToAlbum(albumUid, toAlbum, addSignal)) {
-              if (!result.ok) failed++;
-            }
-            if (failed > 0) {
-              process.stderr.write(`[upload] add to album failed for ${failed} photo(s)\n`);
-            }
-          } catch (e) {
-            process.stderr.write(`[upload] addPhotosToAlbum: ${(e as Error).message}\n`);
-          }
+          // album with the photos orphaned on the timeline.
+          await addAllToAlbum(photos, albumUid, group.album ?? "", toAlbum, inAlbum.size);
         } else if (albumUid && albumIsNew) {
           // Every file failed or was cancelled: an album made only for them would be left
           // empty, one more of the same name at each retry.

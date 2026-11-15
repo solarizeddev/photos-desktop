@@ -498,6 +498,7 @@ export const hu: Record<string, string> = {
 
   // Avatar
   "avatar.uploading": "Feltöltés",
+  "avatar.addingToAlbum": "Hozzáadás albumhoz",
   "avatar.syncing": "Szinkronizálás",
   "avatar.account": "Fiók és beállítások",
   "avatar.showUploads": "Feltöltések megjelenítése",
@@ -511,6 +512,7 @@ export const hu: Record<string, string> = {
   "photos.indexing": "Indexelés {done}/{total}",
   "photos.uploadTitle": "Fotók feltöltése, vagy egy mappa albumként",
   "photos.uploadingProgress": "Feltöltés {progress}",
+  "photos.addingToAlbumProgress": "Hozzáadás albumhoz {progress}",
   "photos.noMatches": "Nincs találat",
   "photos.noPhotos": "Még nincsenek fotók",
   "photos.noPhotosSub": "A fotóid itt jelennek meg a szinkronizálás után.",
@@ -939,6 +941,9 @@ export const hu: Record<string, string> = {
   "upload.import": "Importálás",
   "upload.progressRunning": "Feltöltés: {settled} / {total} fájl",
   "upload.progressFinished": "Kész: {settled} / {total} fájl",
+  "upload.albumFailed": "{count} fotót nem sikerült hozzáadni a(z) {album} albumhoz",
+  "upload.albumSplit": "A(z) {album} több mint 10 000 fotót tartalmaz, ezért {moved} a(z) {part} albumba került",
+  "upload.albumStep": "Hozzáadás a(z) {album} albumhoz: {added} / {total}",
   "upload.doneCount": "{count} feltöltve",
   "upload.waitingCount": "{count} várakozik",
   "upload.showAll": "Összes mutatása",

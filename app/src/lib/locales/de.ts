@@ -499,6 +499,7 @@ export const de: Record<string, string> = {
 
   // Avatar
   "avatar.uploading": "Wird hochgeladen",
+  "avatar.addingToAlbum": "Wird zum Album hinzugefügt",
   "avatar.syncing": "Wird synchronisiert",
   "avatar.account": "Konto und Einstellungen",
   "avatar.showUploads": "Uploads anzeigen",
@@ -512,6 +513,7 @@ export const de: Record<string, string> = {
   "photos.indexing": "Indexierung {done}/{total}",
   "photos.uploadTitle": "Fotos hochladen oder einen Ordner als Album",
   "photos.uploadingProgress": "Wird hochgeladen {progress}",
+  "photos.addingToAlbumProgress": "Wird zum Album hinzugefügt {progress}",
   "photos.noMatches": "Keine Treffer",
   "photos.noPhotos": "Noch keine Fotos",
   "photos.noPhotosSub": "Deine Fotos erscheinen hier nach der Synchronisierung.",
@@ -942,6 +944,9 @@ export const de: Record<string, string> = {
   "upload.import": "Importieren",
   "upload.progressRunning": "{settled} von {total} Dateien werden hochgeladen",
   "upload.progressFinished": "Fertig: {settled} von {total} Dateien",
+  "upload.albumFailed": "{count} Fotos konnten nicht zu {album} hinzugefügt werden",
+  "upload.albumSplit": "{album} hat über 10.000 Fotos, daher kamen {moved} in {part}",
+  "upload.albumStep": "Wird zum Album {album} hinzugefügt: {added} von {total}",
   "upload.doneCount": "{count} hochgeladen",
   "upload.waitingCount": "{count} wartend",
   "upload.showAll": "Alle anzeigen",

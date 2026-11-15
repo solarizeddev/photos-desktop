@@ -500,6 +500,7 @@ export const cs: Record<string, string> = {
 
   // Avatar
   "avatar.uploading": "Nahrávání",
+  "avatar.addingToAlbum": "Přidávání do alba",
   "avatar.syncing": "Synchronizace",
   "avatar.account": "Účet a nastavení",
   "avatar.showUploads": "Zobrazit nahrávání",
@@ -513,6 +514,7 @@ export const cs: Record<string, string> = {
   "photos.indexing": "Indexování {done}/{total}",
   "photos.uploadTitle": "Nahrát fotky nebo složku jako album",
   "photos.uploadingProgress": "Nahrávání {progress}",
+  "photos.addingToAlbumProgress": "Přidávání do alba {progress}",
   "photos.noMatches": "Žádné shody",
   "photos.noPhotos": "Zatím žádné fotky",
   "photos.noPhotosSub": "Tvé fotky se zde objeví po synchronizaci.",
@@ -939,6 +941,9 @@ export const cs: Record<string, string> = {
   "upload.import": "Importovat",
   "upload.progressRunning": "Nahrávání {settled} z {total} souborů",
   "upload.progressFinished": "Hotovo: {settled} z {total} souborů",
+  "upload.albumFailed": "{count} fotek nešlo přidat do {album}",
+  "upload.albumSplit": "{album} má přes 10 000 fotek, takže {moved} šlo do {part}",
+  "upload.albumStep": "Přidávání do alba {album}: {added} z {total}",
   "upload.doneCount": "Nahráno: {count}",
   "upload.waitingCount": "Čeká: {count}",
   "upload.showAll": "Zobrazit vše",

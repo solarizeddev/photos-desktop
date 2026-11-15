@@ -498,6 +498,7 @@ export const nl: Record<string, string> = {
 
   // Avatar
   "avatar.uploading": "Uploaden",
+  "avatar.addingToAlbum": "Toevoegen aan album",
   "avatar.syncing": "Synchroniseren",
   "avatar.account": "Account en instellingen",
   "avatar.showUploads": "Uploads tonen",
@@ -511,6 +512,7 @@ export const nl: Record<string, string> = {
   "photos.indexing": "Indexeren {done}/{total}",
   "photos.uploadTitle": "Foto's uploaden, of een map als album",
   "photos.uploadingProgress": "Uploaden {progress}",
+  "photos.addingToAlbumProgress": "Toevoegen aan album {progress}",
   "photos.noMatches": "Geen overeenkomsten",
   "photos.noPhotos": "Nog geen foto's",
   "photos.noPhotosSub": "Je foto's verschijnen hier zodra ze gesynchroniseerd zijn.",
@@ -940,6 +942,9 @@ export const nl: Record<string, string> = {
   "upload.import": "Importeren",
   "upload.progressRunning": "{settled} van {total} bestanden uploaden",
   "upload.progressFinished": "Klaar: {settled} van {total} bestanden",
+  "upload.albumFailed": "{count} foto's konden niet aan {album} worden toegevoegd",
+  "upload.albumSplit": "{album} heeft meer dan 10.000 foto's, dus {moved} gingen naar {part}",
+  "upload.albumStep": "Toevoegen aan album {album}: {added} van {total}",
   "upload.doneCount": "{count} geüpload",
   "upload.waitingCount": "{count} wachtend",
   "upload.showAll": "Alles tonen",
