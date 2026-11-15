@@ -196,6 +196,9 @@ type View = "photos" | "albums" | "shared" | "trash";
  * caller that did not already claim to know. A confident "image" on a video is worse
  * than saying nothing, because it silences that fallback.
  */
+/** No photos, one copy for every empty answer. */
+const NO_UIDS: ReadonlySet<string> = new Set();
+
 function videoKind(item: TimelineItem): "video" | "image" | undefined {
   const known = isVideo(item.tags, cachedMediaType(item.uid));
   if (known === undefined) return undefined;
@@ -1376,9 +1379,21 @@ export function Photos({
     timelineSort.by !== "name";
   // Not while offline: the finder has no library to read then.
   // The count only once the timeline is in: a part of it would read as a library that changed.
-  const burstList = useBurstStacks(
-    settingsLoaded && settings.stackBursts && view === "photos" && !offline,
+  // Asked for to stack them, and for the Bursts filter, which goes by them as well as by the tag.
+  const { stacks: burstList, settled: burstsSettled } = useBurstStacks(
+    settingsLoaded && (settings.stackBursts || categories.has("burst")) && view === "photos" && !offline,
     loading ? undefined : items.length,
+  );
+  /**
+   * Every shot of a burst the finder found. The Burst tag only marks what a phone's camera app
+   * said was a burst when it uploaded, which most photos never carry.
+   */
+  const burstCategory = categories.has("burst");
+  const burstShots = useMemo(() => (burstCategory ? new Set(burstList.flat()) : NO_UIDS), [burstCategory, burstList]);
+  const inCategory = useCallback(
+    (cat: (typeof CATEGORIES)[number], it: TimelineItem) =>
+      (cat.key === "burst" && burstShots.has(it.uid)) || !!it.tags?.some((tg) => cat.tags.includes(tg)),
+    [burstShots],
   );
   // Turned off and on again, every stack is stacked again.
   const stackSetting = useRef(settings.stackBursts);
@@ -1413,7 +1428,7 @@ export function Photos({
     const selectedCats = CATEGORIES.filter((c) => categories.has(c.key));
     let base =
       selectedCats.length > 0
-        ? items.filter((it) => selectedCats.some((cat) => it.tags?.some((tg) => cat.tags.includes(tg))))
+        ? items.filter((it) => selectedCats.some((cat) => inCategory(cat, it)))
         : items;
 
     // Android parity: the album-hide only applies to the unfiltered timeline. A
@@ -1448,7 +1463,7 @@ export function Photos({
     }
     return ordered(base);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, allItems, categories, mediaType, query_, activeDate, namePins, searching, timelineSort, meta, settings.hideAlbumPhotos, albumMembers, uidFilter, namedUids, offlineAlbumItems, hidden]);
+  }, [items, allItems, categories, mediaType, query_, activeDate, namePins, searching, timelineSort, meta, settings.hideAlbumPhotos, albumMembers, uidFilter, namedUids, offlineAlbumItems, hidden, inCategory]);
 
   // The stacks, from the shots the timeline holds now; a shot under a stack goes from it.
   const bursts = useMemo(
@@ -1606,11 +1621,11 @@ export function Photos({
         !shownAlready.has(it.uid) &&
         (!activeDate || inDate(it.captureTime, activeDate)) &&
         namePins.every((pin) => pin.uids.has(it.uid)) &&
-        (selectedCats.length === 0 || selectedCats.some((cat) => it.tags?.some((tg) => cat.tags.includes(tg)))) &&
+        (selectedCats.length === 0 || selectedCats.some((cat) => inCategory(cat, it))) &&
         (mediaType === "all" ||
           (isVideo(it.tags, meta[it.uid]?.mediaType ?? cachedMediaType(it.uid)) ?? false) === (mediaType === "video")),
     );
-  }, [semanticHits, searching, uidFilter, filtered, activeDate, namePins, categories, mediaType, meta]);
+  }, [semanticHits, searching, uidFilter, filtered, activeDate, namePins, categories, mediaType, meta, inCategory]);
   /** What the grid shows, in its order: the photos found by their words, then by what they show.
    *  The viewer and the selection walk this. */
   const shown = useMemo(
@@ -3755,7 +3770,11 @@ export function Photos({
             {!loading && hidingKnown && shown.length === 0 && albumMatches.length === 0 && !error && (
               <div className="g-empty">
                 <p className="g-empty-title">
-                  {activeFilterCount > 0 || query_ ? t("photos.noMatches") : t("photos.noPhotos")}
+                  {burstCategory && !burstsSettled && !offline
+                    ? t("photos.findingBursts")
+                    : activeFilterCount > 0 || query_
+                      ? t("photos.noMatches")
+                      : t("photos.noPhotos")}
                 </p>
                 {!(activeFilterCount > 0 || query_) && (
                   <p className="g-empty-sub">{t("photos.noPhotosSub")}</p>

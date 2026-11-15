@@ -389,7 +389,8 @@ export class DuplicateFinder {
   start(): DuplicateStatus {
     if (!this.running && this.source) {
       const gen = ++this.generation;
-      this.status = { ...this.status, state: "scanning" };
+      // Counted afresh: the last scan's "all done" would read as this one being through.
+      this.status = { ...this.status, state: "scanning", done: 0, total: 0 };
       this.running = this.run(gen)
         .catch((e) => {
           if (gen !== this.generation) return;
