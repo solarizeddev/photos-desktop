@@ -1371,6 +1371,7 @@ export const en: Record<string, string> = {
   "duplicates.ignoredHint": "These groups are left out of the list. Stop ignoring one to bring it back.",
   "duplicates.pickHint": "Click the copies to move to the trash; double-click to see them full size. One copy of every group stays.",
   "duplicates.scanning": "Looking for similar photos: {done} of {total}",
+  "duplicates.moving": "Moving to the trash: {done} of {total}",
   "duplicates.reading": "Reading your library",
   "duplicates.failed": "The search stopped before it was through.",
   "duplicates.retry": "Try again",

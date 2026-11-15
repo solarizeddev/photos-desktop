@@ -1314,6 +1314,7 @@ export const pl: Record<string, string> = {
   "duplicates.ignoredHint": "Te grupy są pominięte na liście. Przestań ignorować grupę, aby ją przywrócić.",
   "duplicates.pickHint": "Kliknij kopie do przeniesienia do kosza; kliknij dwukrotnie, aby zobaczyć je w pełnym rozmiarze. Z każdej grupy zostaje jedna kopia.",
   "duplicates.scanning": "Szukanie podobnych zdjęć: {done} z {total}",
+  "duplicates.moving": "Przenoszenie do kosza: {done} z {total}",
   "duplicates.reading": "Odczytywanie biblioteki",
   "duplicates.failed": "Wyszukiwanie zatrzymało się przed końcem.",
   "duplicates.retry": "Spróbuj ponownie",

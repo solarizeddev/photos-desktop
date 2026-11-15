@@ -45,7 +45,7 @@ const TABS: Tab[] = ["identical", "same", "burst", "similar", "ignored"];
  * About how many photos one call sends to the trash, so a large clean-up never runs into a
  * call's time limit (the SDK trashes ten per request).
  */
-const TRASH_CHUNK = 500;
+const TRASH_CHUNK = 200;
 /** The copy a group keeps when its extras are marked: the preferred one, else the oldest. */
 const keeperOf = (g: Group): number => g.keep ?? 0;
 const allBut = (g: Group): Set<string> => new Set(g.uids.filter((_, i) => i !== keeperOf(g)));
@@ -53,6 +53,15 @@ const allBut = (g: Group): Set<string> => new Set(g.uids.filter((_, i) => i !== 
 /** Groups drawn at first, and added with each "show more". */
 const PAGE = 40;
 const META_BATCH = 120;
+
+/** How far a move to the trash has got. Kept outside the page, which may be left while it runs. */
+type Moving = { done: number; total: number } | null;
+let keptMoving: Moving = null;
+const movingListeners = new Set<(m: Moving) => void>();
+function publishMoving(m: Moving) {
+  keptMoving = m;
+  movingListeners.forEach((l) => l(m));
+}
 
 // The choices outlive the page, so a look at a group in the viewer and back keeps them.
 let keptMarks: Marks = new Map();
@@ -81,6 +90,16 @@ export function Duplicates({
   const [meta, setMeta] = useState<Record<string, Meta>>({});
   const [confirm, setConfirm] = useState<{ whole: Group | null } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [moving, setMoving] = useState<Moving>(keptMoving);
+  useEffect(() => {
+    movingListeners.add(setMoving);
+    setMoving(keptMoving);
+    return () => {
+      movingListeners.delete(setMoving);
+    };
+  }, []);
+  // A move started before the page was left and opened again still holds the buttons.
+  const working = busy || moving !== null;
   const [toast, setToast] = useState("");
 
   const setTab = (next: Tab) => {
@@ -257,13 +276,20 @@ export function Duplicates({
         if (call.length) calls.push({ groups: call, whole: [] });
       }
       const r = { trashed: [] as string[], failed: 0, skipped: 0 };
+      const planned = (c: (typeof calls)[number]) =>
+        c.groups.reduce((m, g) => m + g.uids.length - g.keep.length, 0) + c.whole.reduce((m, w) => m + w.length, 0);
+      const total = calls.reduce((n, c) => n + planned(c), 0);
+      let done = 0;
+      publishMoving({ done, total });
       for (const params of calls) {
         const part = await rpc<{ trashed: string[]; failed: number; skipped: number }>("duplicatesTrash", params);
         onTrashed(part.trashed);
         r.trashed.push(...part.trashed);
         r.failed += part.failed;
         r.skipped += part.skipped;
-        if (calls.length > 1) setToast(t("trash.moved", { count: r.trashed.length }));
+        // By what each call was planned to take: one it skipped (changed meanwhile) is done with too.
+        done += planned(params);
+        publishMoving({ done, total });
       }
       const next: Marks = new Map(marks);
       if (whole) next.delete(whole.key);
@@ -279,6 +305,7 @@ export function Duplicates({
     } catch (e) {
       setToast(String(e));
     } finally {
+      publishMoving(null);
       // Also after a call that failed part way: the calls before it did trash their photos.
       const s = await rpc<Status>("duplicatesStatus").catch(() => null);
       if (s) {
@@ -319,7 +346,19 @@ export function Duplicates({
           ))}
         </div>
         <div className="dp-status" aria-live="polite">
-          {scanning && status ? (
+          {moving ? (
+            <>
+              <span>
+                {t("duplicates.moving", {
+                  done: moving.done.toLocaleString(locale),
+                  total: moving.total.toLocaleString(locale),
+                })}
+              </span>
+              <span className="dp-bar">
+                <span style={{ width: `${moving.total ? Math.round((moving.done / moving.total) * 100) : 0}%` }} />
+              </span>
+            </>
+          ) : scanning && status ? (
             <>
               <span>
                 {status.total > 0
@@ -345,7 +384,7 @@ export function Duplicates({
           <p className="dp-hint">
             {t("duplicates.pickHint")}
             {canMarkEvery && list.length > 1 && (
-              <button className="g-chip dp-markall" disabled={busy} onClick={markEvery}>
+              <button className="g-chip dp-markall" disabled={working} onClick={markEvery}>
                 {t("duplicates.markEvery", { count: list.length.toLocaleString(locale) })}
               </button>
             )}
@@ -385,7 +424,7 @@ export function Duplicates({
                       <button className="g-chip" onClick={() => void ignore(group, true)}>
                         {t("duplicates.ignore")}
                       </button>
-                      <button className="g-chip danger" disabled={busy} onClick={() => setConfirm({ whole: group })}>
+                      <button className="g-chip danger" disabled={working} onClick={() => setConfirm({ whole: group })}>
                         {t("duplicates.deleteGroup")}
                       </button>
                     </>
@@ -448,7 +487,7 @@ export function Duplicates({
       {tab !== "ignored" && (
         <SelectionBar
           count={markedCount}
-          busy={busy}
+          busy={working}
           onCancel={() => setMarks(new Map())}
           onTrash={() => setConfirm({ whole: null })}
         />

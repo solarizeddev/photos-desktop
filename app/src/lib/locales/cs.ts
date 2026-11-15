@@ -1310,6 +1310,7 @@ export const cs: Record<string, string> = {
   "duplicates.ignoredHint": "Tyto skupiny se v seznamu nezobrazují. Zrušte ignorování, chcete-li skupinu vrátit.",
   "duplicates.pickHint": "Klikněte na kopie, které mají jít do koše; dvojklikem je uvidíte v plné velikosti. Z každé skupiny zůstane jedna kopie.",
   "duplicates.scanning": "Hledání podobných fotek: {done} z {total}",
+  "duplicates.moving": "Přesouvání do koše: {done} z {total}",
   "duplicates.reading": "Načítání knihovny",
   "duplicates.failed": "Hledání se zastavilo dřív, než skončilo.",
   "duplicates.retry": "Zkusit znovu",

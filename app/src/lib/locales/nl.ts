@@ -1310,6 +1310,7 @@ export const nl: Record<string, string> = {
   "duplicates.ignoredHint": "Deze groepen staan niet in de lijst. Stop met negeren om er een terug te halen.",
   "duplicates.pickHint": "Klik op de kopieën die naar de prullenbak moeten; dubbelklik om ze op volle grootte te zien. Van elke groep blijft één kopie.",
   "duplicates.scanning": "Zoeken naar vergelijkbare foto’s: {done} van {total}",
+  "duplicates.moving": "Wordt naar de prullenbak verplaatst: {done} van {total}",
   "duplicates.reading": "Je bibliotheek wordt gelezen",
   "duplicates.failed": "Het zoeken is gestopt voordat het klaar was.",
   "duplicates.retry": "Opnieuw proberen",

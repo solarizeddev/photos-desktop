@@ -1312,6 +1312,7 @@ export const sk: Record<string, string> = {
   "duplicates.ignoredHint": "Tieto skupiny sa v zozname nezobrazujú. Zrušte ignorovanie, ak chcete skupinu vrátiť.",
   "duplicates.pickHint": "Kliknite na kópie, ktoré majú ísť do koša; dvojklikom ich uvidíte v plnej veľkosti. Z každej skupiny zostane jedna kópia.",
   "duplicates.scanning": "Hľadanie podobných fotiek: {done} z {total}",
+  "duplicates.moving": "Presúvanie do koša: {done} z {total}",
   "duplicates.reading": "Načítava sa knižnica",
   "duplicates.failed": "Hľadanie sa zastavilo skôr, ako skončilo.",
   "duplicates.retry": "Skúsiť znova",
