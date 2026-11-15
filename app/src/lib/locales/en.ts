@@ -990,6 +990,8 @@ export const en: Record<string, string> = {
   "importReview.why.same_file": "The same file is in your library",
   "importReview.why.same_time_look": "A photo taken at the same moment that looks the same is in your library",
   "importReview.why.same_time_video": "A video taken at the same moment is in your library",
+  "importReview.why.same_size_video": "A video of the very same size and length is in your library",
+  "importReview.why.smaller_in_library": "Your library has a smaller copy of this video. This file may be the original: include it to upload it",
   "importReview.why.same_time": "A photo taken in the same second is in your library",
   "importReview.why.live_video": "Its video is in your library",
   "importReview.why.same_in_export": "The same file is in this export more than once: it goes up once, into each album",

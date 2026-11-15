@@ -932,6 +932,8 @@ export const pl: Record<string, string> = {
   "importReview.why.same_file": "Ten sam plik jest już w bibliotece",
   "importReview.why.same_time_look": "W bibliotece jest zdjęcie z tej samej chwili, które wygląda tak samo",
   "importReview.why.same_time_video": "W bibliotece jest film z tej samej chwili",
+  "importReview.why.same_size_video": "W bibliotece jest film o dokładnie tym samym rozmiarze i długości",
+  "importReview.why.smaller_in_library": "W bibliotece jest mniejsza kopia tego filmu. Ten plik może być oryginałem: dołącz go, aby go przesłać",
   "importReview.why.same_time": "W bibliotece jest zdjęcie z tej samej sekundy",
   "importReview.why.live_video": "Jego film jest już w bibliotece",
   "importReview.why.same_in_export": "Ten sam plik jest w tym eksporcie więcej niż raz: zostanie przesłany raz, do każdego albumu",

@@ -930,6 +930,8 @@ export const it: Record<string, string> = {
   "importReview.why.same_file": "Lo stesso file è già nella tua libreria",
   "importReview.why.same_time_look": "Nella tua libreria c’è una foto dello stesso momento dall’aspetto uguale",
   "importReview.why.same_time_video": "Nella tua libreria c’è un video dello stesso momento",
+  "importReview.why.same_size_video": "Nella tua libreria c’è un video con le stesse dimensioni e la stessa durata",
+  "importReview.why.smaller_in_library": "La tua libreria ha una copia più piccola di questo video. Questo file potrebbe essere l’originale: includilo per caricarlo",
   "importReview.why.same_time": "Nella tua libreria c’è una foto dello stesso secondo",
   "importReview.why.live_video": "Il suo video è già nella tua libreria",
   "importReview.why.same_in_export": "Lo stesso file è più volte in questa esportazione: viene caricato una volta, in ogni album",

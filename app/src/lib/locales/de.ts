@@ -932,6 +932,8 @@ export const de: Record<string, string> = {
   "importReview.why.same_file": "Dieselbe Datei ist schon in deiner Mediathek",
   "importReview.why.same_time_look": "In deiner Mediathek ist ein gleich aussehendes Foto aus demselben Moment",
   "importReview.why.same_time_video": "In deiner Mediathek ist ein Video aus demselben Moment",
+  "importReview.why.same_size_video": "In deiner Mediathek ist ein Video mit genau derselben Größe und Länge",
+  "importReview.why.smaller_in_library": "Deine Mediathek hat eine kleinere Kopie dieses Videos. Diese Datei ist vielleicht das Original: nimm sie auf, um sie hochzuladen",
   "importReview.why.same_time": "In deiner Mediathek ist ein Foto aus derselben Sekunde",
   "importReview.why.live_video": "Sein Video ist schon in deiner Mediathek",
   "importReview.why.same_in_export": "Dieselbe Datei ist mehrmals in diesem Export: Sie wird einmal hochgeladen, in jedes Album",

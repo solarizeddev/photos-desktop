@@ -929,6 +929,8 @@ export const cs: Record<string, string> = {
   "importReview.why.same_file": "Stejný soubor už je ve vaší knihovně",
   "importReview.why.same_time_look": "Ve vaší knihovně je fotka ze stejného okamžiku, která vypadá stejně",
   "importReview.why.same_time_video": "Ve vaší knihovně je video ze stejného okamžiku",
+  "importReview.why.same_size_video": "Ve vaší knihovně je video přesně stejné velikosti a délky",
+  "importReview.why.smaller_in_library": "Vaše knihovna má menší kopii tohoto videa. Tento soubor může být originál: zahrňte ho, aby se nahrál",
   "importReview.why.same_time": "Ve vaší knihovně je fotka ze stejné sekundy",
   "importReview.why.live_video": "Jeho video už je ve vaší knihovně",
   "importReview.why.same_in_export": "Stejný soubor je v tomto exportu víckrát: nahraje se jednou, do každého alba",

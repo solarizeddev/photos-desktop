@@ -77,6 +77,8 @@ export type ReviewReason =
   | "same_file"
   | "same_time_look"
   | "same_time_video"
+  | "same_size_video"
+  | "smaller_in_library"
   | "same_time"
   | "live_video"
   | "same_in_export"

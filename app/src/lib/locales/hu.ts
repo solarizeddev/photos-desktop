@@ -929,6 +929,8 @@ export const hu: Record<string, string> = {
   "importReview.why.same_file": "Ugyanez a fájl már a könyvtáradban van",
   "importReview.why.same_time_look": "A könyvtáradban van egy ugyanolyan fotó ugyanabból a pillanatból",
   "importReview.why.same_time_video": "A könyvtáradban van egy videó ugyanabból a pillanatból",
+  "importReview.why.same_size_video": "A könyvtáradban van egy pontosan ugyanakkora és ugyanolyan hosszú videó",
+  "importReview.why.smaller_in_library": "A könyvtáradban ennek a videónak egy kisebb példánya van. Ez a fájl lehet az eredeti: vedd fel, hogy feltöltsd",
   "importReview.why.same_time": "A könyvtáradban van egy fotó ugyanabból a másodpercből",
   "importReview.why.live_video": "A videója már a könyvtáradban van",
   "importReview.why.same_in_export": "Ugyanez a fájl többször is szerepel ebben az exportban: egyszer töltődik fel, minden albumba",

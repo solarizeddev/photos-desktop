@@ -29,19 +29,25 @@
 //    content hash, against the hashes the timeline listing hands out for every photo;
 //  - the same photo in other bytes: a library photo taken in the same second (or a whole number
 //    of quarter hours away, for a time zone read differently) that looks the same, by the
-//    fingerprint the duplicate finder uses; for a video, one taken in the same second. Such a
-//    match is only "probably there": the review shows it, and leaves it out unless asked.
+//    fingerprint the duplicate finder uses. For a video, as the duplicate finder groups them: one
+//    of the very same size and length whatever its date (a header rewritten), or one starting
+//    the same second or whole hours off (UTC against local time) of the same length; a length
+//    that differs is another clip. Such a match is only "probably there": the review shows it,
+//    and leaves it out unless asked.
 
 import { createHmac } from "node:crypto";
 
 import { isUsable, matches, type Fingerprint } from "./pdq.ts";
 
-export type LibraryPhoto = { uid: string; captureTime: number; video: boolean };
+/** A library photo; `size` and `durationMs` where they are known, for videos. */
+export type LibraryPhoto = { uid: string; captureTime: number; video: boolean; size?: number | null; durationMs?: number | null };
 
 export type MatchWhy =
   | "same_file"
   | "same_time_look"
   | "same_time_video"
+  | "same_size_video"
+  | "smaller_in_library"
   | "same_time"
   | "live_video"
   | "same_in_export"
@@ -57,6 +63,21 @@ const SLACK_S = 1;
 /** A time zone read differently moves a capture time by whole quarter hours, up to 14 hours. */
 const ZONE_STEP_S = 900;
 const ZONE_STEPS = 56;
+/** Of a video, only whole hours: a camera writes UTC where another app wrote local time. */
+const VIDEO_HOUR_STEPS = 14;
+/** Videos of one size and length beyond this many are a camera's padded segments, not copies. */
+const SIZE_TWINS_MAX = 4;
+/** How far the lengths of two files of one video may differ: a re-encode trims a frame or two. */
+const lengthSlack = (a: number, b: number) => Math.min(1_500, Math.max(200, 0.02 * Math.max(a, b)));
+/**
+ * Of the same second, lengths further apart than this are another clip. Looser than the slack:
+ * the export's length and the library's were read by different programs, which may round.
+ */
+const OTHER_CLIP_MS = 1_500;
+/** Whole hours off, the lengths must agree this closely, as the duplicate finder asks. */
+const SHIFTED_SLACK_MS = 200;
+/** An export file this much larger than its library copy is the better one: the library's is lighter. */
+const LARGER_BY = 1.1;
 
 /**
  * The photo root's hash key, which Proton keys names and content hashes with. The SDK keeps it
@@ -82,6 +103,9 @@ export function contentHashOf(sha1: string, hashKey: Uint8Array): string {
 export class LibraryIndex {
   private readonly bySecond = new Map<number, LibraryPhoto[]>();
   private readonly byContent = new Map<string, string>();
+  private readonly bySizeLength = new Map<string, LibraryPhoto[]>();
+  /** Series looked up so far, by uid. Series is by length alone: it errs towards uploading. */
+  private readonly seriesOf = new Map<string, boolean>();
 
   constructor(
     photos: LibraryPhoto[],
@@ -95,6 +119,12 @@ export class LibraryIndex {
       const list = this.bySecond.get(s);
       if (list) list.push(p);
       else this.bySecond.set(s, [p]);
+      if (p.video && p.size && p.durationMs) {
+        const key = `${p.size}:${p.durationMs}`;
+        const twins = this.bySizeLength.get(key);
+        if (twins) twins.push(p);
+        else this.bySizeLength.set(key, [p]);
+      }
     }
     const listed = new Set(photos.map((p) => p.uid));
     for (const [uid, hash] of contentHashes) {
@@ -124,10 +154,11 @@ export class LibraryIndex {
   takenAt(ms: number, video: boolean): { photo: LibraryPhoto; shifted: boolean }[] {
     const at = Math.round(ms / 1000);
     const out: { photo: LibraryPhoto; shifted: boolean }[] = [];
-    const steps = video ? 0 : ZONE_STEPS;
+    const steps = video ? VIDEO_HOUR_STEPS : ZONE_STEPS;
+    const step = video ? 4 * ZONE_STEP_S : ZONE_STEP_S;
     for (let k = 0; k <= steps; k++) {
       for (const sign of k === 0 ? [1] : [1, -1]) {
-        const centre = at + sign * k * ZONE_STEP_S;
+        const centre = at + sign * k * step;
         for (let d = -SLACK_S; d <= SLACK_S; d++) {
           for (const photo of this.bySecond.get(centre + d) ?? []) {
             if (photo.video === video) out.push({ photo, shifted: k !== 0 });
@@ -136,6 +167,37 @@ export class LibraryIndex {
       }
     }
     return out;
+  }
+
+  /** Library videos of exactly this size and length, unless so many share it they are a camera's segments. */
+  sameSizeLength(size: number, durationMs: number): LibraryPhoto[] {
+    const twins = this.bySizeLength.get(`${size}:${durationMs}`) ?? [];
+    return twins.length > SIZE_TWINS_MAX ? [] : twins;
+  }
+
+  /**
+   * Whether a library video is one of a series: another video of about its length within half
+   * an hour (a dashcam's segments, a timelapse's clips). A match whole hours off is no proof then.
+   */
+  inVideoSeries(photo: LibraryPhoto): boolean {
+    const length = photo.durationMs;
+    if (!length) return false;
+    const known = this.seriesOf.get(photo.uid);
+    if (known !== undefined) return known;
+    const at = Math.round(photo.captureTime / 1000);
+    const found = (() => {
+    for (let d = -1800; d <= 1800; d++) {
+      // A copy dated the same moment (a lighter one beside its original) is no series.
+      if (Math.abs(d) <= 2) continue;
+      for (const other of this.bySecond.get(at + d) ?? []) {
+        if (other.uid === photo.uid || !other.video || !other.durationMs) continue;
+        if (Math.abs(other.durationMs - length) <= lengthSlack(other.durationMs, length)) return true;
+      }
+    }
+    return false;
+    })();
+    this.seriesOf.set(photo.uid, found);
+    return found;
   }
 
   hidden(uid: string): boolean {
@@ -153,6 +215,16 @@ export type ExportFile = {
   /** When it was taken, from the export's own record or the file's EXIF; null when unknown. */
   takenMs: number | null;
   video: boolean;
+  /** Its size in bytes and, for a video, its length, where known. */
+  size?: number | null;
+  durationMs?: number | null;
+  /**
+   * Of a video: whether the export holds other videos of about its length within half an hour
+   * (a series, so a match hours off is no proof), and whether more than a few share its very
+   * size and length (a camera's padded segments, so a twin is no proof either).
+   */
+  inSeries?: boolean;
+  crowded?: boolean;
   /** Its fingerprint, made only when asked for. */
   print: () => Promise<Fingerprint | null>;
 };
@@ -166,13 +238,10 @@ export type ExportFile = {
 export async function matchFile(index: LibraryIndex, file: ExportFile, claimed: ReadonlySet<string> = new Set()): Promise<Match> {
   const same = index.sameFile(file.sha1);
   if (same) return { verdict: "already", uid: same, why: "same_file", hidden: index.hidden(same) };
+  if (file.video) return matchVideo(index, file, claimed);
   if (file.takenMs === null || !Number.isFinite(file.takenMs)) return { verdict: "new" };
   const near = index.takenAt(file.takenMs, file.video).filter((n) => !claimed.has(n.photo.uid));
   if (near.length === 0) return { verdict: "new" };
-  if (file.video) {
-    const uid = near[0].photo.uid;
-    return { verdict: "probable", uid, why: "same_time_video", hidden: index.hidden(uid) };
-  }
   const own = await file.print().catch(() => null);
   if (own && isUsable(own)) {
     let unseen: string | null = null;
@@ -193,4 +262,40 @@ export async function matchFile(index: LibraryIndex, file: ExportFile, claimed: 
   const exact = near.find((n) => !n.shifted);
   if (!exact) return { verdict: "new" };
   return { verdict: "probable", uid: exact.photo.uid, why: "same_time", hidden: index.hidden(exact.photo.uid) };
+}
+
+/**
+ * A video, by the rules the duplicate finder groups videos by. The very same size and length
+ * first, whatever the dates. Then one starting the same second, or whole hours off when both
+ * lengths say it is one video; of the same second with a length unknown on either side, the
+ * time alone holds it back. A library copy much smaller than the file is told apart, so the
+ * review can say the export holds the better one.
+ */
+function matchVideo(index: LibraryIndex, file: ExportFile, claimed: ReadonlySet<string>): Match {
+  const length = file.durationMs ?? null;
+  const probable = (photo: LibraryPhoto, why: MatchWhy): Match => {
+    const smaller = !!file.size && !!photo.size && file.size > photo.size * LARGER_BY;
+    return { verdict: "probable", uid: photo.uid, why: smaller ? "smaller_in_library" : why, hidden: index.hidden(photo.uid) };
+  };
+  if (file.size && length && !file.crowded) {
+    const twin = index.sameSizeLength(file.size, length).find((p) => !claimed.has(p.uid) && !index.inVideoSeries(p));
+    if (twin) return probable(twin, "same_size_video");
+  }
+  if (file.takenMs === null || file.takenMs === undefined || !Number.isFinite(file.takenMs)) return { verdict: "new" };
+  // Those whose length agrees first, then one of the same second whose length is not known.
+  let unknownLength: LibraryPhoto | null = null;
+  for (const { photo, shifted } of index.takenAt(file.takenMs, true)) {
+    if (claimed.has(photo.uid)) continue;
+    const theirs = photo.durationMs ?? null;
+    if (length && theirs) {
+      const apart = Math.abs(length - theirs);
+      if (!shifted && apart <= OTHER_CLIP_MS) return probable(photo, "same_time_video");
+      if (shifted && apart <= SHIFTED_SLACK_MS && !file.inSeries && !index.inVideoSeries(photo)) {
+        return probable(photo, "same_time_video");
+      }
+    } else if (!shifted && unknownLength === null) {
+      unknownLength = photo;
+    }
+  }
+  return unknownLength ? probable(unknownLength, "same_time_video") : { verdict: "new" };
 }
