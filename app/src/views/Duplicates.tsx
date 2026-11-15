@@ -32,13 +32,19 @@ import { rpc } from "../lib/rpc";
 import { canMark, picksFrom, toggleMark, type Marks } from "../lib/duplicateMarks";
 import "../styles/Duplicates.css";
 
-type Kind = "identical" | "similar";
+type Kind = "identical" | "same" | "burst" | "similar";
 type Group = { key: string; kind: Kind; uids: string[]; times: number[] };
 /** `ready` is false until the finder has worked the groups out once. */
-type Groups = { identical: Group[]; similar: Group[]; ignored: Group[]; ready: boolean };
+type Groups = { identical: Group[]; same: Group[]; burst: Group[]; similar: Group[]; ignored: Group[]; ready: boolean };
 type Status = { state: "idle" | "scanning" | "done" | "failed"; done: number; total: number; version: number };
 type Meta = { name: string; size: number | null; mediaType: string | null };
-type Tab = "identical" | "similar" | "ignored";
+type Tab = "identical" | "same" | "burst" | "similar" | "ignored";
+const TABS: Tab[] = ["identical", "same", "burst", "similar", "ignored"];
+/**
+ * About how many photos one call sends to the trash, so a large clean-up never runs into a
+ * call's time limit (the SDK trashes ten per request).
+ */
+const TRASH_CHUNK = 500;
 
 /** Groups drawn at first, and added with each "show more". */
 const PAGE = 40;
@@ -116,7 +122,9 @@ export function Duplicates({
   // Marks of photos no longer in any group fall away.
   useEffect(() => {
     if (!groups?.ready) return;
-    const present = new Map([...groups.identical, ...groups.similar].map((g) => [g.key, new Set(g.uids)]));
+    const present = new Map(
+      [...groups.identical, ...groups.same, ...groups.burst, ...groups.similar].map((g) => [g.key, new Set(g.uids)]),
+    );
     let changed = false;
     const next: Marks = new Map();
     for (const [key, set] of marks) {
@@ -168,12 +176,25 @@ export function Duplicates({
     return () => clearTimeout(id);
   }, [toast]);
 
-  const allGroups = useMemo(() => (groups ? [...groups.identical, ...groups.similar] : []), [groups]);
-  const markedCount = [...marks.values()].reduce((n, s) => n + s.size, 0);
-  const markedBytes = [...marks.values()].reduce(
-    (n, s) => n + [...s].reduce((m, u) => m + (meta[u]?.size ?? 0), 0),
-    0,
+  const allGroups = useMemo(
+    () => (groups ? [...groups.identical, ...groups.same, ...groups.burst, ...groups.similar] : []),
+    [groups],
   );
+  // Marked across every group, most were never on screen and their sizes are not known.
+  const { markedCount, markedBytes, sizesKnown } = useMemo(() => {
+    let count = 0;
+    let bytes = 0;
+    let known = true;
+    for (const set of marks.values()) {
+      for (const u of set) {
+        count++;
+        const size = meta[u]?.size;
+        if (size == null) known = false;
+        else bytes += size;
+      }
+    }
+    return { markedCount: count, markedBytes: bytes, sizesKnown: known };
+  }, [marks, meta]);
 
   function onTile(group: Group, uid: string) {
     if (tab === "ignored") return;
@@ -187,6 +208,13 @@ export function Duplicates({
   function allButFirst(group: Group) {
     const next: Marks = new Map(marks);
     next.set(group.key, new Set(group.uids.slice(1)));
+    setMarks(next);
+  }
+
+  /** Marks the extras of every group in the tab, each keeping its oldest copy. */
+  function markEvery() {
+    const next: Marks = new Map(marks);
+    for (const group of list) next.set(group.key, new Set(group.uids.slice(1)));
     setMarks(next);
   }
 
@@ -206,11 +234,33 @@ export function Duplicates({
     setConfirm(null);
     setBusy(true);
     try {
-      const params = whole
-        ? { groups: [], whole: [whole.uids] }
-        : { groups: picksFrom(marks, allGroups), whole: [] };
-      const r = await rpc<{ trashed: string[]; failed: number; skipped: number }>("duplicatesTrash", params);
-      onTrashed(r.trashed);
+      // Whole groups per call, about TRASH_CHUNK photos each, every call's photos leaving the
+      // timeline as it is done.
+      const calls: { groups: { uids: string[]; keep: string[] }[]; whole: string[][] }[] = [];
+      if (whole) calls.push({ groups: [], whole: [whole.uids] });
+      else {
+        let call: { uids: string[]; keep: string[] }[] = [];
+        let size = 0;
+        for (const pick of picksFrom(marks, allGroups)) {
+          call.push(pick);
+          size += pick.uids.length - pick.keep.length;
+          if (size >= TRASH_CHUNK) {
+            calls.push({ groups: call, whole: [] });
+            call = [];
+            size = 0;
+          }
+        }
+        if (call.length) calls.push({ groups: call, whole: [] });
+      }
+      const r = { trashed: [] as string[], failed: 0, skipped: 0 };
+      for (const params of calls) {
+        const part = await rpc<{ trashed: string[]; failed: number; skipped: number }>("duplicatesTrash", params);
+        onTrashed(part.trashed);
+        r.trashed.push(...part.trashed);
+        r.failed += part.failed;
+        r.skipped += part.skipped;
+        if (calls.length > 1) setToast(t("trash.moved", { count: r.trashed.length }));
+      }
       const next: Marks = new Map(marks);
       if (whole) next.delete(whole.key);
       else next.clear();
@@ -222,31 +272,36 @@ export function Duplicates({
             ? t("duplicates.changed")
             : t("trash.moved", { count: r.trashed.length }),
       );
+    } catch (e) {
+      setToast(String(e));
+    } finally {
+      // Also after a call that failed part way: the calls before it did trash their photos.
       const s = await rpc<Status>("duplicatesStatus").catch(() => null);
       if (s) {
         setStatus(s);
         await loadGroups(s.version);
       }
-    } catch (e) {
-      setToast(String(e));
-    } finally {
       setBusy(false);
     }
   }
 
   const scanning = status?.state === "scanning";
-  const counts = {
+  const counts: Record<Tab, number> = {
     identical: groups?.identical.length ?? 0,
+    same: groups?.same.length ?? 0,
+    burst: groups?.burst.length ?? 0,
     similar: groups?.similar.length ?? 0,
     ignored: groups?.ignored.length ?? 0,
   };
-  const hint = tab === "identical" ? "duplicates.identicalHint" : tab === "similar" ? "duplicates.similarHint" : "duplicates.ignoredHint";
+  const hint = `duplicates.${tab}Hint` as const;
+  // Similar photos may differ on purpose, so they are not marked all at once.
+  const canMarkEvery = tab === "identical" || tab === "same" || tab === "burst";
 
   return (
     <div className="dp-page">
       <div className="dp-head">
         <div className="dp-tabs" role="tablist">
-          {(["identical", "similar", "ignored"] as Tab[]).map((key) => (
+          {TABS.map((key) => (
             <button
               key={key}
               role="tab"
@@ -282,7 +337,16 @@ export function Duplicates({
             <span>{t(hint)}</span>
           )}
         </div>
-        {tab !== "ignored" && list.length > 0 && <p className="dp-hint">{t("duplicates.pickHint")}</p>}
+        {tab !== "ignored" && list.length > 0 && (
+          <p className="dp-hint">
+            {t("duplicates.pickHint")}
+            {canMarkEvery && list.length > 1 && (
+              <button className="g-chip dp-markall" disabled={busy} onClick={markEvery}>
+                {t("duplicates.markEvery", { count: list.length.toLocaleString(locale) })}
+              </button>
+            )}
+          </p>
+        )}
       </div>
 
       {!groups?.ready ? (
@@ -305,7 +369,7 @@ export function Duplicates({
               <section key={group.key} className="dp-card">
                 <header className="dp-cardhead">
                   <span className="dp-cardtitle">
-                    {t(group.kind === "identical" ? "duplicates.identicalGroup" : "duplicates.similarGroup")}
+                    {t(`duplicates.${group.kind}Group` as const)}
                   </span>
                   <span className="dp-cardcount">{group.uids.length}</span>
                   <div className="g-spacer" />
@@ -391,7 +455,12 @@ export function Duplicates({
           message={
             confirm.whole
               ? t("duplicates.confirmWholeMessage")
-              : t("duplicates.confirmMessage", { count: markedCount, size: formatBytes(markedBytes) })
+              : sizesKnown
+                ? t("duplicates.confirmMessage", { count: markedCount, size: formatBytes(markedBytes) })
+                : t("duplicates.confirmMessageCount", {
+                    count: markedCount.toLocaleString(locale),
+                    groups: marks.size.toLocaleString(locale),
+                  })
           }
           confirmLabel={t("selection.trash")}
           danger

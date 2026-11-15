@@ -1728,7 +1728,8 @@ export class ProtonSession {
       // As on the phone, a hidden photo is in no group.
       list: async () => {
         const hidden = hiddenStore.hiddenPhotoTest();
-        return (await this.getTimeline()).filter((item) => !hidden(item.uid)).map((item) => ({ uid: item.uid, captureTime: item.captureTime }));
+        return (await this.getTimeline()).filter((item) => !hidden(item.uid))
+          .map((item) => ({ uid: item.uid, captureTime: item.captureTime, video: item.tags.includes(PhotoTag.Videos) }));
       },
       thumbnails: (uids) => this.duplicateThumbnails(photos, uids),
     });

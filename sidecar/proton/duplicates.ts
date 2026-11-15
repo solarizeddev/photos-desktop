@@ -34,13 +34,35 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { ALGO_VERSION, COLOR_BYTES, HASH_WORDS, clusterSimilarAsync, fingerprintFromPixels, isUsable, type Fingerprint } from "./pdq.ts";
+import {
+  ALGO_VERSION,
+  COLOR_BYTES,
+  HASH_WORDS,
+  clusterSimilarAsync,
+  colorDistance,
+  distance,
+  fingerprintFromPixels,
+  isUsable,
+  matches,
+  type Fingerprint,
+} from "./pdq.ts";
 import { DUPLICATES_FILE, readSealedOrDiscard, storeDir, writeSealedAtomic } from "./store.ts";
 
-export type DuplicateKind = "identical" | "similar";
+/**
+ * identical: the same file. same: the same picture taken at the same moment, in another file (an
+ * export, a copy with its metadata stripped). burst: shots seconds apart of one scene. similar:
+ * the rest that look alike.
+ */
+export type DuplicateKind = "identical" | "same" | "burst" | "similar";
 /** A group's copies, oldest first, with each one's capture time in milliseconds. */
 export type DuplicateGroup = { key: string; kind: DuplicateKind; uids: string[]; times: number[] };
-export type DuplicateGroups = { identical: DuplicateGroup[]; similar: DuplicateGroup[]; ignored: DuplicateGroup[] };
+export type DuplicateGroups = {
+  identical: DuplicateGroup[];
+  same: DuplicateGroup[];
+  burst: DuplicateGroup[];
+  similar: DuplicateGroup[];
+  ignored: DuplicateGroup[];
+};
 /** The groups to show, and whether they have been worked out yet. */
 export type ShownGroups = DuplicateGroups & { ready: boolean };
 
@@ -55,8 +77,11 @@ export type DuplicateStatus = {
 };
 
 export type DuplicateSource = {
-  /** The whole library, with each photo's capture time; reading it refreshes the content hashes. */
-  list(): Promise<{ uid: string; captureTime: number }[]>;
+  /**
+   * The whole library, with each photo's capture time and whether it is a video; reading it
+   * refreshes the content hashes.
+   */
+  list(): Promise<{ uid: string; captureTime: number; video?: boolean }[]>;
   /** The small thumbnails of these photos; null for one that has none. A photo left out is asked for again. */
   thumbnails(uids: string[]): AsyncIterable<{ uid: string; bytes: Buffer | null }>;
 };
@@ -170,6 +195,29 @@ export async function fingerprintOf(bytes: Buffer | string): Promise<Fingerprint
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const pause = () => new Promise<void>((r) => setImmediate(r));
 
+/** Two fingerprints this close are one picture: what a re-encode or a stripped header leaves. */
+const SAME_DISTANCE = 12;
+const SAME_COLOR = 12;
+/**
+ * How far apart two copies of one photo may be dated, beyond a whole-hour time-zone shift.
+ * Capture times are whole seconds, so this is "the same second": two shots a second apart with
+ * a blink between them are as close in look, and are a burst, not one photo twice.
+ */
+const SAME_WITHIN_MS = 999;
+/** Time-zone shifts looked through for a copy dated in another zone. */
+const SAME_HOUR_SHIFTS = 14;
+/**
+ * A photo with a look-alike this close in time is one of a series (a timelapse, a webcam, a
+ * burst), and a frame of a series whole hours from it is another frame, not a copy in another zone.
+ */
+const SERIES_WITHIN_MS = 30 * 60_000;
+/** Shots this close in time that look alike are a burst. */
+const BURST_GAP_MS = 2_000;
+/** The earlier shots a shot is compared with, at most, for a burst. */
+const BURST_LOOK_BACK = 16;
+/** Photos compared with one other at most, so thousands dated the same second stay cheap. */
+const NEAR_MAX = 200;
+
 /** While the scan runs, the groups are worked out again at most this often. */
 const REGROUP_EVERY_MS = 15_000;
 /** A change waits this long for the ones after it before the groups are worked out again. */
@@ -188,6 +236,8 @@ export class DuplicateFinder {
   private loaded = false;
   /** The library as last listed: capture time by uid. */
   private library = new Map<string, number>();
+  /** The library's videos, as last listed. */
+  private videos = new Set<string>();
   /** Moved to the trash this session, kept out of every group. */
   private readonly gone = new Set<string>();
   private status: DuplicateStatus = { state: "idle", done: 0, total: 0, version: 0 };
@@ -229,6 +279,7 @@ export class DuplicateFinder {
       this.contentHashes.clear();
       this.relatedHashes.clear();
       this.library.clear();
+      this.videos.clear();
       this.gone.clear();
       this.prints.clear();
       this.unreadable.clear();
@@ -393,6 +444,7 @@ export class DuplicateFinder {
     const listed = await source.list();
     if (gen !== this.generation) return;
     this.library = new Map(listed.map((p) => [p.uid, p.captureTime]));
+    this.videos = new Set(listed.filter((p) => p.video).map((p) => p.uid));
     const todo = listed.map((p) => p.uid).filter((u) => !this.prints.has(u) && !this.unreadable.has(u));
     this.status = { ...this.status, total: listed.length, done: listed.length - todo.length };
     this.inputsChanged();
@@ -445,19 +497,140 @@ export class DuplicateFinder {
       identical.push({ key: groupKey(uids), kind: "identical", uids, times: uids.map(timeOf) });
     }
 
-    const candidates: string[] = [];
-    const fps: Fingerprint[] = [];
+    // Every other photo with a picture to compare, in time order for the two passes that go by time.
+    // A video is left to the look-alikes: a Live Photo's video beside its still, dated the same
+    // second and opening on the same frame, is neither a copy nor a burst of it.
+    const cand: { uid: string; fp: Fingerprint; t: number; video: boolean }[] = [];
     for (const [uid, fp] of this.prints) {
       if (!live(uid) || inIdentical.has(uid) || !isUsable(fp)) continue;
-      candidates.push(uid);
-      fps.push(fp);
+      cand.push({ uid, fp, t: timeOf(uid), video: this.videos.has(uid) });
     }
-    const roots = await clusterSimilarAsync(fps, pause);
+    cand.sort((a, b) => a.t - b.t || (a.uid < b.uid ? -1 : 1));
+    const n = cand.length;
+    const parent = Int32Array.from({ length: n }, (_, i) => i);
+    const find = (x: number): number => {
+      while (parent[x] !== x) {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+      }
+      return x;
+    };
+    const firstAt = (t: number) => {
+      let lo = 0;
+      let hi = n;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (cand[mid].t < t) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    };
+    const same = (i: number, j: number) =>
+      distance(cand[i].fp.bits, cand[j].fp.bits) <= SAME_DISTANCE && colorDistance(cand[i].fp.color, cand[j].fp.color) <= SAME_COLOR;
+
+    const placed = new Uint8Array(n);
+    const timed = (i: number) => cand[i].t > 0 && !cand[i].video;
+    const burstOut: DuplicateGroup[] = [];
+    /**
+     * Shots of the photos not placed yet, each within seconds of an alike earlier one, joined;
+     * those of at least `min` shots are bursts. Compared with several earlier shots, not only the
+     * one before: another scene taken the same second sorts in between.
+     */
+    const bursts = async (min: number) => {
+      for (let i = 0; i < n; i++) parent[i] = i;
+      for (let i = 0; i < n; i++) {
+        if (i % 2000 === 0) await pause();
+        if (placed[i] || !timed(i)) continue;
+        for (let j = i - 1, seen = 0; j >= 0 && cand[i].t - cand[j].t <= BURST_GAP_MS && seen < BURST_LOOK_BACK; j--) {
+          if (placed[j] || !timed(j)) continue;
+          seen++;
+          if (matches(cand[j].fp, cand[i].fp)) parent[find(i)] = find(j);
+        }
+      }
+      const runs = new Map<number, number[]>();
+      for (let i = 0; i < n; i++) {
+        if (placed[i] || !timed(i)) continue;
+        const r = find(i);
+        const list = runs.get(r);
+        if (list) list.push(i);
+        else runs.set(r, [i]);
+      }
+      for (const run of runs.values()) {
+        if (run.length < min) continue;
+        run.forEach((i) => (placed[i] = 1));
+        const uids = run.map((i) => cand[i].uid);
+        burstOut.push({ key: groupKey(uids), kind: "burst", uids, times: uids.map(timeOf) });
+      }
+    };
+    // Three shots or more first: frames of a still scene are as close as two copies of a photo,
+    // and dated the same second, so they would otherwise pass for copies.
+    await bursts(3);
+
+    /**
+     * Whether a photo has a look-alike within half an hour: one of a series, not a lone shot.
+     * Looked for outward from it, nearest first, so a busy half hour cannot hide its neighbours.
+     */
+    const inSeries = (i: number) => {
+      for (let j = i - 1, seen = 0; j >= 0 && cand[i].t - cand[j].t <= SERIES_WITHIN_MS && seen < NEAR_MAX; j--, seen++) {
+        if (matches(cand[i].fp, cand[j].fp)) return true;
+      }
+      for (let j = i + 1, seen = 0; j < n && cand[j].t - cand[i].t <= SERIES_WITHIN_MS && seen < NEAR_MAX; j++, seen++) {
+        if (matches(cand[i].fp, cand[j].fp)) return true;
+      }
+      return false;
+    };
+
+    // Same photo: one picture dated the same second, or whole hours apart (another time zone)
+    // when neither is one of a series.
+    for (let i = 0; i < n; i++) parent[i] = i;
+    for (let i = 0; i < n; i++) {
+      if (i % 2000 === 0) await pause();
+      if (placed[i] || !timed(i)) continue;
+      const t = cand[i].t;
+      let lone: boolean | null = null;
+      for (let k = 0; k <= SAME_HOUR_SHIFTS; k++) {
+        const centre = t + k * 3_600_000;
+        let j = k === 0 ? i + 1 : firstAt(centre - SAME_WITHIN_MS);
+        for (let seen = 0; j < n && cand[j].t <= centre + SAME_WITHIN_MS && seen < NEAR_MAX; j++, seen++) {
+          if (j === i || placed[j] || !timed(j) || !same(i, j)) continue;
+          if (k > 0) {
+            lone ??= !inSeries(i);
+            if (!lone || inSeries(j)) continue;
+          }
+          parent[find(j)] = find(i);
+        }
+      }
+    }
+    const sameGroups = new Map<number, number[]>();
+    for (let i = 0; i < n; i++) {
+      if (placed[i] || !timed(i)) continue;
+      const r = find(i);
+      const list = sameGroups.get(r);
+      if (list) list.push(i);
+      else sameGroups.set(r, [i]);
+    }
+    const sameOut: DuplicateGroup[] = [];
+    for (const members of sameGroups.values()) {
+      if (members.length < 2) continue;
+      members.forEach((i) => (placed[i] = 1));
+      const uids = members.map((i) => cand[i].uid).sort(byTime);
+      sameOut.push({ key: groupKey(uids), kind: "same", uids, times: uids.map(timeOf) });
+    }
+
+    // Two shots seconds apart that are not one photo twice.
+    await bursts(2);
+
+    // Similar: what is left, by look alone.
+    const rest = cand.filter((_, i) => !placed[i]);
+    const roots = await clusterSimilarAsync(
+      rest.map((c) => c.fp),
+      pause,
+    );
     const byRoot = new Map<number, string[]>();
     roots.forEach((root, i) => {
       const list = byRoot.get(root);
-      if (list) list.push(candidates[i]);
-      else byRoot.set(root, [candidates[i]]);
+      if (list) list.push(rest[i].uid);
+      else byRoot.set(root, [rest[i].uid]);
     });
     const similar: DuplicateGroup[] = [];
     for (const uids of byRoot.values()) {
@@ -466,7 +639,7 @@ export class DuplicateFinder {
       similar.push({ key: groupKey(uids), kind: "similar", uids, times: uids.map(timeOf) });
     }
     const order = (a: DuplicateGroup, b: DuplicateGroup) => b.uids.length - a.uids.length || b.times[0] - a.times[0];
-    return [...identical.sort(order), ...similar.sort(order)];
+    return [...identical.sort(order), ...sameOut.sort(order), ...burstOut.sort(order), ...similar.sort(order)];
   }
 
   /** The groups as they stand, the trashed copies left out. */
@@ -496,7 +669,7 @@ export class DuplicateFinder {
     const version = this.status.version;
     if (this.shown?.version === version) return this.shown.groups;
     const ignored = new IgnoredGroups(this.ignored);
-    const out: ShownGroups = { identical: [], similar: [], ignored: [], ready: this.computed !== null };
+    const out: ShownGroups = { identical: [], same: [], burst: [], similar: [], ignored: [], ready: this.computed !== null };
     for (const g of this.live()) {
       if (ignored.covering(g.uids).length) out.ignored.push(g);
       else out[g.kind].push(g);
@@ -535,9 +708,13 @@ export class DuplicateFinder {
     stillThere: (uids: string[]) => Promise<Set<string>>,
   ): Promise<{ trashed: string[]; failed: number; skipped: number }> {
     const current = this.live();
+    // Groups are apart from one another, so a photo is in one at most.
+    const groupOf = new Map<string, number>();
+    current.forEach((g, i) => g.uids.forEach((u) => groupOf.set(u, i)));
     const held = (uids: string[]) => {
       if (uids.length < 2 || new Set(uids).size !== uids.length) return false;
-      return current.some((g) => uids.every((u) => g.uids.includes(u)));
+      const g = groupOf.get(uids[0]);
+      return g !== undefined && uids.every((u) => groupOf.get(u) === g);
     };
     let skipped = 0;
     const heldPicks: { uids: string[]; keep: string[] }[] = [];
