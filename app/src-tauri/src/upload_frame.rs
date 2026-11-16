@@ -1009,21 +1009,37 @@ fn thumb_frames_blocking(app: &AppHandle, items: &[ThumbAsk]) -> ThumbFrames {
         return out;
     }
     sweep_old_frames();
-    for item in items {
-        if !is_own_frame_url(&item.url) {
-            continue;
+    let own: Vec<&ThumbAsk> = items.iter().filter(|item| is_own_frame_url(&item.url)).collect();
+    // A few at a time: each waits mostly on Proton for its blocks, and the sidecar keeps as
+    // many open for pictures (FRAMES_AT_ONCE there).
+    let results = std::sync::Mutex::new(Vec::new());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..THUMB_FRAMES_AT_ONCE.min(own.len()) {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(item) = own.get(i) else { break };
+                let dest = frame_dir().join(frame_name());
+                let drawn = gst_media::grab(&item.url, &dest);
+                if drawn.is_err() {
+                    let _ = std::fs::remove_file(&dest);
+                }
+                if let Ok(mut all) = results.lock() {
+                    all.push((item.uid.clone(), dest, drawn));
+                }
+            });
         }
-        let dest = frame_dir().join(frame_name());
-        match gst_media::grab(&item.url, &dest) {
+    });
+    for (uid, dest, drawn) in results.into_inner().unwrap_or_default() {
+        match drawn {
             Ok(()) => {
                 if let Ok(mut made) = REPAIR_FRAMES.lock() {
                     made.push((dest.clone(), std::time::Instant::now()));
                 }
-                out.frames.insert(item.uid.clone(), dest.to_string_lossy().into_owned());
+                out.frames.insert(uid, dest.to_string_lossy().into_owned());
             }
             Err(e) => {
-                let _ = std::fs::remove_file(&dest);
-                out.failed.insert(item.uid.clone(), failure_kind(&e));
+                out.failed.insert(uid, failure_kind(&e));
             }
         }
     }
@@ -1062,6 +1078,10 @@ fn failure_kind(e: &str) -> &'static str {
         "fetch"
     }
 }
+
+/// Thumbnail frames drawn at once: as many as the sidecar keeps videos open for pictures.
+#[cfg(not(windows))]
+const THUMB_FRAMES_AT_ONCE: usize = 3;
 
 /// The frames drawn for thumbnails, and when: only these are swept, never an upload's, which
 /// wait in the same folder for as long as their upload runs.

@@ -528,6 +528,8 @@ const LOCAL_THUMB_PX = 512;
 const NO_PREVIEW = "This item has no image preview";
 /** Photos without a thumbnail kept noted at once: the latest, which are the ones on screen. */
 const THUMBLESS_KEPT = 200;
+/** Videos the host draws a picture of at once: each holds one of the SDK's download slots meanwhile. */
+const FRAMES_AT_ONCE = 3;
 /** Kinds looked up on Proton per call for a thumbnail to draw. */
 const KIND_LOOKUPS = 10;
 /** Videos that could not be drawn, kept noted. */
@@ -2169,8 +2171,8 @@ export class ProtonSession {
   private trash = new TrashListing();
   /** Videos the window is playing, for the thumbnail server: see `videoSource`. */
   private videos = new OpenVideos((uid) => this.videoSource(uid));
-  /** Videos opened only to draw a picture of, one at a time, closed soon: see `frameSource`. */
-  private frameVideos = new OpenVideos((uid) => this.frameSource(uid), Date.now, 15_000, 1);
+  /** Videos opened only to draw a picture of, as many as the host draws at once, closed soon: see `frameSource`. */
+  private frameVideos = new OpenVideos((uid) => this.frameSource(uid), Date.now, 15_000, FRAMES_AT_ONCE);
   /** Grid thumbnails cut down to the size the grid shows them: see `thumbSizes`. */
   private smallThumbs = new SmallThumbs(undefined, { get: sizedGet, put: sizedPut });
   private thumbFlush: ReturnType<typeof setTimeout> | null = null;
@@ -3705,7 +3707,11 @@ export class ProtonSession {
     frames: Record<string, string>,
     undrawable: string[] = [],
     letGo: string[] = [],
+    roundOver = false,
   ): Promise<{ stored: string[] }> {
+    // The round is drawn: its videos give their download slots back now, not when idle. Not
+    // for a round handed back after a lock, whose successor may be drawing meanwhile.
+    if (roundOver) this.frameVideos.clear();
     const stored: string[] = [];
     for (const [uid, path] of Object.entries(frames ?? {})) {
       if (typeof path !== "string" || !isStagedFrame(path)) continue;

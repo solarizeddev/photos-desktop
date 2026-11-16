@@ -619,9 +619,18 @@ export class OpenVideos {
       if (!v && this.open.get(uid) === entry) this.open.delete(uid);
     });
     while (this.open.size > this.kept) {
-      const oldest = this.open.keys().next().value;
-      if (oldest === undefined) break;
-      this.drop(oldest);
+      // The oldest one nobody is reading from goes first: one still being read is cut only
+      // when every one is.
+      let victim: string | undefined;
+      for (const [key, e] of this.open) {
+        if (key !== uid && e.reading === 0) {
+          victim = key;
+          break;
+        }
+      }
+      victim ??= this.open.keys().next().value;
+      if (victim === undefined) break;
+      this.drop(victim);
     }
     this.startSweep();
     return video;
