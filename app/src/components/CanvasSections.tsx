@@ -11,7 +11,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent,
 import { useT } from "../lib/i18n";
 import { GRID_GAP, anchorAt, gridLayout, tileAt, TileRange, viewTopFor, type GridLayout } from "../lib/gridLayout";
 import { CanvasTimeline, type TimelineData } from "../lib/canvasTimeline";
-import { makeSprites, type Palette, STACK_LOOK_MIN, STACK_STEP } from "../lib/tileArt";
+import { makeSprites, type Palette } from "../lib/tileArt";
 import { registerDrawnGrid, type CellBox } from "../lib/gridRegistry";
 import { bench, benchCount, benchSpan } from "../lib/benchProbe";
 import type { VirtualSection } from "./VirtualSections";
@@ -311,17 +311,7 @@ export function CanvasSections({
       {item && hoverAt && (
         <div
           className={`g-hovercell${isSelected ? " sel" : ""}`}
-          // On a burst drawn as a pile, over its front frame, where the canvas puts the dot.
-          style={
-            (stacks?.get(item.uid) ?? 0) > 1 && layout.tile >= STACK_LOOK_MIN
-              ? {
-                  left: hoverAt.x,
-                  top: hoverAt.y + 2 * STACK_STEP,
-                  width: layout.tile - 2 * STACK_STEP,
-                  height: layout.rowH - 2 * STACK_STEP,
-                }
-              : { left: hoverAt.x, top: hoverAt.y, width: layout.tile, height: layout.rowH }
-          }
+          style={{ left: hoverAt.x, top: hoverAt.y, width: layout.tile, height: layout.rowH }}
         >
           {onToggle && (
             <span
