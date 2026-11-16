@@ -34,10 +34,10 @@ import { isWindows } from "./platform";
 import { rpc } from "./rpc";
 import { videoFrameUrl } from "./thumbStore";
 
-/** Videos drawn per round: each is read from Proton block by block, as far as a picture needs. */
-const BATCH = 3;
+/** Videos drawn per round, three at a time by the host: each read only as far as a picture needs. */
+const BATCH = 6;
 /** The pause between rounds, and the longer one when there is nothing to draw or it must wait. */
-const BETWEEN_MS = 1_500;
+const BETWEEN_MS = 250;
 const IDLE_MS = 10_000;
 /** Videos in a row this computer's decoders could not draw: past this, it cannot decode them. */
 const GIVE_UP_AFTER = 8;
@@ -91,7 +91,12 @@ export function startThumbRepairs(): void {
       if (Object.keys(frames).length > 0) failedInRow = 0;
       else failedInRow += undrawable.length;
       // Handed back even after a lock began, so the staged frames are deleted.
-      const made = await rpc<{ stored: string[] }>("putLocalThumbnails", { frames, undrawable, letGo }).catch(() => null);
+      const made = await rpc<{ stored: string[] }>("putLocalThumbnails", {
+        frames,
+        undrawable,
+        letGo,
+        roundOver: mine === epoch,
+      }).catch(() => null);
       if (mine !== epoch) break;
       if (made?.stored.length) for (const listener of listeners) listener(made.stored);
       await sleep(BETWEEN_MS);
