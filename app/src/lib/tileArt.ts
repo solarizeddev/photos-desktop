@@ -22,7 +22,40 @@ export const TILE_RADIUS = 10;
 
 export type Sprites = Record<"play" | "offline" | "cloud" | "heart" | "check" | "stack" | TypeMark, ImageBitmap>;
 
-export type Palette = { bg: string; bg2: string; accent: string; synced: string; font: string };
+export type Palette = {
+  bg: string;
+  bg2: string;
+  accent: string;
+  synced: string;
+  font: string;
+  /** A burst's stack: the frame edges behind its picture, the nearer and the farther. */
+  edgeNear: string;
+  edgeFar: string;
+};
+
+/**
+ * The pile's two edge colours, nearer and farther: the nearer is the one further in lightness
+ * from the page, so the order reads the same on a dark page and a light one.
+ */
+export function pileEdges(page: string, a: string, b: string): { edgeNear: string; edgeFar: string } {
+  const light = (c: string) => {
+    const hex = /^#([0-9a-f]{6})$/i.exec(c.trim());
+    const rgb = /rgba?\(([^)]+)\)/i.exec(c);
+    const [r, g, bl] = hex
+      ? [0, 2, 4].map((i) => parseInt(hex[1].slice(i, i + 2), 16))
+      : rgb
+        ? rgb[1].split(",").slice(0, 3).map((v) => parseFloat(v))
+        : [128, 128, 128];
+    return 0.299 * r + 0.587 * g + 0.114 * bl;
+  };
+  const p = light(page);
+  return Math.abs(light(a) - p) >= Math.abs(light(b) - p) ? { edgeNear: a, edgeFar: b } : { edgeNear: b, edgeFar: a };
+}
+
+/** Tiles at least this wide (CSS px) show a burst as a small pile; smaller ones keep the pill alone. */
+export const STACK_LOOK_MIN = 110;
+/** How far each frame edge of a pile stands out from the one in front (CSS px). */
+export const STACK_STEP = 3;
 
 /**
  * The page's colours and font, as the stylesheet has them now (they follow the theme). The
@@ -43,6 +76,9 @@ export function readPalette(around?: Element): Palette {
     accent: get("--accent", "#8b7cff"),
     synced: get("--status-synced", "#30d158"),
     font: getComputedStyle(document.body).fontFamily || "sans-serif",
+    // The nearer edge stands out from the page more than the farther, in either theme: of the
+    // two tokens, the one further from the page's lightness.
+    ...pileEdges(bg || getComputedStyle(document.body).backgroundColor, get("--surface-2", "#3a3a3c"), get("--border", "#2c2c2e")),
   };
 }
 
@@ -156,7 +192,53 @@ export function paintTile(
     ctx.scale(0.97, 0.97);
     ctx.translate(-(x + w / 2), -(y + h / 2));
   }
-  if (picture) {
+  // A burst's stack, on a tile large enough to read as one: two frame edges stand out behind
+  // the picture, up and to the end, all inside the tile's own cell; the picture and every
+  // mark move in to the front frame.
+  const pile = marks.stack !== null && w / dpr >= STACK_LOOK_MIN;
+  const step = pile ? d(STACK_STEP) : 0;
+  if (pile) {
+    const fw = w - 2 * step;
+    const fh = h - 2 * step;
+    // A sliver of the page between sheets: up and to the end of each one in front, all
+    // within the cell, so the frames read as separate and nothing spills into a neighbour.
+    const gap = Math.max(1, Math.round(dpr));
+    for (const k of [2, 1, 0]) {
+      const fx = x + k * step;
+      const fy = y + (2 - k) * step;
+      if (k < 2) {
+        ctx.beginPath();
+        ctx.roundRect(fx, fy - gap, fw + gap, fh + gap, radius + gap);
+        ctx.fillStyle = p.bg;
+        ctx.fill();
+      }
+      if (k === 0) break;
+      ctx.beginPath();
+      ctx.roundRect(fx, fy, fw, fh, radius);
+      ctx.fillStyle = k === 2 ? p.edgeFar : p.edgeNear;
+      ctx.fill();
+    }
+    y += 2 * step;
+    w = fw;
+    h = fh;
+  }
+  if (picture && pile) {
+    // Clipped rather than stamped round: a stamp of the page's colour would notch the edges behind.
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, radius);
+    ctx.clip();
+    if (picture.width === w + 2 * step && picture.height === h + 2 * step) {
+      // Cut for the whole cell: its middle, as it is, rather than shrunk and softened.
+      ctx.drawImage(picture, step, step, w, h, x, y, w, h);
+    } else {
+      const k = Math.max(w / picture.width, h / picture.height);
+      const sw = w / k;
+      const sh = h / k;
+      ctx.drawImage(picture, (picture.width - sw) / 2, (picture.height - sh) / 2, sw, sh, x, y, w, h);
+    }
+    ctx.restore();
+  } else if (picture) {
     if (picture.width === w && picture.height === h) ctx.drawImage(picture, x, y);
     else {
       // Cut for another size (a zoom or a resize under way): scaled until its own comes.
