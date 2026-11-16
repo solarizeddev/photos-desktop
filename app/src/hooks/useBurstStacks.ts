@@ -91,6 +91,9 @@ export function useBurstStacks(enabled: boolean, count: number | undefined): { s
   return { stacks, settled };
 }
 
+/** The fewest shots a burst is stacked for in the timeline. */
+export const STACK_MIN = 4;
+
 /** Forgets the bursts read: at sign-out and lock. */
 export function forgetBurstStacks(): void {
   kept = { version: -1, stacks: [], key: "", settled: false };
@@ -101,8 +104,8 @@ export function forgetBurstStacks(): void {
  * first; `counts` the number of shots by tile; `under` the other shots, which the timeline
  * leaves out, and `coverOf` their tile. The tile is the shot the timeline shows first, so a
  * stack spread out again has its shots after it and whatever is open in the viewer stays put.
- * A stack whose oldest shot is in `open` is not stacked; one with fewer than two shots in
- * `present` is none.
+ * A stack whose oldest shot is in `open` is not stacked; one with fewer than STACK_MIN
+ * shots in `present` is none.
  */
 export function stacksFrom(
   stacks: string[][],
@@ -119,8 +122,9 @@ export function stacksFrom(
   for (const all of stacks) {
     // Only the shots the timeline holds: one hidden, trashed or filed away is no part of it.
     const oldestFirst = present ? all.filter((u) => present.has(u)) : all;
-    // Opened by its oldest shot, which stays the same whichever way the timeline runs.
-    if (oldestFirst.length < 2 || open.has(all[0])) continue;
+    // Opened by its oldest shot, which stays the same whichever way the timeline runs. A pair or
+    // three shots are left as they are: a stack is worth it for a run of them.
+    if (oldestFirst.length < STACK_MIN || open.has(all[0])) continue;
     const uids = newestFirst ? [...oldestFirst].reverse() : oldestFirst;
     // Played in the order they were taken, whichever way the timeline runs.
     shotsOf.set(uids[0], oldestFirst);
