@@ -314,14 +314,57 @@ describe("a step that never answers", () => {
   });
 
   it("waits as long as the work keeps showing progress", async () => {
-    const out = await untilIdle("slow", 40, async (touch) => {
+    const out = await untilIdle("slow", 200, async (touch) => {
       for (let i = 0; i < 5; i++) {
-        await new Promise((r) => setTimeout(r, 25));
+        await new Promise((r) => setTimeout(r, 60));
         touch();
       }
       return "done";
     });
     expect(out).toBe("done");
+  });
+
+  it("trashes the copy of an upload given up on that Drive committed after all", async () => {
+    const { f, deps } = fake();
+    f.photos.getFileUploader = async () => ({
+      uploadFromStream: async () => ({ completion: () => new Promise((r) => setTimeout(() => r({ nodeUid: "vol~late" }), 150)) }),
+    });
+    const entry: any = { uid: OLD, captureMs: WANT, stage: "queued" };
+    // Ten stall times for an upload: 50 ms here, well before the commit lands.
+    await expect(replaceOne({ ...deps, stallMs: 5 }, entry, () => {})).rejects.toThrow(/upload\(dateEdit\)/);
+    expect(f.calls).not.toContain("trash:vol~late");
+    await new Promise((r) => setTimeout(r, 250));
+    expect(f.calls).toContain("trash:vol~late");
+  });
+
+  it("goes on to trash the original when carrying over runs out of time, keeping the copy that holds the data", async () => {
+    const { f, deps } = fake();
+    const slowCarry: DateEditDeps = { ...deps, stallMs: 10, carry: () => never() };
+    const entry: any = { uid: OLD, captureMs: WANT, stage: "queued" };
+    expect(await replaceOne(slowCarry, entry, () => {})).toBe("changed");
+    expect(f.calls).toContain(`trash:${OLD}`);
+    expect(f.calls).not.toContain(`trash:${NEW}`);
+  });
+
+  it("lists every photo at once as unread when Drive stops answering, instead of waiting out each batch", async () => {
+    let batches = 0;
+    let singles = 0;
+    const photos = {
+      iterateNodes: async function* () {
+        batches++;
+        await never();
+      },
+      getNode: async () => {
+        singles++;
+        return null;
+      },
+    };
+    const uids = Array.from({ length: 450 }, (_, i) => `vol~${i}`);
+    const out = await dateEditInfo(photos, uids, 20);
+    expect(batches).toBe(1);
+    expect(singles).toBe(0);
+    expect(out.every((i) => i.blocked === "read")).toBe(true);
+    expect(out.map((i) => i.uid)).toEqual(uids);
   });
 });
 
@@ -343,18 +386,38 @@ describe("the date run", () => {
     editor.start(Array.from({ length: 10 }, (_, i) => ({ uid: `vol~${i}`, captureMs: WANT })));
     await until(() => !editor.getStatus().running);
     const status = editor.getStatus();
-    expect(status.failed).toBe(3);
-    expect(status.errors.at(-1)?.error).toMatch(/7 photos left/);
+    // Each stalled photo is kept for another try, not counted as failed.
+    expect(status.failed).toBe(0);
+    expect(status.errors.at(-1)?.error).toMatch(/10 photos left/);
     editor.detach();
 
-    // The seven left carry on at the next sign-in, and count in that run.
+    // They carry on at the next sign-in, and count in that run.
     f.photos.getNode = async (uid: string) => f.nodes.get(uid);
     const next = new DateEditor();
     next.attach({ ...deps, stallMs: 20 });
-    expect(next.getStatus().total).toBe(7);
+    expect(next.getStatus().total).toBe(10);
     await until(() => !next.getStatus().running);
-    expect(next.getStatus().done).toBe(7);
+    expect(next.getStatus().done).toBe(10);
     next.detach();
+  });
+
+  it("drops the photos not started when Stop was pressed before the run paused", async () => {
+    const { f, deps } = fake();
+    f.photos.getNode = () => new Promise(() => {});
+    const editor = new DateEditor();
+    editor.attach({ ...deps, stallMs: 100 });
+    editor.start(Array.from({ length: 10 }, (_, i) => ({ uid: `vol~${i}`, captureMs: WANT })));
+    // Pressed while the third photo waits; the run then pauses on that third stall.
+    await new Promise((r) => setTimeout(r, 250));
+    editor.stop();
+    await until(() => !editor.getStatus().running);
+    const status = editor.getStatus();
+    expect(status.cancelled).toBe(true);
+    editor.detach();
+
+    const next = new DateEditor();
+    next.attach(deps);
+    expect(next.getStatus().total).toBe(0);
   });
 
   it("trashes the copy of a photo given up on before anything moved to it", async () => {

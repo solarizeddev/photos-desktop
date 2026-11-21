@@ -56,7 +56,14 @@ export type DateEditItem = { uid: string; captureMs: number };
 /** How far a photo got: its copy uploaded, in its albums, and what this computer keeps moved. */
 type Stage = "queued" | "uploaded" | "joined" | "carried";
 
-type QueueEntry = DateEditItem & { stage: Stage; newUid?: string; albums?: string[]; tags?: number[] };
+type QueueEntry = DateEditItem & {
+  stage: Stage;
+  newUid?: string;
+  albums?: string[];
+  tags?: number[];
+  /** Times a step of this photo was given up on for want of an answer from Drive. */
+  stalls?: number;
+};
 
 export type DateEditStatus = {
   running: boolean;
@@ -95,16 +102,35 @@ export type DateEditDeps = {
 /** A one-photo album add, trash or carry may wait behind other work, so it gets a few stall times. */
 const MUTATION_STALLS = 3;
 
+/**
+ * The SDK reports an upload's progress only as each 4 MiB block finishes, several at a time, and the
+ * commit after the last block reports none; so an upload gets ten stall times, as long as the SDK
+ * itself gives one block.
+ */
+const UPLOAD_STALLS = 10;
+
 /** Steps given up on one after another before the run pauses, keeping the rest of the queue on disk. */
 const STALLS_BEFORE_PAUSE = 3;
+
+/** A photo whose steps were given up on this often is counted as not changed rather than tried again. */
+const ENTRY_STALLS = 2;
 
 /**
  * `work`, given up on once it shows no sign of life for `idleMs`. `work` calls `touch` as it makes
  * progress (bytes moved), which starts the wait afresh; on giving up, `abort` stops it and a
  * `StallError` is thrown. A run over 2000 photos is one photo after another, so a single step that
  * never answered used to hold all the rest, with the panel showing the same count for good.
+ *
+ * Not everything stops when asked (the SDK commits an upload without looking at its signal), so `late`
+ * is handed what the work still answers after it was given up on, to undo it.
  */
-export async function untilIdle<T>(what: string, idleMs: number, work: (touch: () => void) => Promise<T>, abort?: () => void): Promise<T> {
+export async function untilIdle<T>(
+  what: string,
+  idleMs: number,
+  work: (touch: () => void) => Promise<T>,
+  abort?: () => void,
+  late?: (value: T) => void,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let settled = false;
   let fail: (e: Error) => void = () => {};
@@ -128,6 +154,9 @@ export async function untilIdle<T>(what: string, idleMs: number, work: (touch: (
   run.catch(() => {}); // abandoned when the stall wins
   try {
     return await Promise.race([run, stalled]);
+  } catch (e) {
+    if (e instanceof StallError && late) run.then(late, () => {});
+    throw e;
   } finally {
     settled = true;
     clearTimeout(timer);
@@ -276,56 +305,39 @@ const unread = (uid: string): DateEditInfo => ({ uid, name: "", captureMs: 0, na
  *
  * Read a few hundred nodes at a time through `iterateNodes`, as the map and the downloads do. One
  * `getNode` after another took minutes over a Fix dates selection of a couple of thousand photos, and one
- * that never answered held the panel on "Reading the photos" for good. A batch that stalls or fails
- * leaves only its unread photos to `getNode`, each under the same stall guard; a photo still unread is
- * shown as one that could not be read rather than holding up the rest.
+ * that never answered held the panel on "Reading the photos" for good. A batch that fails leaves only
+ * its unread photos to `getNode`, each under the same stall guard. Once anything stalls the SDK is not
+ * answering, and every photo not read yet is shown as one that could not be read: waiting out each
+ * batch in turn would outlast the host's wait for the answer, which then restarts the sidecar.
  */
-export async function dateEditInfo(photos: any, uids: string[]): Promise<DateEditInfo[]> {
+export async function dateEditInfo(photos: any, uids: string[], stallMs = SDK_STALL_MS): Promise<DateEditInfo[]> {
   const found = new Map<string, DateEditInfo>();
-  // Once one read alone has stalled the SDK is not answering: the rest are not waited out one by one.
   let wedged = false;
-  for (let at = 0; at < uids.length; at += INFO_BATCH) {
+  for (let at = 0; at < uids.length && !wedged; at += INFO_BATCH) {
     const batch = uids.slice(at, at + INFO_BATCH);
     try {
-      for await (const node of withStallGuard(photos.iterateNodes(batch), SDK_STALL_MS, "iterateNodes(dateEdit)")) {
+      for await (const node of withStallGuard(photos.iterateNodes(batch), stallMs, "iterateNodes(dateEdit)")) {
         const n = node as any;
         if (n?.missingUid) found.set(n.missingUid, unread(n.missingUid));
         else if (n?.uid) found.set(n.uid, infoOf(n.uid, n));
       }
     } catch (e) {
+      if (isStall(e)) wedged = true;
       process.stderr.write(`[dateedit] a batch of ${batch.length} could not be read together: ${e instanceof Error ? e.message : String(e)}\n`);
     }
     for (const uid of batch) {
-      if (found.has(uid)) continue;
-      if (wedged) {
-        found.set(uid, unread(uid));
-        continue;
-      }
+      if (found.has(uid) || wedged) continue;
       try {
-        const node = await oneNode(photos, uid);
+        const node = await untilIdle("getNode(dateEdit)", stallMs, () => photos.getNode(uid));
         found.set(uid, node ? infoOf(uid, node) : unread(uid));
       } catch (e) {
-        if (e instanceof StallError) wedged = true;
+        if (isStall(e)) wedged = true;
         found.set(uid, unread(uid));
       }
     }
   }
+  if (wedged) process.stderr.write(`[dateedit] Drive stopped answering; ${uids.length - found.size} photos shown as unread\n`);
   return uids.map((uid) => found.get(uid) ?? unread(uid));
-}
-
-/** `photos.getNode`, given up on after the SDK's stall time. */
-async function oneNode(photos: any, uid: string): Promise<any> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const stall = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new StallError("getNode(dateEdit)", SDK_STALL_MS)), SDK_STALL_MS);
-  });
-  const read = Promise.resolve(photos.getNode(uid));
-  read.catch(() => {}); // abandoned when the stall wins
-  try {
-    return await Promise.race([read, stall]);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /**
@@ -382,9 +394,15 @@ export async function replaceOne(deps: DateEditDeps, e: QueueEntry, save: () => 
     const stream = Readable.toWeb(Readable.from(bytes)) as any;
     const { nodeUid } = await untilIdle(
       "upload(dateEdit)",
-      idleMs,
+      idleMs * UPLOAD_STALLS,
       async (touch) => (await uploader.uploadFromStream(stream, thumbnails, touch)).completion(),
       () => stopUpload.abort(),
+      // Committed after all: a copy nobody records, which the photo's next try would make twice.
+      ({ nodeUid: late }) => {
+        if (!late || late === e.uid) return;
+        process.stderr.write(`[dateedit] an upload given up on finished after all; trashing that copy\n`);
+        void deps.trash([late]).catch(() => {});
+      },
     );
     if (!nodeUid || nodeUid === e.uid) throw new Error("Drive did not keep a new copy");
     e.newUid = nodeUid;
@@ -427,7 +445,14 @@ export async function replaceOne(deps: DateEditDeps, e: QueueEntry, save: () => 
   }
 
   if (e.stage === "joined") {
-    await mutation("carry(dateEdit)", () => deps.carry(e.uid, newUid));
+    // What this computer keeps moves first, without the network; only the album covers wait on Drive.
+    // A carry that ran out of time has moved the labels and faces already, so the photo goes on to
+    // trash the original: dropping the copy now would take them with it.
+    try {
+      await mutation("carry(dateEdit)", () => deps.carry(e.uid, newUid));
+    } catch (err) {
+      process.stderr.write(`[dateedit] carrying over did not finish, going on: ${(err as Error)?.message ?? err}\n`);
+    }
     e.stage = "carried";
     save();
   }
@@ -472,6 +497,12 @@ export class DateEditor {
   /** Signed in: picks up a queue a restart cut short. */
   attach(deps: DateEditDeps): void {
     this.deps = deps;
+    // Signed in again while the photo in hand is still going: that run carries on with the queue it
+    // holds, and must not take the sign-out's stop as the user's.
+    if (this.running) {
+      this.cancel = false;
+      return;
+    }
     const saved = readQueue();
     if (saved.length === 0) return;
     this.queue = saved;
@@ -543,28 +574,49 @@ export class DateEditor {
         else this.status.unchanged++;
         stalls = 0;
       } catch (e) {
+        const stalled = isStall(e);
+        if (stalled) stalls++;
+        else stalls = 0;
+        if (stalled && (entry.stalls ?? 0) + 1 < ENTRY_STALLS) {
+          // Drive did not answer: the photo is tried again later from the stage it reached, its copy kept.
+          entry.stalls = (entry.stalls ?? 0) + 1;
+          this.queue.shift();
+          this.queue.push(entry);
+          writeQueue(this.queue);
+          process.stderr.write(`[dateedit] a photo got no answer at ${entry.stage}; tried again later\n`);
+          if (stalls >= STALLS_BEFORE_PAUSE) return this.pause(stalls);
+          continue;
+        }
         this.status.failed++;
         this.status.errors.push({ uid: entry.uid, error: (e as Error)?.message ?? String(e) });
         process.stderr.write(`[dateedit] a photo was not changed: ${(e as Error)?.message ?? e}\n`);
         await this.dropCopy(deps, entry);
-        stalls = isStall(e) ? stalls + 1 : 0;
       }
       this.status.done++;
       this.queue.shift();
       writeQueue(this.queue);
-      if (stalls >= STALLS_BEFORE_PAUSE && this.queue.length > 0) {
-        // Drive is not answering: the rest would each wait out a stall time. They stay on disk and
-        // carry on at the next sign-in or the next date change started.
-        const left = this.queue.length;
-        this.status.errors.push({
-          uid: "paused",
-          error: `Drive stopped answering, so the run paused; the ${left} photos left are kept and carry on with the next date change or sign-in`,
-        });
-        process.stderr.write(`[dateedit] paused after ${stalls} stalls in a row, ${left} left\n`);
-        this.status.total -= left;
-        return;
-      }
+      if (stalls >= STALLS_BEFORE_PAUSE && this.queue.length > 0) return this.pause(stalls);
     }
+  }
+
+  /**
+   * Drive is not answering: the rest would each wait out a stall time. They stay on disk and carry on at
+   * the next sign-in or the next date change started, except the not-started ones a Stop dropped.
+   */
+  private pause(stalls: number): void {
+    if (this.cancel) {
+      this.status.cancelled = true;
+      this.queue = this.queue.filter((q) => q.stage !== "queued");
+      writeQueue(this.queue);
+    }
+    const left = this.queue.length;
+    this.status.total = this.status.done;
+    if (left === 0) return;
+    this.status.errors.push({
+      uid: "paused",
+      error: `Drive stopped answering, so the run paused; the ${left} photos left are kept and carry on with the next date change or sign-in`,
+    });
+    process.stderr.write(`[dateedit] paused after ${stalls} stalls in a row, ${left} left\n`);
   }
 
   /**
