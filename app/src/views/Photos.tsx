@@ -3590,6 +3590,7 @@ export function Photos({
             ) : libraryPage === "fixdates" ? (
               <FixDates
                 items={items}
+                loading={loading}
                 onEditDate={(uids, byName) => openDateEdit(uids, byName ? "name" : "set")}
                 onView={(uids, at) => {
                   openFiltered({ name: t("fixDates.title"), uids: new Set(uids), back: "fixdates" });
