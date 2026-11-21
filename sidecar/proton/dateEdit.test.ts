@@ -24,7 +24,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import sharp from "sharp";
 
-import { canCarryDate, missingTags, replaceOne, sameCapture, type DateEditDeps } from "./dateEdit.ts";
+import { canCarryDate, dateEditInfo, missingTags, replaceOne, sameCapture, type DateEditDeps } from "./dateEdit.ts";
 import { emptyLabels, rekeyLabels, setLabels } from "./labelStore.ts";
 import { HiddenStore } from "./hidden.ts";
 import { emptyPeople, type PeopleState } from "./faceStore.ts";
@@ -235,5 +235,52 @@ describe("what this computer keeps by a photo, moved to its copy", () => {
     expect(p.covers.Anna).toBe(NEW);
     expect(Object.values(p.curation).map((c) => c.ref).sort()).toEqual(["new", "new#1"]);
     expect(p.curation[curationKey(2, "Bob", "new#1")]).toBeDefined();
+  });
+});
+
+describe("dateEditInfo", () => {
+  const node = (uid: string, name: string, ms: number) => ({
+    uid,
+    name: { ok: true, value: name },
+    mediaType: "image/jpeg",
+    photo: { captureTime: new Date(ms), relatedPhotoNodeUids: [] },
+  });
+
+  it("reads a big selection in a few batches, not one node at a time, in the order asked", async () => {
+    const uids = Array.from({ length: 450 }, (_, i) => `vol~${i}`);
+    const batches: number[] = [];
+    let singles = 0;
+    const photos = {
+      iterateNodes: async function* (asked: string[]) {
+        batches.push(asked.length);
+        for (const uid of [...asked].reverse()) yield node(uid, `IMG_${uid}.jpg`, 1_600_000_000_000);
+      },
+      getNode: async () => {
+        singles++;
+        return null;
+      },
+    };
+    const out = await dateEditInfo(photos, uids);
+    expect(batches).toEqual([200, 200, 50]);
+    expect(singles).toBe(0);
+    expect(out.map((i) => i.uid)).toEqual(uids);
+    expect(out[0]).toMatchObject({ name: "IMG_vol~0.jpg", captureMs: 1_600_000_000_000, blocked: null });
+  });
+
+  it("marks a vanished photo unreadable, and reads alone what a failed batch left", async () => {
+    const photos = {
+      iterateNodes: async function* (asked: string[]) {
+        yield { missingUid: asked[0] };
+        yield node(asked[1], "b.jpg", 1);
+        throw new Error("network");
+      },
+      getNode: async (uid: string) => node(uid, "c.jpg", 2),
+    };
+    const out = await dateEditInfo(photos, ["vol~a", "vol~b", "vol~c"]);
+    expect(out.map((i) => [i.uid, i.name, i.blocked])).toEqual([
+      ["vol~a", "", "read"],
+      ["vol~b", "b.jpg", null],
+      ["vol~c", "c.jpg", null],
+    ]);
   });
 });

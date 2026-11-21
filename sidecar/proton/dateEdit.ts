@@ -47,7 +47,7 @@ import { downloadToBuffer } from "./editor.ts";
 import { embedCaptureDate } from "./embedDate.ts";
 import { dateFromName } from "./nameDate.ts";
 import { activeRevisionOf, nodeName, toMillis } from "./nodes.ts";
-import { SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
+import { SDK_STALL_MS, StallError, withStallGuard } from "./stallGuard.ts";
 import { readSealedOrDiscard, storeDir, writeSealedAtomic } from "./store.ts";
 
 /** One photo and the capture time it should have. */
@@ -187,25 +187,78 @@ async function storedThumbnails(photos: any, uid: string): Promise<any[]> {
   return out;
 }
 
-/** What the editor shows of each photo: its name, date, the date its name records, and whether it can change. */
+/** Nodes read per `iterateNodes` call by the date editor's listing. */
+const INFO_BATCH = 200;
+
+/** One photo's row in the editor, from its node. */
+function infoOf(uid: string, node: any): DateEditInfo {
+  const name = nodeName(node);
+  return {
+    uid,
+    name,
+    captureMs: toMillis(node?.photo?.captureTime),
+    nameMs: name ? dateFromName(name) : null,
+    blocked: isLivePhoto(node) ? "live" : canCarryDate(node?.mediaType) ? null : "type",
+  };
+}
+
+const unread = (uid: string): DateEditInfo => ({ uid, name: "", captureMs: 0, nameMs: null, blocked: "read" });
+
+/**
+ * What the editor shows of each photo: its name, date, the date its name records, and whether it can change.
+ *
+ * Read a few hundred nodes at a time through `iterateNodes`, as the map and the downloads do. One
+ * `getNode` after another took minutes over a Fix dates selection of a couple of thousand photos, and one
+ * that never answered held the panel on "Reading the photos" for good. A batch that stalls or fails
+ * leaves only its unread photos to `getNode`, each under the same stall guard; a photo still unread is
+ * shown as one that could not be read rather than holding up the rest.
+ */
 export async function dateEditInfo(photos: any, uids: string[]): Promise<DateEditInfo[]> {
-  const out: DateEditInfo[] = [];
-  for (const uid of uids) {
+  const found = new Map<string, DateEditInfo>();
+  // Once one read alone has stalled the SDK is not answering: the rest are not waited out one by one.
+  let wedged = false;
+  for (let at = 0; at < uids.length; at += INFO_BATCH) {
+    const batch = uids.slice(at, at + INFO_BATCH);
     try {
-      const node = await photos.getNode(uid);
-      const name = nodeName(node);
-      out.push({
-        uid,
-        name,
-        captureMs: toMillis(node?.photo?.captureTime),
-        nameMs: name ? dateFromName(name) : null,
-        blocked: isLivePhoto(node) ? "live" : canCarryDate(node?.mediaType) ? null : "type",
-      });
-    } catch {
-      out.push({ uid, name: "", captureMs: 0, nameMs: null, blocked: "read" });
+      for await (const node of withStallGuard(photos.iterateNodes(batch), SDK_STALL_MS, "iterateNodes(dateEdit)")) {
+        const n = node as any;
+        if (n?.missingUid) found.set(n.missingUid, unread(n.missingUid));
+        else if (n?.uid) found.set(n.uid, infoOf(n.uid, n));
+      }
+    } catch (e) {
+      process.stderr.write(`[dateedit] a batch of ${batch.length} could not be read together: ${e instanceof Error ? e.message : String(e)}\n`);
+    }
+    for (const uid of batch) {
+      if (found.has(uid)) continue;
+      if (wedged) {
+        found.set(uid, unread(uid));
+        continue;
+      }
+      try {
+        const node = await oneNode(photos, uid);
+        found.set(uid, node ? infoOf(uid, node) : unread(uid));
+      } catch (e) {
+        if (e instanceof StallError) wedged = true;
+        found.set(uid, unread(uid));
+      }
     }
   }
-  return out;
+  return uids.map((uid) => found.get(uid) ?? unread(uid));
+}
+
+/** `photos.getNode`, given up on after the SDK's stall time. */
+async function oneNode(photos: any, uid: string): Promise<any> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stall = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new StallError("getNode(dateEdit)", SDK_STALL_MS)), SDK_STALL_MS);
+  });
+  const read = Promise.resolve(photos.getNode(uid));
+  read.catch(() => {}); // abandoned when the stall wins
+  try {
+    return await Promise.race([read, stall]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
