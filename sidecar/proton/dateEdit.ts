@@ -43,11 +43,11 @@ import { Readable } from "node:stream";
 
 import { ThumbnailType } from "@protontech/drive-sdk";
 
-import { downloadToBuffer } from "./editor.ts";
+import { openDownloader } from "./downloadSlots.ts";
 import { embedCaptureDate } from "./embedDate.ts";
 import { dateFromName } from "./nameDate.ts";
 import { activeRevisionOf, nodeName, toMillis } from "./nodes.ts";
-import { SDK_STALL_MS, StallError, withStallGuard } from "./stallGuard.ts";
+import { SDK_STALL_MS, StallError, isStall, withStallGuard } from "./stallGuard.ts";
 import { readSealedOrDiscard, storeDir, writeSealedAtomic } from "./store.ts";
 
 /** One photo and the capture time it should have. */
@@ -88,7 +88,51 @@ export type DateEditDeps = {
   trash: (uids: string[]) => Promise<{ uid: string; ok: boolean; error?: string }[]>;
   /** Moves what this computer keeps by `oldUid` (hidden, labels, faces, search, offline, covers) to `newUid`. */
   carry: (oldUid: string, newUid: string) => Promise<void>;
+  /** How long a step may show no sign of life before it is given up on; the SDK's stall time unless a test says. */
+  stallMs?: number;
 };
+
+/** A one-photo album add, trash or carry may wait behind other work, so it gets a few stall times. */
+const MUTATION_STALLS = 3;
+
+/** Steps given up on one after another before the run pauses, keeping the rest of the queue on disk. */
+const STALLS_BEFORE_PAUSE = 3;
+
+/**
+ * `work`, given up on once it shows no sign of life for `idleMs`. `work` calls `touch` as it makes
+ * progress (bytes moved), which starts the wait afresh; on giving up, `abort` stops it and a
+ * `StallError` is thrown. A run over 2000 photos is one photo after another, so a single step that
+ * never answered used to hold all the rest, with the panel showing the same count for good.
+ */
+export async function untilIdle<T>(what: string, idleMs: number, work: (touch: () => void) => Promise<T>, abort?: () => void): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let settled = false;
+  let fail: (e: Error) => void = () => {};
+  const stalled = new Promise<never>((_, reject) => {
+    fail = reject;
+  });
+  const arm = () => {
+    if (settled) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      try {
+        abort?.();
+      } catch {
+        /* stopping is best-effort; the step is let go of either way */
+      }
+      fail(new StallError(what, idleMs));
+    }, idleMs);
+  };
+  arm();
+  const run = Promise.resolve().then(() => work(arm));
+  run.catch(() => {}); // abandoned when the stall wins
+  try {
+    return await Promise.race([run, stalled]);
+  } finally {
+    settled = true;
+    clearTimeout(timer);
+  }
+}
 
 const QUEUE_FILE = "date-edit.enc";
 
@@ -159,16 +203,39 @@ export function withClaimedCaptureTime(claimed: any, captureMs: number): Record<
 }
 
 /** Reads a node from Drive again rather than from the SDK's cache, which a write made here leaves stale. */
-async function freshNode(photos: any, uid: string): Promise<any> {
-  const access = photos?.nodes?.access;
-  if (typeof access?.notifyNodeChanged === "function") {
-    try {
-      await access.notifyNodeChanged(uid);
-    } catch {
-      /* the read below still answers, perhaps from the cache */
+async function freshNode(photos: any, uid: string, idleMs = SDK_STALL_MS): Promise<any> {
+  return untilIdle("getNode(dateEdit)", idleMs, async () => {
+    const access = photos?.nodes?.access;
+    if (typeof access?.notifyNodeChanged === "function") {
+      try {
+        await access.notifyNodeChanged(uid);
+      } catch {
+        /* the read below still answers, perhaps from the cache */
+      }
     }
-  }
-  return photos.getNode(uid);
+    return photos.getNode(uid);
+  });
+}
+
+/** The original's bytes, given up on (and the download stopped) when no bytes arrive for `idleMs`. */
+async function downloadOriginal(photos: any, uid: string, idleMs: number): Promise<Buffer> {
+  const opened = await openDownloader(photos, uid);
+  const chunks: Uint8Array[] = [];
+  return untilIdle(
+    "download(dateEdit)",
+    idleMs,
+    async (touch) => {
+      const stream = new WritableStream<Uint8Array>({
+        write(chunk) {
+          chunks.push(chunk);
+          touch();
+        },
+      });
+      await opened.downloader.downloadToStream(stream as any, touch).completion();
+      return Buffer.concat(chunks);
+    },
+    () => opened.stop.abort(),
+  );
 }
 
 /** The thumbnails the original carries, so the copy shows the same pictures. Best-effort. */
@@ -267,10 +334,12 @@ async function oneNode(photos: any, uid: string): Promise<any> {
  */
 export async function replaceOne(deps: DateEditDeps, e: QueueEntry, save: () => void): Promise<"changed" | "unchanged"> {
   const { photos } = deps;
+  const idleMs = deps.stallMs ?? SDK_STALL_MS;
+  const mutation = <T>(what: string, work: () => Promise<T>) => untilIdle(what, idleMs * MUTATION_STALLS, work);
   if (e.stage === "queued") {
     // Read from Drive, not the SDK's cache: a favourite or an album another device gave the photo since this
     // app last read it must ride along to the copy, or trashing the original loses it.
-    const node = await freshNode(photos, e.uid);
+    const node = await freshNode(photos, e.uid, idleMs);
     if (isLivePhoto(node)) throw new Error("A Live Photo's picture and video are dated together, so neither is changed alone");
     if (sameCapture(toMillis(node?.photo?.captureTime), e.captureMs)) return "unchanged";
     const name = nodeName(node);
@@ -279,7 +348,7 @@ export async function replaceOne(deps: DateEditDeps, e: QueueEntry, save: () => 
     if (!canCarryDate(mediaType)) throw new Error("This file type cannot carry a new date");
 
     const revision = activeRevisionOf(node);
-    const original = await downloadToBuffer(photos, e.uid);
+    const original = await downloadOriginal(photos, e.uid, idleMs);
     const embedded = embedCaptureDate(original, e.captureMs);
     if (!embedded) throw new Error("This file type cannot carry a new date");
     const bytes = embedded.bytes;
@@ -287,22 +356,36 @@ export async function replaceOne(deps: DateEditDeps, e: QueueEntry, save: () => 
     const sha1 = Buffer.from(await webcrypto.subtle.digest("SHA-1", digestInput)).toString("hex");
     const modified = toMillis(revision?.claimedModificationTime);
     const tags = ((node?.photo?.tags ?? []) as number[]).slice();
-    const uploader = await photos.getFileUploader(
-      name,
-      {
-        mediaType,
-        expectedSize: bytes.byteLength,
-        expectedSha1: sha1,
-        ...(modified > 0 ? { modificationTime: new Date(modified) } : {}),
-        captureTime: new Date(e.captureMs),
-        tags,
-        additionalMetadata: withClaimedCaptureTime(revision?.claimedAdditionalMetadata, e.captureMs),
-      },
-      new AbortController().signal,
+    const thumbnails = await storedThumbnails(photos, e.uid);
+    // Stopped through the uploader's signal when it shows no progress for a stall time, so a copy
+    // given up on is not finished later behind the run's back.
+    const stopUpload = new AbortController();
+    const uploader: any = await untilIdle(
+      "getFileUploader(dateEdit)",
+      idleMs,
+      () =>
+        photos.getFileUploader(
+          name,
+          {
+            mediaType,
+            expectedSize: bytes.byteLength,
+            expectedSha1: sha1,
+            ...(modified > 0 ? { modificationTime: new Date(modified) } : {}),
+            captureTime: new Date(e.captureMs),
+            tags,
+            additionalMetadata: withClaimedCaptureTime(revision?.claimedAdditionalMetadata, e.captureMs),
+          },
+          stopUpload.signal,
+        ),
+      () => stopUpload.abort(),
     );
     const stream = Readable.toWeb(Readable.from(bytes)) as any;
-    const controller = await uploader.uploadFromStream(stream, await storedThumbnails(photos, e.uid));
-    const { nodeUid } = await controller.completion();
+    const { nodeUid } = await untilIdle(
+      "upload(dateEdit)",
+      idleMs,
+      async (touch) => (await uploader.uploadFromStream(stream, thumbnails, touch)).completion(),
+      () => stopUpload.abort(),
+    );
     if (!nodeUid || nodeUid === e.uid) throw new Error("Drive did not keep a new copy");
     e.newUid = nodeUid;
     e.albums = albumUidsOf(node);
@@ -314,7 +397,7 @@ export async function replaceOne(deps: DateEditDeps, e: QueueEntry, save: () => 
 
   const newUid = e.newUid!;
   if (e.stage === "uploaded") {
-    const copy = await freshNode(photos, newUid);
+    const copy = await freshNode(photos, newUid, idleMs);
     if (!sameCapture(toMillis(copy?.photo?.captureTime), e.captureMs)) {
       throw new Error("The new copy did not get the new date; the original is kept");
     }
@@ -328,7 +411,7 @@ export async function replaceOne(deps: DateEditDeps, e: QueueEntry, save: () => 
     const joined = new Set(albumUidsOf(copy));
     for (const album of albums) {
       if (joined.has(album)) continue;
-      const results = await deps.addToAlbum(album, [newUid]);
+      const results = await mutation("addToAlbum(dateEdit)", () => deps.addToAlbum(album, [newUid]));
       if (!results.some((r) => r.ok)) {
         const why = (results.find((r) => !r.ok) as { error?: string } | undefined)?.error ?? "no answer";
         process.stderr.write(`[dateedit] album add refused: ${why}\n`);
@@ -336,7 +419,7 @@ export async function replaceOne(deps: DateEditDeps, e: QueueEntry, save: () => 
       }
     }
     if (albums.length > 0) {
-      const check = albumUidsOf(await freshNode(photos, newUid));
+      const check = albumUidsOf(await freshNode(photos, newUid, idleMs));
       if (!albums.every((a) => check.includes(a))) throw new Error("The new copy is not in every album yet; the original is kept");
     }
     e.stage = "joined";
@@ -344,12 +427,12 @@ export async function replaceOne(deps: DateEditDeps, e: QueueEntry, save: () => 
   }
 
   if (e.stage === "joined") {
-    await deps.carry(e.uid, newUid);
+    await mutation("carry(dateEdit)", () => deps.carry(e.uid, newUid));
     e.stage = "carried";
     save();
   }
 
-  const [trashed] = await deps.trash([e.uid]);
+  const [trashed] = await mutation("trash(dateEdit)", () => deps.trash([e.uid]));
   if (!trashed?.ok) throw new Error("The original could not be moved to the trash; both are kept");
   return "changed";
 }
@@ -410,7 +493,8 @@ export class DateEditor {
   start(items: DateEditItem[]): DateEditStatus {
     const fresh = items.filter((i) => typeof i?.uid === "string" && Number.isFinite(i.captureMs) && i.captureMs > 0);
     if (fresh.length === 0) return this.getStatus();
-    if (!this.running) this.status = idle();
+    // Photos a paused run left on disk carry on with these, and count in the new run.
+    if (!this.running) this.status = { ...idle(), total: this.queue.length };
     for (const item of fresh) {
       const waiting = this.queue.find((q) => q.uid === item.uid);
       if (waiting && waiting.stage === "queued") waiting.captureMs = item.captureMs;
@@ -442,6 +526,7 @@ export class DateEditor {
   }
 
   private async drain(): Promise<void> {
+    let stalls = 0;
     while (this.queue.length > 0) {
       const deps = this.deps;
       if (!deps) return;
@@ -456,14 +541,44 @@ export class DateEditor {
         const outcome = await replaceOne(deps, entry, () => writeQueue(this.queue));
         if (outcome === "changed") this.status.changed++;
         else this.status.unchanged++;
+        stalls = 0;
       } catch (e) {
         this.status.failed++;
         this.status.errors.push({ uid: entry.uid, error: (e as Error)?.message ?? String(e) });
         process.stderr.write(`[dateedit] a photo was not changed: ${(e as Error)?.message ?? e}\n`);
+        await this.dropCopy(deps, entry);
+        stalls = isStall(e) ? stalls + 1 : 0;
       }
       this.status.done++;
       this.queue.shift();
       writeQueue(this.queue);
+      if (stalls >= STALLS_BEFORE_PAUSE && this.queue.length > 0) {
+        // Drive is not answering: the rest would each wait out a stall time. They stay on disk and
+        // carry on at the next sign-in or the next date change started.
+        const left = this.queue.length;
+        this.status.errors.push({
+          uid: "paused",
+          error: `Drive stopped answering, so the run paused; the ${left} photos left are kept and carry on with the next date change or sign-in`,
+        });
+        process.stderr.write(`[dateedit] paused after ${stalls} stalls in a row, ${left} left\n`);
+        this.status.total -= left;
+        return;
+      }
+    }
+  }
+
+  /**
+   * A photo given up on after its copy was sent but before anything this computer keeps moved to it:
+   * the copy is trashed, so the library is not left with the photo twice. Once carried, both are kept.
+   */
+  private async dropCopy(deps: DateEditDeps, entry: QueueEntry): Promise<void> {
+    if (!entry.newUid || (entry.stage !== "uploaded" && entry.stage !== "joined")) return;
+    try {
+      const idleMs = (deps.stallMs ?? SDK_STALL_MS) * MUTATION_STALLS;
+      const [r] = await untilIdle("trash copy(dateEdit)", idleMs, () => deps.trash([entry.newUid!]));
+      process.stderr.write(`[dateedit] the unfinished copy was ${r?.ok ? "trashed" : "not trashed"}\n`);
+    } catch (e) {
+      process.stderr.write(`[dateedit] the unfinished copy could not be trashed: ${(e as Error)?.message ?? e}\n`);
     }
   }
 }

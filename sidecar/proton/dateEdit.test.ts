@@ -21,10 +21,15 @@
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { beforeAll, describe, expect, it } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import sharp from "sharp";
 
-import { canCarryDate, dateEditInfo, missingTags, replaceOne, sameCapture, type DateEditDeps } from "./dateEdit.ts";
+import { canCarryDate, dateEditInfo, DateEditor, missingTags, replaceOne, sameCapture, untilIdle, type DateEditDeps } from "./dateEdit.ts";
+import { initStore, setDataKey } from "./store.ts";
 import { emptyLabels, rekeyLabels, setLabels } from "./labelStore.ts";
 import { HiddenStore } from "./hidden.ts";
 import { emptyPeople, type PeopleState } from "./faceStore.ts";
@@ -282,5 +287,85 @@ describe("dateEditInfo", () => {
       ["vol~b", "b.jpg", null],
       ["vol~c", "c.jpg", null],
     ]);
+  });
+});
+
+describe("a step that never answers", () => {
+  const never = () => new Promise<never>(() => {});
+
+  it("gives up on an upload that sends nothing, and stops it through the uploader's signal", async () => {
+    const { f, deps } = fake();
+    let signal: AbortSignal | undefined;
+    f.photos.getFileUploader = async (_n: string, _m: any, s: AbortSignal) => {
+      signal = s;
+      return { uploadFromStream: async () => ({ completion: never }) };
+    };
+    const entry: any = { uid: OLD, captureMs: WANT, stage: "queued" };
+    await expect(replaceOne({ ...deps, stallMs: 30 }, entry, () => {})).rejects.toThrow(/upload\(dateEdit\)/);
+    expect(signal?.aborted).toBe(true);
+    expect(entry.stage).toBe("queued");
+  });
+
+  it("gives up on a download that stops sending", async () => {
+    const { f, deps } = fake();
+    f.photos.getFileDownloader = async () => ({ downloadToStream: () => ({ completion: never }) });
+    const entry: any = { uid: OLD, captureMs: WANT, stage: "queued" };
+    await expect(replaceOne({ ...deps, stallMs: 30 }, entry, () => {})).rejects.toThrow(/download\(dateEdit\)/);
+  });
+
+  it("waits as long as the work keeps showing progress", async () => {
+    const out = await untilIdle("slow", 40, async (touch) => {
+      for (let i = 0; i < 5; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+        touch();
+      }
+      return "done";
+    });
+    expect(out).toBe("done");
+  });
+});
+
+describe("the date run", () => {
+  beforeEach(() => {
+    initStore(mkdtempSync(join(tmpdir(), "pfp-dateedit-")));
+    setDataKey(randomBytes(32));
+  });
+
+  const until = async (check: () => boolean) => {
+    for (let i = 0; i < 200 && !check(); i++) await new Promise((r) => setTimeout(r, 10));
+  };
+
+  it("pauses after a few stalls in a row, keeping the rest for the next run instead of waiting each out", async () => {
+    const { f, deps } = fake();
+    f.photos.getNode = () => new Promise(() => {});
+    const editor = new DateEditor();
+    editor.attach({ ...deps, stallMs: 20 });
+    editor.start(Array.from({ length: 10 }, (_, i) => ({ uid: `vol~${i}`, captureMs: WANT })));
+    await until(() => !editor.getStatus().running);
+    const status = editor.getStatus();
+    expect(status.failed).toBe(3);
+    expect(status.errors.at(-1)?.error).toMatch(/7 photos left/);
+    editor.detach();
+
+    // The seven left carry on at the next sign-in, and count in that run.
+    f.photos.getNode = async (uid: string) => f.nodes.get(uid);
+    const next = new DateEditor();
+    next.attach({ ...deps, stallMs: 20 });
+    expect(next.getStatus().total).toBe(7);
+    await until(() => !next.getStatus().running);
+    expect(next.getStatus().done).toBe(7);
+    next.detach();
+  });
+
+  it("trashes the copy of a photo given up on before anything moved to it", async () => {
+    const { f, deps } = fake({ albums: ["vol~a1"], joinFails: true });
+    const editor = new DateEditor();
+    editor.attach(deps);
+    editor.start([{ uid: OLD, captureMs: WANT }]);
+    await until(() => !editor.getStatus().running);
+    expect(editor.getStatus().failed).toBe(1);
+    expect(f.calls).toContain(`trash:${NEW}`);
+    expect(f.calls).not.toContain(`trash:${OLD}`);
+    editor.detach();
   });
 });
