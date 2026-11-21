@@ -44,3 +44,11 @@ sdk/
 
 # Python bytecode
 __pycache__/
+
+# ---- Local test scripts and their output under tools/ (the profiler itself stays tracked) ----
+tools/**/test_*
+tools/**/*_test.*
+tools/**/*.test.*
+tools/**/*.spec.*
+tools/**/tests/
+tools/**/test/
