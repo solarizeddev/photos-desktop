@@ -207,6 +207,18 @@ describe("the loopback thumbnail server", () => {
       expect((await get(plain + encodeURIComponent(UID) + "/v")).status).toBe(404);
     });
 
+    it("serves a video read for a picture from its own source, never the player's", async () => {
+      const frames = async (uid: string): Promise<VideoSource | null> =>
+        uid === UID ? videoFromBytes(CLIP.subarray(0, 5000), "video/mp4") : null;
+      const base = await startThumbServer(source, undefined, videos, frames);
+      const res = await get(base + encodeURIComponent(UID) + "/vf", { range: "bytes=0-99" });
+      expect(res.status).toBe(206);
+      expect(res.headers["content-range"]).toBe("bytes 0-99/5000");
+      expect((await get(base + encodeURIComponent(UID) + "/v")).body.length).toBe(CLIP.length);
+      const plain = await startThumbServer(source, undefined, videos);
+      expect((await get(plain + encodeURIComponent(UID) + "/vf")).status).toBe(404);
+    });
+
     it("answers a video that can never be streamed apart from one that cannot be had now", async () => {
       const base = await startThumbServer(source, undefined, async (uid) => (uid === UID ? NOT_STREAMABLE : null));
       expect((await get(base + encodeURIComponent(UID) + "/v")).status).toBe(NOT_STREAMABLE_STATUS);

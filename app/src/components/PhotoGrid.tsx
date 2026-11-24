@@ -22,7 +22,7 @@
 
 import { memo, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { isVideo as classifyVideo, TAG } from "../lib/tags";
-import { cachedThumbnail, requestThumbnail, useThumbServerBase } from "../lib/thumbStore";
+import { cachedThumbnail, requestThumbnail, useThumbRemade, useThumbServerBase } from "../lib/thumbStore";
 import { cachedDuration, formatVideoTime, requestDuration } from "../lib/durations";
 import { cachedMediaType, requestMediaType } from "../lib/mediaTypes";
 import { useT } from "../lib/i18n";
@@ -187,10 +187,12 @@ export const PhotoCell = memo(function PhotoCell({
   // empty for the rest of its life. The server reads only the path, so the query is
   // only there to make the webview load it again.
   const [attempt, setAttempt] = useState(0);
+  // A video Proton holds no thumbnail for gets one drawn on this computer, after its tile was
+  // answered with none: the tile then asks again, by a new URL.
+  const remade = useThumbRemade(item.uid);
+  const query = [attempt ? `a=${attempt}` : "", remade ? `m=${remade}` : ""].filter(Boolean).join("&");
   const served =
-    lazy && serverBase
-      ? serverBase + encodeURIComponent(item.uid) + (attempt ? `?a=${attempt}` : "")
-      : null;
+    lazy && serverBase ? serverBase + encodeURIComponent(item.uid) + (query ? `?${query}` : "") : null;
   const fetchesOwn = lazy && !served;
   const imgRef = useRef<HTMLImageElement | null>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -288,7 +290,7 @@ export const PhotoCell = memo(function PhotoCell({
       unsubDuration?.();
       unsubMediaType?.();
     };
-  }, [fetchesOwn, wantsDuration, wantsMediaType, item.uid]);
+  }, [fetchesOwn, wantsDuration, wantsMediaType, item.uid, remade]);
 
   // Android's ladder, unchanged: at the compact tier the cloud badge keeps its corner and
   // exactly one secondary joins it, picked in this order. At the smallest tier the cloud

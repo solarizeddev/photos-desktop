@@ -456,6 +456,14 @@ const handlers: Record<string, (params: any, signal?: AbortSignal) => Promise<un
       (Array.isArray(p?.whole) ? p.whole : []).map(uidList),
     ),
   duplicatesIgnore: (p) => session.duplicatesIgnore(uidList(p?.uids), p?.on !== false),
+  thumblessVideos: (p) => session.thumblessVideos(typeof p?.limit === "number" ? p.limit : 3),
+  putLocalThumbnails: (p) =>
+    session.putLocalThumbnails(
+      p?.frames && typeof p.frames === "object" ? p.frames : {},
+      uidList(p?.undrawable),
+      uidList(p?.letGo),
+      p?.roundOver === true,
+    ),
   restorePhotos: (p) => session.restorePhotos(p.uids),
   deletePhotosForever: (p) => session.deletePhotosForever(p.uids),
   // What the Trash view listed, all of it: no list destroys nothing.

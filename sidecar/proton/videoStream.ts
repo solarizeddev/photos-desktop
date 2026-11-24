@@ -340,8 +340,11 @@ const IDLE_MS = 90_000;
 
 type OpenEntry = { video: Promise<VideoSource | null>; used: number; reading: number; opened?: VideoSource };
 
-/** The waits and the memory of the videos kept open (tests shorten them). */
-export type OpenLimits = { startMs?: number; keptBytes?: number; refusedMs?: number };
+/**
+ * The waits and the memory of the videos kept open (tests shorten them), and how many are
+ * kept open at once (OPEN_KEPT unless said).
+ */
+export type OpenLimits = { startMs?: number; keptBytes?: number; refusedMs?: number; kept?: number };
 
 /**
  * The videos opened lately, by uid. A player asks for many ranges of one video (the start,
@@ -357,6 +360,7 @@ export class OpenVideos {
   private startMs: number;
   private keptBytes: number;
   private refusedMs: number;
+  private kept: number;
 
   constructor(
     private load: (uid: string, signal: AbortSignal) => Promise<VideoAnswer>,
@@ -367,6 +371,7 @@ export class OpenVideos {
     this.startMs = limits.startMs ?? VIDEO_START_MS;
     this.keptBytes = limits.keptBytes ?? MAX_STREAMED_VIDEO;
     this.refusedMs = limits.refusedMs ?? NOT_STREAMABLE_MS;
+    this.kept = limits.kept ?? OPEN_KEPT;
   }
 
   get(uid: string): Promise<VideoAnswer> {
@@ -404,10 +409,19 @@ export class OpenVideos {
       if (!v && this.open.get(uid) === entry) this.open.delete(uid);
       if (v) this.keepWithinBytes();
     });
-    while (this.open.size > OPEN_KEPT) {
-      const oldest = this.open.keys().next().value;
-      if (oldest === undefined) break;
-      this.drop(oldest);
+    while (this.open.size > this.kept) {
+      // The oldest one nobody is reading from goes first: one still being read is cut only
+      // when every one is.
+      let victim: string | undefined;
+      for (const [key, e] of this.open) {
+        if (key !== uid && e.reading === 0) {
+          victim = key;
+          break;
+        }
+      }
+      victim ??= this.open.keys().next().value;
+      if (victim === undefined) break;
+      this.drop(victim);
     }
     this.startSweep();
     return this.answer(uid, entry);
@@ -518,6 +532,12 @@ export class OpenVideos {
     for (const [uid, entry] of [...this.open]) {
       if (entry.reading === 0 && now - entry.used >= this.idleMs) this.drop(uid);
     }
+    if (this.open.size === 0) this.stopSweep();
+  }
+
+  /** Closes one video, when it is open: one that is done with gives its download slot back now. */
+  close(uid: string): void {
+    this.drop(uid);
     if (this.open.size === 0) this.stopSweep();
   }
 

@@ -20,7 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { rpc } from "./rpc";
 import { isLightboxOpen } from "./lightboxSignal";
 
@@ -37,6 +37,11 @@ const serverListeners = new Set<() => void>();
 function setServerBase(base: string | null): void {
   serverBase = base;
   for (const listener of serverListeners) listener();
+}
+
+/** Whether the server's address is known, so its URLs can be handed out. */
+export function thumbServerUp(): boolean {
+  return serverBase !== null;
 }
 
 /** Asks the sidecar for the server; called once the account is unlocked. */
@@ -71,6 +76,14 @@ export async function afterStreamFailed(uid: string, tries: number, retries: num
   if (tries >= retries) return "whole";
   const refused = await rpc<boolean>("videoNotStreamable", { uid }).catch(() => false);
   return refused === true ? "whole" : "again";
+}
+
+/**
+ * Where the server streams a video for the host to draw a picture of: its own route, opened
+ * apart from the viewer's videos, or null while there is no server to ask.
+ */
+export function videoFrameUrl(uid: string): string | null {
+  return serverBase ? serverBase + encodeURIComponent(uid) + "/vf" : null;
 }
 
 /** A grid thumbnail's URL on the server, or null while there is no server to ask. */
@@ -190,6 +203,51 @@ async function flush(): Promise<void> {
     }
   }
   flushing = false;
+}
+
+// ---- Thumbnails made on this computer ----
+//
+// A video Proton holds no thumbnail for gets one drawn here (thumbRepair.ts). Its tile has
+// already been answered with none, so it is told to ask again: a served tile by a new URL,
+// a fetched one by being queued again.
+
+/** How many times a thumbnail was made here for each uid, this session. */
+const remade = new Map<string, number>();
+const remadeSubs = new Map<string, Set<() => void>>();
+
+/** Thumbnails that are there now for `uids`: every tile showing one of them asks again. */
+export function thumbsMade(uids: string[]): void {
+  for (const uid of uids) {
+    const previous = cache.get(uid);
+    if (previous !== undefined) {
+      cachedChars -= previous?.length ?? 0;
+      cache.delete(uid);
+    }
+    remade.set(uid, (remade.get(uid) ?? 0) + 1);
+    for (const listener of remadeSubs.get(uid) ?? []) listener();
+    if (subs.has(uid)) pending.add(uid);
+  }
+  if (pending.size > 0 && timer === undefined) timer = setTimeout(flush, 40);
+}
+
+/** How many times a thumbnail was made here for `uid`, for a tile, which redraws as it grows. */
+export function useThumbRemade(uid: string): number {
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      let set = remadeSubs.get(uid);
+      if (!set) {
+        set = new Set();
+        remadeSubs.set(uid, set);
+      }
+      set.add(listener);
+      return () => {
+        set.delete(listener);
+        if (set.size === 0) remadeSubs.delete(uid);
+      };
+    },
+    [uid],
+  );
+  return useSyncExternalStore(subscribe, () => remade.get(uid) ?? 0);
 }
 
 /** Request a thumbnail for a now-visible cell. Returns an unsubscribe. */

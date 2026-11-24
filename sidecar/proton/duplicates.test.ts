@@ -145,6 +145,24 @@ describe("the duplicate finder", () => {
     expect(asked).toEqual(["v~c"]);
   });
 
+  it("reads again a photo that had no thumbnail once one is made for it", async () => {
+    const photos = [
+      { uid: "v~a", t: 1, look: 1 },
+      { uid: "v~b", t: 2, look: null as number | null },
+    ];
+    const { f, asked } = finder(photos);
+    f.start();
+    await f.settled();
+    photos[1].look = 1;
+    f.readable("v~b");
+    f.readable("v~a");
+    asked.length = 0;
+    f.start();
+    await f.settled();
+    expect(asked).toEqual(["v~b"]);
+    expect(f.groups().similar.map((g) => [...g.uids].sort())).toEqual([["v~a", "v~b"]]);
+  });
+
   it("moves to the trash only what a group it holds lets go, and drops those from the groups", async () => {
     const { f } = finder([
       { uid: "v~a", t: 1, look: 5 },

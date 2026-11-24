@@ -26,6 +26,7 @@
 
 import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { PhotoTag, ProtonDriveClient, ThumbnailType } from "@protontech/drive-sdk";
@@ -168,6 +169,7 @@ import { accountMatch, recordAccountKeys, recordedAccountKeys } from "./accountS
 import { hostNotice } from "./hostCall.ts";
 import { NotReadyError, PhotoEvents, sealedAnchorStore, type FeedEvent } from "./photoEvents.ts";
 import { openDownloader } from "./downloadSlots.ts";
+import { ThumbRepairs } from "./thumbRepair.ts";
 import { failureOf, missFor, onTheWay, type ScanMiss } from "./scanMisses.ts";
 import {
   cancelHydrate as stopHydrate,
@@ -236,6 +238,7 @@ import {
   discardImport as runDiscardImport,
   startDropUpload as runDropUpload,
   takeDropReplaced,
+  isStagedFrame,
   type ShellMediaInfo,
   type UploadStatus,
 } from "./upload.ts";
@@ -365,6 +368,17 @@ const THUMBNAIL_FETCH_PER_CALL = 8;
 /** The background warmer's share of one call: it must never hold the channel long
  *  enough for a thumbnail on screen, or a page being opened, to wait on it. */
 const THUMBNAIL_WARM_PER_CALL = 2;
+/** The longer side of a thumbnail made on this computer: Proton's own grid thumbnails are this size. */
+const LOCAL_THUMB_PX = 512;
+/** Videos the host draws a picture of at once: each holds one of the SDK's download slots meanwhile. */
+const FRAMES_AT_ONCE = 3;
+/** A video opened for a picture and not read from for this long is closed. */
+const FRAME_IDLE_MS = 30_000;
+/**
+ * The largest video downloaded for a picture of it. It is downloaded whole, from the start,
+ * and a picture often needs the index at its end; a larger one gets none.
+ */
+const FRAME_WHOLE_MAX = 64 * 1024 * 1024;
 
 /**
  * How many entries the SDK may keep before its cache starts over: nodes as serialised
@@ -1665,6 +1679,8 @@ export class ProtonSession {
     this.thumbWaiting.clear();
     this.faceCovers.clear();
     this.videos.clear();
+    this.frameVideos.clear();
+    this.thumbRepairs.clear();
     this.trash.changed();
     lockVault();
     this.offlineResume = null;
@@ -1790,6 +1806,8 @@ export class ProtonSession {
     this.thumbWaiting.clear();
     this.faceCovers.clear();
     this.videos.clear();
+    this.frameVideos.clear();
+    this.thumbRepairs.clear();
     this.trash.changed();
     this.timelineRun = null;
     this.session = null;
@@ -1832,6 +1850,8 @@ export class ProtonSession {
     this.thumbWaiting.clear();
     this.faceCovers.clear();
     this.videos.clear();
+    this.frameVideos.clear();
+    this.thumbRepairs.clear();
     this.trash.changed();
     this.legacySignIn = false;
     this.recordedAccount = "";
@@ -2617,6 +2637,7 @@ export class ProtonSession {
           thumbPut(uid, ThumbnailType.Type1, bytes);
           yield { uid, bytes };
         } else if (!isTransient((r as any).error)) {
+          this.thumbRepairs.note(uid, (r as any).error);
           yield { uid, bytes: null };
         }
       }
@@ -2801,6 +2822,12 @@ export class ProtonSession {
   });
   /** Videos the window is playing, for the thumbnail server: see `videoSource`. */
   private videos = new OpenVideos((uid, signal) => this.videoSource(uid, signal));
+  /** Videos opened only to draw a picture of, as many as the host draws at once: see `frameSource`. */
+  private frameVideos = new OpenVideos((uid, signal) => this.frameSource(uid, signal), Date.now, FRAME_IDLE_MS, {
+    kept: FRAMES_AT_ONCE,
+  });
+  /** The videos Proton holds no thumbnail for, to have one drawn here: see `thumblessVideos`. */
+  private thumbRepairs = new ThumbRepairs();
   /** The trash as last read, shared by the window and the drive's listing: see `TrashListing`. */
   private trash = new TrashListing();
   /**
@@ -2835,6 +2862,7 @@ export class ProtonSession {
         (uid, gone) => this.thumbnailFor(uid, gone),
         (uid, box, gone) => this.faceCovers.get(uid, box, gone),
         (uid) => this.videos.get(uid),
+        (uid) => this.frameVideos.get(uid),
       ),
     };
   }
@@ -2905,6 +2933,7 @@ export class ProtonSession {
           thumbPut(uid, ThumbnailType.Type1, bytes);
           answer(uid, bytes);
         } else {
+          this.thumbRepairs.note(uid, (r as any).error);
           answer(uid, null);
         }
       }
@@ -2968,6 +2997,7 @@ export class ProtonSession {
           thumbPut(uid, ThumbnailType.Type1, bytes);
           out.push({ uid, dataUrl: toDataUrl(bytes) });
         } else {
+          this.thumbRepairs.note(uid, (r as any).error);
           out.push({ uid, dataUrl: null });
         }
       }
@@ -3069,9 +3099,100 @@ export class ProtonSession {
     return startVideo(opened, size, mime, signal);
   }
 
+  /**
+   * A video opened only for the host to draw a picture of it, for one Proton holds no
+   * thumbnail for: downloaded whole into memory as the player's are, but only up to
+   * FRAME_WHOLE_MAX. A larger one is refused, and not handed out to draw again this session.
+   */
+  private async frameSource(uid: string, signal: AbortSignal): Promise<VideoAnswer> {
+    if (!this.photos) return null;
+    const node = await this.photos.getNode(uid);
+    if (signal.aborted) return null;
+    const mime = String((node as any)?.mediaType || "");
+    if (!mime.startsWith("video/")) return NOT_STREAMABLE;
+    const opened = await openDownloader(this.photos, uid, signal);
+    if (signal.aborted) {
+      opened.unused();
+      return null;
+    }
+    const size = opened.downloader.getClaimedSizeInBytes?.() ?? 0;
+    if (!size || size > FRAME_WHOLE_MAX) {
+      opened.unused();
+      this.thumbRepairs.pass(uid);
+      return NOT_STREAMABLE;
+    }
+    return startVideo(opened, size, mime, signal);
+  }
+
   /** True for a video the window should play the older way at once, without streaming it again. */
   videoNotStreamable(uid: string): boolean {
     return this.videos.notStreamable(uid);
+  }
+
+  /**
+   * Up to `limit` videos for the host to draw a thumbnail of, the latest noted first: Proton
+   * said it has none for them, none was made here, and this computer has not failed to draw
+   * one lately. See thumbRepair.ts.
+   */
+  async thumblessVideos(limit = 3): Promise<{ uids: string[] }> {
+    const photos = this.photos;
+    if (!photos) return { uids: [] };
+    const uids = await this.thumbRepairs.next(limit, {
+      hasThumb: (uid) => !!thumbGet(uid, ThumbnailType.Type1),
+      known: (uid) => metaGet(uid)?.mediaType || null,
+      lookUp: async (uid) => String(((await photos.getNode(uid)) as any)?.mediaType ?? ""),
+    });
+    return { uids };
+  }
+
+  /**
+   * Thumbnails this computer made for videos Proton holds none for: a frame the host drew of
+   * each, by uid, staged in its frame folder. Each is made the size of a grid thumbnail and
+   * kept in the sealed cache the grid and the duplicate finder read first; its staged frame is
+   * deleted. Only for a video handed out by `thumblessVideos`, and never over a thumbnail
+   * already there. `undrawable`: those this computer's decoders could not draw, left alone
+   * for a week; `letGo`: those not drawn for another reason, asked for again. `roundOver`:
+   * the round is drawn, so the videos it is done with give their download slots back now.
+   * Only on this computer: Proton's copy is left as it is.
+   */
+  async putLocalThumbnails(
+    frames: Record<string, string>,
+    undrawable: string[] = [],
+    letGo: string[] = [],
+    roundOver = false,
+  ): Promise<{ stored: string[] }> {
+    // Not for a round handed back after a lock, whose successor may be drawing meanwhile.
+    // One let go stays open a while, so asking for it again goes on from what has arrived.
+    if (roundOver) for (const uid of [...Object.keys(frames), ...undrawable]) this.frameVideos.close(uid);
+    const stored: string[] = [];
+    for (const [uid, path] of Object.entries(frames)) {
+      // Only the host's own staged frames are read, or deleted.
+      if (typeof path !== "string" || !isStagedFrame(path)) {
+        this.thumbRepairs.settle(uid);
+        continue;
+      }
+      try {
+        if (!this.thumbRepairs.isHanded(uid) || thumbGet(uid, ThumbnailType.Type1)) continue;
+        const small = await sharp(await readFile(path), { limitInputPixels: 80_000_000 })
+          .rotate()
+          .resize(LOCAL_THUMB_PX, LOCAL_THUMB_PX, { fit: "inside", withoutEnlargement: true })
+          .jpeg({ quality: 82 })
+          .toBuffer();
+        thumbPut(uid, ThumbnailType.Type1, small);
+        if (!thumbGet(uid, ThumbnailType.Type1)) continue;
+        duplicateFinder.readable(uid);
+        stored.push(uid);
+      } catch (e) {
+        process.stderr.write(`[thumbs] a made thumbnail was not kept: ${(e as Error)?.name ?? "error"}\n`);
+      } finally {
+        this.thumbRepairs.settle(uid);
+        await rm(path, { force: true }).catch(() => {});
+      }
+    }
+    this.thumbRepairs.letGo(letGo);
+    const added = this.thumbRepairs.cannotDraw(undrawable);
+    if (stored.length || added) process.stderr.write(`[thumbs] made ${stored.length} video thumbnail(s), ${added} could not be drawn\n`);
+    return { stored };
   }
 
   async getVideo(uid: string): Promise<VideoBytes> {

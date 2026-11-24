@@ -26,7 +26,7 @@ vi.mock("./rpc", () => ({ rpc: vi.fn() }));
 vi.mock("./lightboxSignal", () => ({ isLightboxOpen: () => false }));
 
 import { rpc } from "./rpc";
-import { afterStreamFailed, cachedThumbnail, putThumbnail, thumbCacheSize } from "./thumbStore";
+import { afterStreamFailed, cachedThumbnail, putThumbnail, requestThumbnail, thumbCacheSize, thumbsMade } from "./thumbStore";
 
 describe("the grid's thumbnail cache", () => {
   it("keeps thousands of small thumbnails, which a count cap of 500 threw away", () => {
@@ -62,5 +62,30 @@ describe("a streamed video that failed", () => {
     expect(await afterStreamFailed("u", 1, 2)).toBe("again");
     expect(await afterStreamFailed("u", 2, 2)).toBe("whole");
     expect(rpc).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("a thumbnail made on this computer", () => {
+  it("lets go of the empty answer a tile had and asks again for the tiles showing it", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(rpc).mockReset();
+      vi.mocked(rpc).mockResolvedValueOnce([{ uid: "vid", dataUrl: null }]);
+      const seen: (string | null)[] = [];
+      const stop = requestThumbnail("vid", (url) => seen.push(url));
+      await vi.advanceTimersByTimeAsync(50);
+      expect(seen).toEqual([null]);
+      expect(cachedThumbnail("vid")).toBeNull();
+
+      vi.mocked(rpc).mockResolvedValueOnce([{ uid: "vid", dataUrl: "data:image/jpeg;base64,AA" }]);
+      thumbsMade(["vid"]);
+      expect(cachedThumbnail("vid")).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(seen).toEqual([null, "data:image/jpeg;base64,AA"]);
+      expect(rpc).toHaveBeenLastCalledWith("getThumbnails", { uids: ["vid"] });
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

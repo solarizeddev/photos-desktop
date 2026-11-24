@@ -79,6 +79,8 @@ const SAVE_EVERY = 240;
  * that minute's fingerprints, made again at the next scan.
  */
 const SAVE_EVERY_MS = 60_000;
+/** A photo found readable again waits this long for the ones after it before the file is saved. */
+const READABLE_SAVE_MS = 5_000;
 const RECORD_BYTES = HASH_WORDS * 4 + 1 + COLOR_BYTES;
 
 /** The key a group is remembered by: its copies, sorted, so the order shown does not matter. */
@@ -218,6 +220,7 @@ export class DuplicateFinder {
   private regroupTimer: ReturnType<typeof setTimeout> | null = null;
   private regroupDue = 0;
   private shown: { version: number; hidden: number; groups: ShownGroups } | null = null;
+  private readableSave: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly fingerprint: (bytes: Buffer) => Promise<Fingerprint | null> = fingerprintOf,
@@ -239,6 +242,9 @@ export class DuplicateFinder {
   setSource(source: DuplicateSource | null): void {
     this.source = source;
     if (!source) {
+      // A save still to come would write the emptied state below over the kept fingerprints.
+      if (this.readableSave) clearTimeout(this.readableSave);
+      this.readableSave = null;
       this.generation++;
       this.running = null;
       if (this.regroupTimer) clearTimeout(this.regroupTimer);
@@ -306,6 +312,22 @@ export class DuplicateFinder {
     let any = false;
     for (const u of uids) any = this.gone.delete(u) || any;
     if (any) this.bump();
+  }
+
+  /**
+   * A photo that had no picture to read has one now (a thumbnail made on this computer): it is
+   * read at the next scan, rather than left out for good.
+   */
+  readable(uid: string): void {
+    this.load();
+    if (!this.unreadable.delete(uid)) return;
+    // One save for a run of them, a moment after the last.
+    if (this.readableSave) clearTimeout(this.readableSave);
+    this.readableSave = setTimeout(() => {
+      this.readableSave = null;
+      this.save();
+    }, READABLE_SAVE_MS);
+    this.readableSave.unref?.();
   }
 
   /** Reads the library and fingerprints what is new; answers at once, the scan runs on. */

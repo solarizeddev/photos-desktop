@@ -21,8 +21,9 @@
  */
 
 /**
- * Grid thumbnails (and, at `<uid>/f/<l,t,r,b>`, people's covers cut to the face, and at
- * `<uid>/v`, videos to play, a byte range at a time) served
+ * Grid thumbnails (and, at `<uid>/f/<l,t,r,b>`, people's covers cut to the face, at
+ * `<uid>/v`, videos to play, a byte range at a time, and at `<uid>/vf` videos the host
+ * draws a thumbnail of) served
  * to the window over loopback HTTP, the way a web page gets its
  * images: the webview fetches several at once, decodes them off its main thread, and
  * never waits on the one request channel to the host. Before, each thumbnail crossed
@@ -75,6 +76,8 @@ let token: Buffer | null = null;
 let source: ThumbnailSource | null = null;
 let faces: FaceSource | null = null;
 let videos: VideoLookup | null = null;
+/** Videos opened only to draw a picture of: their own, so a frame never closes one playing. */
+let frameVideos: VideoLookup | null = null;
 
 /**
  * Starts serving (or keeps serving) and mints a fresh token, so a URL from before the
@@ -84,10 +87,12 @@ export async function startThumbServer(
   from: ThumbnailSource,
   faceFrom?: FaceSource,
   videoFrom?: VideoLookup,
+  frameFrom?: VideoLookup,
 ): Promise<string> {
   source = from;
   faces = faceFrom ?? null;
   videos = videoFrom ?? null;
+  frameVideos = frameFrom ?? null;
   token = randomBytes(32);
   if (!server) {
     const created = createServer((req, res) => void handle(req, res));
@@ -108,6 +113,7 @@ export async function stopThumbServer(): Promise<void> {
   source = null;
   faces = null;
   videos = null;
+  frameVideos = null;
   const running = server;
   server = null;
   port = 0;
@@ -127,10 +133,12 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
   if (req.headers.host !== `127.0.0.1:${port}`) return refuse(403);
 
   // `/t/<token>/<uid>`, `/t/<token>/<uid>/f/<l,t,r,b>` for a cover cut to a face, or
-  // `/t/<token>/<uid>/v` for a video to play.
+  // `/t/<token>/<uid>/v` for a video to play, or `/t/<token>/<uid>/vf` for one read only for
+  // a picture of it.
   const parts = (req.url ?? "").split("?")[0].split("/");
   const face = parts.length === 6 && parts[4] === "f";
-  const video = parts.length === 5 && parts[4] === "v";
+  const frame = parts.length === 5 && parts[4] === "vf";
+  const video = (parts.length === 5 && parts[4] === "v") || frame;
   if ((parts.length !== 4 && !face && !video) || parts[0] !== "" || parts[1] !== "t") return refuse(404);
   // A player may ask what a video is before it asks for it; a picture is only fetched.
   if (head && !video) return refuse(405);
@@ -153,7 +161,7 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
   res.on("close", () => {
     if (!res.writableFinished) gone.abort();
   });
-  if (video) return serveVideo(uid, req, res, head, gone.signal, refuse);
+  if (video) return serveVideo(uid, req, res, head, gone.signal, refuse, frame ? frameVideos : videos);
   try {
     const bytes = box && faces ? await faces(uid, box, gone.signal) : await source(uid, gone.signal);
     if (gone.signal.aborted) return;
@@ -182,8 +190,8 @@ async function serveVideo(
   head: boolean,
   gone: AbortSignal,
   refuse: (code: number) => void,
+  lookup: VideoLookup | null,
 ): Promise<void> {
-  const lookup = videos;
   if (!lookup) return refuse(404);
   let found: VideoAnswer;
   try {

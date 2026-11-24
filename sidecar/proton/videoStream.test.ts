@@ -230,6 +230,35 @@ describe("the videos kept open", () => {
     await vi.waitFor(() => expect(closed.sort()).toEqual(["a", "b", "c"]));
   });
 
+  it("keeps as many as it is told, and closes one done with at once", async () => {
+    const closed: string[] = [];
+    const open = new OpenVideos(
+      async (uid) => ({ ...videoFromBytes(FILE, "video/mp4"), close: () => closed.push(uid) }),
+      Date.now,
+      90_000,
+      { kept: 3 },
+    );
+    for (const uid of ["a", "b", "c"]) await open.get(uid);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(closed).toEqual([]);
+    open.close("b");
+    await vi.waitFor(() => expect(closed).toEqual(["b"]));
+    expect(open.size()).toBe(2);
+    open.clear();
+  });
+
+  it("past the number kept, closes the oldest nobody is reading rather than one being read", async () => {
+    const closed: string[] = [];
+    const open = new OpenVideos(async (uid) => ({ ...videoFromBytes(FILE, "video/mp4"), close: () => closed.push(uid) }));
+    const reading = source(await open.get("a")).read(0, FILE.length - 1, live());
+    await reading.next();
+    await open.get("b");
+    await open.get("c");
+    await vi.waitFor(() => expect(closed).toEqual(["b"]));
+    await reading.return(undefined);
+    open.clear();
+  });
+
   it("closes a video left idle, but not one still being read", async () => {
     let now = 0;
     const closed: string[] = [];

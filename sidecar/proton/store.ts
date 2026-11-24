@@ -122,6 +122,8 @@ export const ACCOUNT_FILE = "account.enc";
 export const PHOTO_EVENTS_FILE = "photo-events.enc";
 /** The photos the face and search scan could not read (scanMisses.ts). The account's own, so `wipeCache` takes it. */
 export const SCAN_MISSES_FILE = "scan-misses.enc";
+/** The videos this computer could not draw a thumbnail for, and when (thumbRepair.ts). The account's own, so `wipeCache` takes it. */
+export const THUMB_REPAIR_FILE = "thumb-repair.enc";
 
 let dataDir: string | null = null;
 let dataKey: Buffer | null = null;
@@ -240,6 +242,7 @@ export function wipeCache(): void {
     rmSync(join(dataDir, ACCOUNT_FILE), { force: true });
     rmSync(join(dataDir, PHOTO_EVENTS_FILE), { force: true });
     rmSync(join(dataDir, SCAN_MISSES_FILE), { force: true });
+    rmSync(join(dataDir, THUMB_REPAIR_FILE), { force: true });
     // The files set aside as unreadable, and the vaults set aside whole, belong to the account
     // as much as the ones above.
     for (const name of readdirSync(dataDir)) {
@@ -286,6 +289,7 @@ export function setAsideVault(files: string[]): string | null {
     ACCOUNT_FILE,
     PHOTO_EVENTS_FILE,
     SCAN_MISSES_FILE,
+    THUMB_REPAIR_FILE,
     ...files,
   ];
   let present: string[];
