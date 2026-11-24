@@ -90,3 +90,66 @@ describe("the video the viewer streams", () => {
     expect(unsized.session.videoNotStreamable("u")).toBe(true);
   });
 });
+
+describe("a video too large to hold whole", () => {
+  const LARGE = 400 * 1024 * 1024;
+
+  /**
+   * A session whose Proton has a large video behind seekable streams, each holding a slot
+   * until its downloader's signal fires, as the SDK's do; `blockSizes` false for an old file.
+   */
+  function large(blockSizes = true) {
+    const session = new ProtonSession();
+    const asked = { downloaders: 0, inUse: 0, whole: 0 };
+    (session as any).photos = {
+      getNode: async () => ({ mediaType: "video/mp4" }),
+      async getFileDownloader(_uid: string, signal: AbortSignal) {
+        asked.downloaders++;
+        asked.inUse++;
+        return {
+          getClaimedSizeInBytes: () => LARGE,
+          downloadToStream() {
+            asked.whole++;
+            asked.inUse--;
+            return { completion: async () => {} };
+          },
+          getSeekableStream() {
+            if (!blockSizes) throw new Error("Revision does not have defined claimed block sizes");
+            signal.addEventListener("abort", () => asked.inUse--, { once: true });
+            let at = 0;
+            return {
+              seek: (p: number) => void (at = p),
+              async read(n: number) {
+                const value = new Uint8Array(n);
+                for (let i = 0; i < n; i++) value[i] = (at + i) & 0xff;
+                return { value, done: false };
+              },
+            };
+          },
+        };
+      },
+    };
+    const videos = (session as any).videos as { get(uid: string): Promise<unknown>; clear(): void };
+    return { session, asked, videos };
+  }
+
+  it("is read a block at a time, on up to three streams, each slot back when it closes", async () => {
+    const { asked, videos } = large();
+    const v = (await videos.get("big")) as VideoSource;
+    expect(v.size).toBe(LARGE);
+    const parts: Uint8Array[] = [];
+    for await (const piece of v.read(LARGE - 10, LARGE - 1, new AbortController().signal)) parts.push(piece);
+    expect(Array.from(Buffer.concat(parts))).toEqual(Array.from({ length: 10 }, (_, i) => (LARGE - 10 + i) & 0xff));
+    await vi.waitFor(() => expect(asked.downloaders).toBe(3));
+    expect(asked.whole).toBe(0);
+    videos.clear();
+    await vi.waitFor(() => expect(asked.inUse).toBe(0));
+  });
+
+  it("is refused when it is an old file that cannot be read that way, its slot given back", async () => {
+    const { session, asked, videos } = large(false);
+    expect(await videos.get("old")).toBe(NOT_STREAMABLE);
+    expect(session.videoNotStreamable("old")).toBe(true);
+    await vi.waitFor(() => expect(asked.inUse).toBe(0));
+  });
+});

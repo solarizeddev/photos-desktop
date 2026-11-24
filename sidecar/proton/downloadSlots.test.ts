@@ -21,7 +21,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { openDownloader } from "./downloadSlots.ts";
+import { SDK_SLOTS, lendSlot, openDownloader, slotsHeld } from "./downloadSlots.ts";
 import { getOriginal, getVideo, releaseOriginal } from "./download.ts";
 import { downloadWhole } from "./viewerMeta.ts";
 
@@ -47,6 +47,11 @@ function slotClient(opts: { claimed?: number; bytes?: number; setupMs?: number; 
       await sleep(setupMs);
       return {
         getClaimedSizeInBytes: () => claimed,
+        // As the SDK's: the slot goes back once, when the downloader's signal fires.
+        getSeekableStream() {
+          signal?.addEventListener("abort", () => slots.inUse--, { once: true });
+          return { seek() {}, read: async () => ({ value: new Uint8Array(0), done: true }) };
+        },
         downloadToStream(stream: WritableStream<Uint8Array>) {
           const completion = (async () => {
             try {
@@ -136,5 +141,73 @@ describe("the paths that made a downloader and then did not download", () => {
     const client = slotClient({ claimed: 2048 });
     for (let i = 0; i < 8; i++) expect(await downloadWhole(client, `w${i}`, 1024)).toBeNull();
     await vi.waitFor(() => expect(client.slots.inUse).toBe(0));
+  });
+});
+
+describe("a downloader read through its seekable stream", () => {
+  it("is counted until stopped, and stopping it gives its slot back once", async () => {
+    const client = slotClient();
+    const before = slotsHeld();
+    const opened = await openDownloader(client, "v");
+    opened.downloader.getSeekableStream();
+    expect(slotsHeld()).toBe(before + 1);
+    opened.unused(); // a stream under way is not a downloader left unused
+    expect(client.slots.inUse).toBe(1);
+    opened.stop();
+    opened.stop();
+    await sleep(5);
+    expect(client.slots.inUse).toBe(0);
+    expect(slotsHeld()).toBe(before);
+  });
+
+  it("makes no stream once its signal has fired, and its slot goes back unused", async () => {
+    const client = slotClient();
+    const caller = new AbortController();
+    const opened = await openDownloader(client, "v", caller.signal);
+    caller.abort();
+    expect(() => opened.downloader.getSeekableStream()).toThrow();
+    opened.unused();
+    await vi.waitFor(() => expect(client.slots.inUse).toBe(0));
+  });
+});
+
+describe("a slot lent to a video's read lane", () => {
+  it("comes back when another download finds every slot taken, but not for another lane", async () => {
+    const client = slotClient();
+    const full: Array<{ unused(): void }> = [];
+    while (slotsHeld() < SDK_SLOTS) full.push(await openDownloader(client, `full${full.length}`));
+    let given = 0;
+    const unlend = lendSlot(() => given++);
+    // Another lane does not take it.
+    const lane = await openDownloader(slotClient(), "lane", undefined, { borrow: true });
+    expect(given).toBe(0);
+    // Anything else does.
+    const save = await openDownloader(slotClient(), "save");
+    expect(given).toBe(1);
+    unlend();
+    for (const o of [...full, lane, save]) o.unused();
+    await vi.waitFor(() => expect(client.slots.inUse).toBe(0));
+  });
+
+  it("comes back for a download that waits a while, however few slots are counted", async () => {
+    vi.useFakeTimers();
+    try {
+      let given = 0;
+      const unlend = lendSlot(() => given++);
+      let made!: () => void;
+      const slow = {
+        getFileDownloader: () => new Promise((resolve) => (made = () => resolve({}))),
+      };
+      const opening = openDownloader(slow, "save");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(given).toBe(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(given).toBe(1);
+      made();
+      (await opening).unused();
+      unlend();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

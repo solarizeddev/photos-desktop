@@ -25,8 +25,10 @@ import {
   ArrivingVideo,
   NOT_STREAMABLE,
   OpenVideos,
+  SeekingVideo,
   downloadVideo,
   parseRange,
+  startSeeking,
   startVideo,
   videoFromBytes,
   type VideoAnswer,
@@ -448,5 +450,285 @@ describe("the memory the videos kept open hold", () => {
     await reading.return(undefined);
     await vi.waitFor(() => expect(closed).toEqual(["first"]));
     open.clear();
+  });
+
+  it("counts a video read a block at a time at what it holds, not at its size", async () => {
+    const closed: string[] = [];
+    const open = new OpenVideos(
+      async (uid) => (uid === "large" ? { ...sized(5000, closed, uid), holds: 100 } : sized(300, closed, uid)),
+      Date.now,
+      90_000,
+      { keptBytes: 1000 },
+    );
+    await open.get("small");
+    await open.get("large");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(closed).toEqual([]);
+    open.clear();
+  });
+});
+
+describe("a video read range by range from Proton", () => {
+  /** A file of `size` bytes, each the low byte of its position, behind a fake seekable stream. */
+  function seekable(size: number) {
+    let position = 0;
+    const log = { seeks: [] as number[], reads: 0 };
+    let failAt: number | null = null;
+    const stream = {
+      seek(p: number) {
+        log.seeks.push(p);
+        position = p;
+      },
+      async read(n: number) {
+        log.reads++;
+        await new Promise((r) => setTimeout(r, 1));
+        if (failAt !== null && position <= failAt && failAt < position + n) throw new Error("block failed");
+        const len = Math.max(0, Math.min(n, size - position));
+        const value = new Uint8Array(len);
+        for (let i = 0; i < len; i++) value[i] = (position + i) & 0xff;
+        position += len;
+        return { value, done: position >= size };
+      },
+    };
+    return { stream, log, fail: (at: number) => (failAt = at) };
+  }
+  const bytesOf = async (gen: AsyncGenerator<Uint8Array>) => {
+    const parts: Uint8Array[] = [];
+    for await (const piece of gen) parts.push(Uint8Array.from(piece));
+    return Array.from(Buffer.concat(parts));
+  };
+  const MB = 1024 * 1024;
+
+  it("answers any range with the right bytes, the end of the file included", async () => {
+    const { stream } = seekable(10 * MB + 123);
+    const video = new SeekingVideo(10 * MB + 123, "video/mp4", stream, () => {});
+    const middle = await bytesOf(video.read(3 * MB + 7, 3 * MB + 300_000, live()));
+    expect(middle.length).toBe(300_000 - 7 + 1);
+    expect(middle.every((b, i) => b === ((3 * MB + 7 + i) & 0xff))).toBe(true);
+    const tail = await bytesOf(video.read(10 * MB, 10 * MB + 500, live()));
+    expect(tail.length).toBe(123);
+    expect(tail[122]).toBe((10 * MB + 122) & 0xff);
+    video.close();
+  });
+
+  it("serves what it kept without asking again", async () => {
+    const { stream, log } = seekable(20 * MB);
+    const video = new SeekingVideo(20 * MB, "video/mp4", stream, () => {});
+    await bytesOf(video.read(0, 1 * MB, live()));
+    const reads = log.reads;
+    await bytesOf(video.read(100, 2 * MB, live()));
+    expect(log.reads).toBe(reads);
+    video.close();
+  });
+
+  it("takes turns on the one stream when two ranges are read at once", async () => {
+    const { stream } = seekable(30 * MB);
+    const video = new SeekingVideo(30 * MB, "video/mp4", stream, () => {});
+    const [a, b] = await Promise.all([
+      bytesOf(video.read(0, 6 * MB, live())),
+      bytesOf(video.read(25 * MB, 30 * MB - 1, live())),
+    ]);
+    expect(a.every((x, i) => x === (i & 0xff))).toBe(true);
+    expect(b.every((x, i) => x === ((25 * MB + i) & 0xff))).toBe(true);
+    video.close();
+  });
+
+  it("stops a read the player gave up, and lets the slot go once on close", async () => {
+    const { stream } = seekable(20 * MB);
+    let closed = 0;
+    const video = new SeekingVideo(20 * MB, "video/mp4", stream, () => closed++);
+    const stop = new AbortController();
+    let got = 0;
+    for await (const piece of video.read(0, 20 * MB - 1, stop.signal)) {
+      got += piece.length;
+      if (got > MB) stop.abort();
+    }
+    expect(got).toBeLessThan(20 * MB);
+    video.close();
+    video.close();
+    expect(closed).toBe(1);
+  });
+
+  it("is broken and closed once a read fails, and opened afresh on the next ask", async () => {
+    const { stream, fail } = seekable(20 * MB);
+    fail(9 * MB);
+    let closed = 0;
+    const video = new SeekingVideo(20 * MB, "video/mp4", stream, () => closed++);
+    await expect(bytesOf(video.read(9 * MB, 10 * MB, live()))).rejects.toThrow();
+    expect(video.broken()).toBe(true);
+    expect(closed).toBe(1);
+    // A read of what it does not hold fails too: the server cuts the answer short and the
+    // player asks again, which opens it afresh.
+    await expect(bytesOf(video.read(0, 100, live()))).rejects.toThrow();
+    let loads = 0;
+    const open = new OpenVideos(async () =>
+      ++loads === 1 ? video : new SeekingVideo(20 * MB, "video/mp4", seekable(20 * MB).stream, () => {}),
+    );
+    await open.get("u");
+    const again = source(await open.get("u"));
+    expect(loads).toBe(2);
+    expect(again.broken!()).toBe(false);
+    open.clear();
+  });
+
+  it("lets a reader the player gave up leave while it waits its turn", async () => {
+    const { stream } = seekable(40 * MB);
+    const video = new SeekingVideo(40 * MB, "video/mp4", stream, () => {});
+    const first = bytesOf(video.read(0, 8 * MB, live()));
+    const leaving = new AbortController();
+    const second = bytesOf(video.read(30 * MB, 31 * MB, leaving.signal));
+    leaving.abort();
+    expect((await second).length).toBe(0);
+    expect((await first).length).toBe(8 * MB + 1);
+    video.close();
+  });
+
+  it("reads ahead of the player on its other lanes", async () => {
+    const one = seekable(64 * MB);
+    const video = new SeekingVideo(64 * MB, "video/mp4", one.stream, () => {});
+    const two = seekable(64 * MB);
+    const three = seekable(64 * MB);
+    video.addLane(two.stream, () => {});
+    video.addLane(three.stream, () => {});
+    expect(video.laneCount()).toBe(3);
+    const first = await bytesOf(video.read(0, 100, live()));
+    expect(first.length).toBe(101);
+    await vi.waitFor(() => expect(one.log.reads + two.log.reads + three.log.reads).toBeGreaterThanOrEqual(5));
+    // The four blocks after the first were read before the player asked for them.
+    const seeks = () => [...one.log.seeks, ...two.log.seeks, ...three.log.seeks];
+    expect(seeks().sort((a, b) => a - b).slice(0, 5)).toEqual([0, 4 * MB, 8 * MB, 12 * MB, 16 * MB]);
+    const later = await bytesOf(video.read(16 * MB, 16 * MB + 10, live()));
+    expect(later[0]).toBe((16 * MB) & 0xff);
+    // Already read ahead: that block is not asked of Proton again.
+    expect(seeks().filter((p) => p === 16 * MB).length).toBe(1);
+    video.close();
+  });
+
+  it("lets a lane asked to leave finish its read first, and plays on without it", async () => {
+    const video = new SeekingVideo(64 * MB, "video/mp4", seekable(64 * MB).stream, () => {});
+    let left = 0;
+    const leave = video.addLane(seekable(64 * MB).stream, () => left++)!;
+    const reading = bytesOf(video.read(0, 9 * MB, live()));
+    leave();
+    const bytes = await reading;
+    expect(bytes.length).toBe(9 * MB + 1);
+    expect(bytes.every((b, i) => b === (i & 0xff))).toBe(true);
+    await vi.waitFor(() => expect(left).toBe(1));
+    expect(video.laneCount()).toBe(1);
+    expect(video.broken()).toBe(false);
+    video.close();
+  });
+
+  it("lets a lane go whose read ahead failed, and plays on", async () => {
+    const video = new SeekingVideo(64 * MB, "video/mp4", seekable(64 * MB).stream, () => {});
+    const bad = seekable(64 * MB);
+    // Every read on this lane fails.
+    bad.stream.read = async () => {
+      throw new Error("block failed");
+    };
+    let left = 0;
+    video.addLane(bad.stream, () => left++);
+    const bytes = await bytesOf(video.read(0, 12 * MB, live()));
+    expect(bytes.length).toBe(12 * MB + 1);
+    expect(bytes.every((b, i) => b === (i & 0xff))).toBe(true);
+    expect(video.broken()).toBe(false);
+    await vi.waitFor(() => expect(left).toBe(1));
+    video.close();
+  });
+
+  it("is broken, not spinning, when a read ahead fails on its only stream", async () => {
+    const one = seekable(64 * MB);
+    const video = new SeekingVideo(64 * MB, "video/mp4", one.stream, () => {});
+    // The SDK's stream stays errored once a read has failed.
+    let reads = 0;
+    const read = one.stream.read;
+    one.stream.read = async (n: number) => {
+      if (++reads > 1) throw new Error("stream errored");
+      return read(n);
+    };
+    const first = await bytesOf(video.read(0, 100, live()));
+    expect(first.length).toBe(101);
+    await vi.waitFor(() => expect(video.broken()).toBe(true));
+    expect(reads).toBeLessThan(10);
+  });
+
+  it("reads nothing for a place the player left while it waited, and serves the newest first", async () => {
+    const { stream, log } = seekable(64 * MB);
+    const video = new SeekingVideo(64 * MB, "video/mp4", stream, () => {});
+    const first = bytesOf(video.read(0, 100, live()));
+    // Two places asked for while the one stream is busy; the player leaves the first.
+    const left = new AbortController();
+    const skipped = bytesOf(video.read(40 * MB, 40 * MB + 10, left.signal));
+    const wanted = bytesOf(video.read(52 * MB, 52 * MB + 10, live()));
+    left.abort();
+    expect((await skipped).length).toBe(0);
+    expect((await wanted)[0]).toBe((52 * MB) & 0xff);
+    await first;
+    expect(log.seeks).not.toContain(40 * MB);
+    video.close();
+  });
+
+  it("serves a live ask whose block the asks before it gave up on", async () => {
+    const video = new SeekingVideo(64 * MB, "video/mp4", seekable(64 * MB).stream, () => {});
+    const busy = bytesOf(video.read(0, 100, live()));
+    const leaving = [new AbortController(), new AbortController(), new AbortController()];
+    const gaveUp = leaving.map((c, i) => bytesOf(video.read(40 * MB + i * 1000, 40 * MB + i * 1000 + 10, c.signal)));
+    const stays = bytesOf(video.read(40 * MB + 5000, 40 * MB + 5010, live()));
+    for (const c of leaving) {
+      c.abort();
+      await new Promise((r) => setTimeout(r, 2));
+    }
+    await Promise.all(gaveUp);
+    const bytes = await stays;
+    expect(bytes.length).toBe(11);
+    expect(bytes[0]).toBe((40 * MB + 5000) & 0xff);
+    await busy;
+    expect(video.broken()).toBe(false);
+    video.close();
+  });
+
+  it("lets a lane added after it closed go at once", () => {
+    const video = new SeekingVideo(20 * MB, "video/mp4", seekable(20 * MB).stream, () => {});
+    video.close();
+    let left = 0;
+    expect(video.addLane(seekable(20 * MB).stream, () => left++)).toBeNull();
+    expect(left).toBe(1);
+  });
+
+  /** A downloader of its own, as `openDownloader` hands it out, counting how its slot goes back. */
+  function opened(stream: () => unknown) {
+    const given = { unused: 0, stopped: 0 };
+    return {
+      given,
+      downloader: { getSeekableStream: stream },
+      unused: () => given.unused++,
+      stop: () => given.stopped++,
+    };
+  }
+
+  it("has read its first block when it starts, and gives its slot back when closed", async () => {
+    const { stream, log } = seekable(20 * MB);
+    const o = opened(() => stream);
+    const video = source(await startSeeking(o, 20 * MB, "video/mp4", live()));
+    expect(log.seeks[0]).toBe(0);
+    expect(log.reads).toBeGreaterThanOrEqual(1);
+    video.close!();
+    expect(o.given).toEqual({ unused: 0, stopped: 1 });
+  });
+
+  it("is not played for a file with no block sizes on record, and its slot goes back", async () => {
+    const o = opened(() => {
+      throw new Error("Revision does not have defined claimed block sizes");
+    });
+    expect(await startSeeking(o, 500 * MB, "video/mp4", live())).toBe(NOT_STREAMABLE);
+    expect(o.given).toEqual({ unused: 1, stopped: 0 });
+  });
+
+  it("is not answered when its first block fails, and its slot goes back", async () => {
+    const { stream, fail } = seekable(20 * MB);
+    fail(0);
+    const o = opened(() => stream);
+    expect(await startSeeking(o, 20 * MB, "video/mp4", live())).toBeNull();
+    expect(o.given.stopped).toBe(1);
   });
 });

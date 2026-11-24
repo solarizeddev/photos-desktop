@@ -163,11 +163,21 @@ import { activeRevisionOf, nodeDurationMs, nodeLocation, nodeName, toMillis } fr
 import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
 import { FaceCovers } from "./faceCover.ts";
-import { MAX_STREAMED_VIDEO, NOT_STREAMABLE, OpenVideos, startVideo, videoFromBytes, type VideoAnswer } from "./videoStream.ts";
+import {
+  MAX_STREAMED_VIDEO,
+  NOT_STREAMABLE,
+  OpenVideos,
+  startSeeking,
+  startVideo,
+  videoFromBytes,
+  type SeekableStream,
+  type SeekingVideo,
+  type VideoAnswer,
+} from "./videoStream.ts";
 import { accountMatch, recordAccountKeys, recordedAccountKeys } from "./accountSwitch.ts";
 import { hostNotice } from "./hostCall.ts";
 import { NotReadyError, PhotoEvents, sealedAnchorStore, type FeedEvent } from "./photoEvents.ts";
-import { openDownloader } from "./downloadSlots.ts";
+import { SDK_SLOTS, lendSlot, openDownloader, slotsHeld, type OpenedDownloader } from "./downloadSlots.ts";
 import { failureOf, missFor, onTheWay, type ScanMiss } from "./scanMisses.ts";
 import {
   cancelHydrate as stopHydrate,
@@ -398,6 +408,12 @@ const OCR_SETTLE_MS = 250;
 const OCR_FETCHES_AT_ONCE = 2;
 /** A read's fetch that has not answered in this long is given up. */
 const OCR_FETCH_GIVE_UP_MS = 3 * 60 * 1000;
+/** How many streams a large video reads on at most, and how long one more may wait for a slot. */
+const VIDEO_LANES = 3;
+const LANE_WAIT_MS = 2_000;
+/** How often a large video's lanes are looked at, and how long unread before it sheds them. */
+const LANE_CHECK_MS = 5_000;
+const LANE_IDLE_MS = 15_000;
 /** How long a face scan waits for the window's read of the timeline before reading its own. */
 const SCAN_WAITS_FOR_TIMELINE_MS = 3 * 60_000;
 /** How long a session's first scan waits for the window's read to begin. */
@@ -3032,10 +3048,11 @@ export class ProtonSession {
    * A video for the window to play over the thumbnail server, a range at a time. A copy
    * kept offline plays from the disk, with or without Proton, when it is small enough to
    * hold (the sealed copy is decrypted whole), and is never downloaded again when it is not;
-   * otherwise it is downloaded from Proton. NOT_STREAMABLE when it never can be: kept offline
-   * over MAX_INMEMORY_VIDEO, not a video, Proton does not say how large it is (which ranges
-   * need), or it is over MAX_STREAMED_VIDEO. Null when it cannot be had just now, or `signal`
-   * fired. The window falls back to `getVideo` for both.
+   * otherwise it is downloaded from Proton, or, over MAX_STREAMED_VIDEO, read from Proton a
+   * block at a time as it plays. NOT_STREAMABLE when it never can be: kept offline over
+   * MAX_INMEMORY_VIDEO, not a video, Proton does not say how large it is (which ranges need),
+   * or it is over MAX_STREAMED_VIDEO and cannot be read a block at a time. Null when it cannot
+   * be had just now, or `signal` fired. The window falls back to `getVideo` for both.
    */
   private async videoSource(uid: string, signal: AbortSignal): Promise<VideoAnswer> {
     if (isOfflineReady(uid)) {
@@ -3062,11 +3079,73 @@ export class ProtonSession {
       return null;
     }
     const size = opened.downloader.getClaimedSizeInBytes?.() ?? 0;
-    if (!size || size > MAX_STREAMED_VIDEO) {
+    if (!size) {
       opened.unused();
       return NOT_STREAMABLE;
     }
+    // Too large to hold whole while it plays: read from Proton a block at a time as it
+    // plays, on more than one stream when slots are free.
+    if (size > MAX_STREAMED_VIDEO) {
+      const video = await startSeeking(opened, size, mime, signal);
+      if (video && video !== NOT_STREAMABLE) void this.moreLanes(uid, video);
+      return video;
+    }
     return startVideo(opened, size, mime, signal);
+  }
+
+  /**
+   * Gives a large video more streams to read ahead on, each its own downloader, while slots
+   * are free (one is always left for anything else). Each is lent: another download that
+   * needs its slot has it back.
+   */
+  private async moreLanes(uid: string, video: SeekingVideo): Promise<void> {
+    // Looked at again every so often while it is open: slots taken at the start may be free
+    // later, and a video not played for a while gives its extra lanes up for the one that is.
+    while (!video.done()) {
+      if (video.idleFor() > LANE_IDLE_MS) video.shed();
+      else await this.addLanes(uid, video);
+      await new Promise((resolve) => setTimeout(resolve, LANE_CHECK_MS).unref?.());
+    }
+  }
+
+  private async addLanes(uid: string, video: SeekingVideo): Promise<void> {
+    while (video.laneCount() < VIDEO_LANES) {
+      const photos = this.photos;
+      if (!photos || video.done() || slotsHeld() >= SDK_SLOTS - 1) return;
+      // Only the wait for a slot is given up after LANE_WAIT_MS: a lane is let go through
+      // the video.
+      const wait = new AbortController();
+      const timer = setTimeout(() => wait.abort(), LANE_WAIT_MS);
+      let opened: OpenedDownloader;
+      try {
+        opened = await openDownloader(photos, uid, wait.signal, { borrow: true });
+      } catch {
+        return;
+      } finally {
+        clearTimeout(timer);
+      }
+      // The same file as the first stream reads: a version uploaded since would serve other
+      // bytes for the same places.
+      if ((opened.downloader.getClaimedSizeInBytes?.() ?? 0) !== video.size) {
+        opened.unused();
+        return;
+      }
+      let stream: SeekableStream;
+      try {
+        // Throws, among others, for a downloader made just as the wait ran out.
+        stream = opened.downloader.getSeekableStream();
+      } catch {
+        opened.unused();
+        return;
+      }
+      let unlend = () => {};
+      const leave = video.addLane(stream, () => {
+        unlend();
+        opened.stop();
+      });
+      if (!leave) return;
+      unlend = lendSlot(leave);
+    }
   }
 
   /** True for a video the window should play the older way at once, without streaming it again. */

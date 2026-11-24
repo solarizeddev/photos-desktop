@@ -197,6 +197,8 @@ async function serveVideo(
   if (!video || video.size <= 0) return refuse(404);
   const range = parseRange(req.headers.range, video.size);
   if (range === "unsatisfiable") {
+    const asked = /^bytes=(\d+)/.exec(String(req.headers.range ?? ""));
+    diag.log("drive", "video_range_refused", { size: video.size, from: asked ? Number(asked[1]) : -1 });
     res.writeHead(416, { "Content-Range": `bytes */${video.size}`, "Cache-Control": "no-store" });
     res.end();
     return;
