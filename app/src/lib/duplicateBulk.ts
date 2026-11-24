@@ -24,18 +24,23 @@
 
 import { picksFrom, type Marks } from "./duplicateMarks";
 
-export type BulkGroup = { key: string; kind: string; uids: string[] };
+/** `keep`: the copy the finder prefers to keep, when it has one (the largest file of a video). */
+export type BulkGroup = { key: string; kind: string; uids: string[]; keep?: number };
 
-/** A group's copies but its first, the oldest, which stays. */
-export const allBut = (g: BulkGroup): Set<string> => new Set(g.uids.slice(1));
+/** A group's copies but the one that stays: the preferred one, else the first, the oldest. */
+export const allBut = (g: BulkGroup): Set<string> => {
+  const keep = g.keep ?? 0;
+  return new Set(g.uids.filter((_, i) => i !== keep));
+};
 
 /**
  * Whether a group's extras may be marked together with every other group's. Identical copies
- * are one file, so any of them may stay. Similar photos are different pictures, picked one
- * group at a time.
+ * are one file, so any of them may stay, and a possible duplicate is one picture in several
+ * files, the preferred copy staying. Bursts and similar photos are different pictures, picked
+ * one group at a time.
  */
 export function bulkMarkable(g: BulkGroup): boolean {
-  return g.kind === "identical";
+  return g.kind === "identical" || g.kind === "same";
 }
 
 /**
@@ -47,7 +52,7 @@ export function unmarkedBulkGroups<G extends BulkGroup>(marks: Marks, groups: G[
   return groups.filter((g) => bulkMarkable(g) && g.uids.length > 1 && !marks.get(g.key)?.size);
 }
 
-/** The marks with the extras of every group `unmarkedBulkGroups` names marked, each keeping its oldest. */
+/** The marks with the extras of every group `unmarkedBulkGroups` names marked, each keeping one (`allBut`). */
 export function markEvery(marks: Marks, groups: BulkGroup[]): Marks {
   const next: Marks = new Map(marks);
   for (const g of unmarkedBulkGroups(marks, groups)) next.set(g.key, allBut(g));

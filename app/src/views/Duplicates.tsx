@@ -33,13 +33,15 @@ import { canMark, toggleMark, type Marks } from "../lib/duplicateMarks";
 import { allBut, markEvery, marksWithout, planTrashCalls, plannedCount, unmarkedBulkGroups, type TrashCall } from "../lib/duplicateBulk";
 import "../styles/Duplicates.css";
 
-type Kind = "identical" | "similar";
-type Group = { key: string; kind: Kind; uids: string[]; times: number[] };
+type Kind = "identical" | "same" | "burst" | "similar";
+/** `keep`: the copy to keep when one is preferred, the largest file of one video in several. */
+type Group = { key: string; kind: Kind; uids: string[]; times: number[]; keep?: number };
 /** `ready` is false until the finder has worked the groups out once. */
-type Groups = { identical: Group[]; similar: Group[]; ignored: Group[]; ready: boolean };
+type Groups = { identical: Group[]; same: Group[]; burst: Group[]; similar: Group[]; ignored: Group[]; ready: boolean };
 type Status = { state: "idle" | "scanning" | "done" | "failed"; done: number; total: number; version: number };
 type Meta = { name: string; size: number | null; mediaType: string | null };
-type Tab = "identical" | "similar" | "ignored";
+type Tab = "identical" | "same" | "burst" | "similar" | "ignored";
+const TABS: Tab[] = ["identical", "same", "burst", "similar", "ignored"];
 
 /** Groups drawn at first, and added with each "show more". */
 const PAGE = 40;
@@ -64,9 +66,10 @@ let keptMarks: Marks = new Map();
 let keptTab: Tab = "identical";
 
 /**
- * The duplicate finder, as the phone has it: identical copies and similar photos in groups,
- * each copy marked to go with a click. One copy of every group always stays, unless the user
- * deletes the whole group on purpose. What goes is moved to the trash, where it can be restored.
+ * The duplicate finder, as the phone has it: identical copies, one picture in several files,
+ * bursts and similar photos in groups, each copy marked to go with a click. One copy of every
+ * group always stays, unless the user deletes the whole group on purpose. What goes is moved
+ * to the trash, where it can be restored.
  */
 export function Duplicates({
   onView,
@@ -141,7 +144,9 @@ export function Duplicates({
   // Marks of photos no longer in any group fall away.
   useEffect(() => {
     if (!groups?.ready) return;
-    const present = new Map([...groups.identical, ...groups.similar].map((g) => [g.key, new Set(g.uids)]));
+    const present = new Map(
+      [...groups.identical, ...groups.same, ...groups.burst, ...groups.similar].map((g) => [g.key, new Set(g.uids)]),
+    );
     let changed = false;
     const next: Marks = new Map();
     for (const [key, set] of marks) {
@@ -193,7 +198,10 @@ export function Duplicates({
     return () => clearTimeout(id);
   }, [toast]);
 
-  const allGroups = useMemo(() => (groups ? [...groups.identical, ...groups.similar] : []), [groups]);
+  const allGroups = useMemo(
+    () => (groups ? [...groups.identical, ...groups.same, ...groups.burst, ...groups.similar] : []),
+    [groups],
+  );
   // Marked across every group, most were never on screen and their sizes are not known.
   const { markedCount, markedBytes, sizesKnown } = useMemo(() => {
     let count = 0;
@@ -219,7 +227,7 @@ export function Duplicates({
     setMarks(toggleMark(marks, group, uid));
   }
 
-  function allButFirst(group: Group) {
+  function allButKeeper(group: Group) {
     if (working) return;
     const next: Marks = new Map(marks);
     next.set(group.key, allBut(group));
@@ -297,19 +305,21 @@ export function Duplicates({
   }
 
   const scanning = status?.state === "scanning";
-  const counts = {
+  const counts: Record<Tab, number> = {
     identical: groups?.identical.length ?? 0,
+    same: groups?.same.length ?? 0,
+    burst: groups?.burst.length ?? 0,
     similar: groups?.similar.length ?? 0,
     ignored: groups?.ignored.length ?? 0,
   };
-  const hint = tab === "identical" ? "duplicates.identicalHint" : tab === "similar" ? "duplicates.similarHint" : "duplicates.ignoredHint";
+  const hint = `duplicates.${tab}Hint` as const;
   const markable = unmarkedBulkGroups(marks, list).length;
 
   return (
     <div className="dp-page">
       <div className="dp-head">
         <div className="dp-tabs" role="tablist">
-          {(["identical", "similar", "ignored"] as Tab[]).map((key) => (
+          {TABS.map((key) => (
             <button
               key={key}
               role="tab"
@@ -338,9 +348,11 @@ export function Duplicates({
           ) : scanning && status ? (
             <>
               <span>
-                {status.total > 0
-                  ? t("duplicates.scanning", { done: status.done.toLocaleString(locale), total: status.total.toLocaleString(locale) })
-                  : t("duplicates.reading")}
+                {status.total > 0 && status.done >= status.total
+                  ? t("duplicates.readingVideos")
+                  : status.total > 0
+                    ? t("duplicates.scanning", { done: status.done.toLocaleString(locale), total: status.total.toLocaleString(locale) })
+                    : t("duplicates.reading")}
               </span>
               <span className="dp-bar">
                 <span style={{ width: `${status.total ? Math.round((status.done / status.total) * 100) : 0}%` }} />
@@ -389,14 +401,14 @@ export function Duplicates({
               <section key={group.key} className="dp-card">
                 <header className="dp-cardhead">
                   <span className="dp-cardtitle">
-                    {t(group.kind === "identical" ? "duplicates.identicalGroup" : "duplicates.similarGroup")}
+                    {t(`duplicates.${group.kind}Group` as const)}
                   </span>
                   <span className="dp-cardcount">{group.uids.length}</span>
                   <div className="g-spacer" />
                   {tab !== "ignored" ? (
                     <>
-                      <button className="g-chip" disabled={working} onClick={() => allButFirst(group)}>
-                        {t("duplicates.allButFirst")}
+                      <button className="g-chip" disabled={working} onClick={() => allButKeeper(group)}>
+                        {t(group.keep !== undefined ? "duplicates.allButLargest" : "duplicates.allButFirst")}
                       </button>
                       <button className="g-chip" disabled={working} onClick={() => void ignore(group, true)}>
                         {t("duplicates.ignore")}
@@ -426,6 +438,7 @@ export function Duplicates({
                           aria-pressed={tab !== "ignored" ? going : undefined}
                         >
                           {src ? <img src={src} alt="" draggable={false} loading="lazy" /> : <span className="dp-thumbph" />}
+                          {group.keep === i && <span className="dp-largest">{t("duplicates.largest")}</span>}
                           {m?.mediaType?.startsWith("video/") && (
                             <span className="dp-video">
                               <PlayArrowIcon size={16} />
