@@ -364,6 +364,10 @@ describe("the duplicate finder", () => {
     // f looks like a and b, but those two are shown as identical only.
     expect(g.similar.map((x) => x.uids)).toEqual([["v~c", "v~d"]]);
     expect(f.getStatus()).toMatchObject({ state: "done", done: 6, total: 6 });
+    // A scan started again counts afresh, not from the last one's "all done".
+    f.start();
+    expect(f.getStatus()).toMatchObject({ state: "scanning", done: 0, total: 0 });
+    await f.settled();
   });
 
   it("asks again for a photo the source did not answer, and not for one without a thumbnail", async () => {
