@@ -171,12 +171,14 @@ import { AlbumPicker, AlbumPhotoLossDialog, NameDialog } from "../components/Alb
 import { ShareDialog } from "../components/ShareDialog";
 import { FILTER_LEAVE_MS, FilterPanel, type FilterPage, type MediaType } from "../components/FilterPanel";
 import { PhotoGrid, PhotoGridSkeleton } from "../components/PhotoGrid";
-import { VirtualSections } from "../components/VirtualSections";
+import { VirtualSections, type VirtualSection } from "../components/VirtualSections";
+import { CanvasSections } from "../components/CanvasSections";
 import {
   cachedThumbnail,
   connectThumbServer,
   disconnectThumbServer,
   thumbUrl,
+  useThumbServerBase,
 } from "../lib/thumbStore";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { DebugHud } from "../components/DebugHud";
@@ -207,6 +209,8 @@ import { onThisDay, seasons } from "../lib/memories";
 import { matchTheme, pillsByItself, themeEntries, themeNameKey, themePhotos, THEME_ROW_LIMIT, type ThemesReply } from "../lib/themes";
 import { dropPreview, prefetchAfter } from "../lib/previewStore";
 import { unwarmedBatches, warmWholeBatch } from "../lib/warmBatches";
+import { bench, benchCount, benchSpan } from "../lib/benchProbe";
+import { maybeRunScrollBench } from "../lib/scrollBench";
 import { forgetNames } from "../lib/photoNames";
 import "../styles/Photos.css";
 
@@ -368,6 +372,8 @@ export function Photos({
   offline?: boolean;
   onSignOut: () => void;
 }) {
+  // For the scroll measurement only (see `scrollBench`): when this draw of the view began.
+  const benchFrom = bench.on ? performance.now() : 0;
   const t = useT();
   const [allItems, setItems] = useState<TimelineItem[]>([]);
   // What is hidden stays out of every list below; only the Hidden page reads `allItems`.
@@ -581,8 +587,23 @@ export function Photos({
   const [compressRun, setCompressRun] = useState(false);
   const [compressStatus, setCompressStatus] = useState<CompressStatus | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // The scroll measurement, in a run of the app started for one and in no other: the
+  // timeline scrolls itself and the log says what each second cost (see `scrollBench`).
+  useEffect(() => {
+    void maybeRunScrollBench(() => scrollRef.current);
+  }, []);
+  // And, while one runs, what each draw of this whole view costs: from its start to its
+  // changes being in the page. A draw of the view takes every list under it along.
+  useLayoutEffect(() => {
+    if (bench.on && benchFrom) {
+      benchCount("photos");
+      benchSpan("photos_ms", benchFrom);
+    }
+  });
   // Escape belongs to the lightbox while it is open.
   const sel = useSelection(scrollRef, lightboxIdx === null);
+  // Where the canvas timeline fetches its thumbnails; until it is known, the DOM grid shows.
+  const thumbBase = useThumbServerBase();
   const { selected } = sel;
   // Whether one of the selection's actions is still working, so the bar can stand
   // down instead of taking a second click on work already in flight. The ref is what
@@ -2311,6 +2332,17 @@ export function Photos({
     const base = shownSections.map((s) => ({ key: s.label, items: s.items }));
     return semanticItems.length > 0 ? [...base, { key: t("search.byContent"), items: semanticItems }] : base;
   }, [shownSections, semanticItems, t]);
+  /** A month's header over its tiles, the same for the canvas timeline and the DOM one. */
+  const monthHeader = (s: VirtualSection<unknown>) => (
+    <div className="g-monthhdr">
+      <span className="g-monthtitle">{s.key}</span>
+      <span className="g-monthcount">
+        {t(s.items.length === 1 ? "common.photoCount.one" : "common.photoCount.other", {
+          count: s.items.length,
+        })}
+      </span>
+    </div>
+  );
 
   const hiddenPhotos = useMemo(
     () => allItems.filter((it) => hidden.photos.has(it.uid.slice(it.uid.lastIndexOf("~") + 1))),
@@ -4360,20 +4392,28 @@ export function Photos({
               </div>
             )}
 
-            {hidingKnown && <VirtualSections
+            {hidingKnown && (thumbBase ? (
+              // The timeline drawn on a canvas: the DOM grid could not keep up with a wide
+              // window's hundreds of tiles (see CanvasSections). It needs the thumbnail server.
+              <CanvasSections
+                scrollRef={scrollRef}
+                sections={virtualSections}
+                cellSize={cellSize}
+                base={thumbBase}
+                header={timelineSort.by === "name" ? undefined : monthHeader}
+                selected={selected}
+                onToggle={sel.toggle}
+                onOpen={onCellClick}
+                onContext={onCellContext}
+                offlineUids={offlineUids}
+                localUids={localUids}
+                covered={settingsOpen || uploadOpen}
+              />
+            ) : <VirtualSections
               scrollRef={scrollRef}
               sections={virtualSections}
               cellSize={cellSize}
-              header={timelineSort.by === "name" ? undefined : (s) => (
-                <div className="g-monthhdr">
-                  <span className="g-monthtitle">{s.key}</span>
-                  <span className="g-monthcount">
-                    {t(s.items.length === 1 ? "common.photoCount.one" : "common.photoCount.other", {
-                      count: s.items.length,
-                    })}
-                  </span>
-                </div>
-              )}
+              header={timelineSort.by === "name" ? undefined : monthHeader}
               grid={(_, items) => (
                 <PhotoGrid
                   items={items}
@@ -4386,7 +4426,7 @@ export function Photos({
                   localUids={localUids}
                 />
               )}
-            />}
+            />)}
           </>
         )}
         </div>
