@@ -2291,6 +2291,13 @@ export class ProtonSession {
     if (!photos || !base) return;
     faceScanner.setSource({
       listUids: async () => (await this.timelineForScan()).map((item) => item.uid),
+      // The photos' dates, for splitting a person by age: the timeline the window has read when
+      // it has read all of it, as listing it again takes as long as the library is large.
+      listTimes: async () => {
+        const run = this.timelineRun;
+        const items = run?.done && !run.error && !run.offline ? run.items : await this.getTimeline();
+        return new Map(items.map((item) => [item.uid, item.captureTime]));
+      },
       pictures: (uids, ahead) => this.scanPictures(photos, uids, ahead),
       listTrashed: async () => {
         const links = new Set<string>();

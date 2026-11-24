@@ -214,8 +214,8 @@ fn classified(method: &str) -> Option<Priority> {
         // short, and wanted now.
         "getDurations" | "getMediaTypes" | "getTimeline" | "startTimeline" | "timelinePage"
         | "listTrashed" | "trashCount" | "lockStatus" | "thumbServer" | "cloudEditorSource" | "facesOnPhoto"
-        | "facePeople" | "facePersonCandidates" | "labelsList" | "labelsOf" | "myFilesList"
-        | "myFilesThumbs" | "cameraFacts" | "getImportReview" | "getImportChecks" | "importThumbnails" | "diagReport"
+        | "facePeople" | "facePersonCandidates" | "faceSplitStart" | "faceSplitPlan" | "labelsList" | "labelsOf"
+        | "myFilesList" | "myFilesThumbs" | "cameraFacts" | "getImportReview" | "getImportChecks" | "importThumbnails" | "diagReport"
         | "duplicatesGroups" | "themes" => Priority::UserAction,
 
         // The window's status polls: tiny answers.
@@ -259,6 +259,7 @@ fn classified(method: &str) -> Option<Priority> {
         | "facePersonMerge" | "facePersonReject" | "facePersonDecline" | "facePersonCover"
         | "facePersonHide" | "facePersonShow"
         | "facePersonAddFaces" | "facePersonRemovePhotos" | "faceSuggestionDismiss"
+        | "faceSplitApply" | "faceSplitUndo"
         | "faceSweepStart" | "faceSweepStop" | "labelsAdd" | "labelsRemove" | "labelsSet"
         | "labelCreate" | "labelRename" | "labelDelete" | "sharedBackupSet" | "sharedBackupNow"
         | "settingsSyncReport"
