@@ -463,6 +463,36 @@ export function thumbPut(uid: string, type: number, data: Buffer): void {
   }
 }
 
+/**
+ * A grid thumbnail cut to a tile's size before (see thumbSizes), sealed in a folder of its own
+ * inside the thumbnails' (so it goes with them, and can be dropped on its own). The version
+ * in the key retires every cut when the way they are cut changes.
+ */
+function sizedPath(key: string): string {
+  return join(thumbDir(), "sized", `${createHash("sha256").update(`sized:v1:${key}`).digest("hex")}.bin`);
+}
+
+export function sizedGet(key: string): Buffer | null {
+  if (!isReady()) return null;
+  const path = sizedPath(key);
+  if (!existsSync(path)) return null;
+  try {
+    return unseal(readFileSync(path));
+  } catch {
+    return null;
+  }
+}
+
+export function sizedPut(key: string, data: Buffer): void {
+  if (!isReady()) return;
+  try {
+    mkdirSync(join(thumbDir(), "sized"), { recursive: true });
+    writeFileSync(sizedPath(key), seal(data));
+  } catch {
+    /* best-effort, as the thumbnails */
+  }
+}
+
 // Per-node metadata, content-addressed and encrypted. Everything here is immutable
 // for the life of a node: a re-upload is a new uid, so the name, media type, the
 // revision's claimed size and a video's length never change. The search index writes

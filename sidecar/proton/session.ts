@@ -60,6 +60,8 @@ import {
   rethrowLocked,
   setAsideVault,
   StoreLockedError,
+  sizedGet,
+  sizedPut,
   storeDir,
   thumbGet,
   thumbPut,
@@ -163,6 +165,7 @@ import { activeRevisionOf, nodeDurationMs, nodeLocation, nodeName, toMillis } fr
 import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
 import { FaceCovers } from "./faceCover.ts";
+import { SmallThumbs } from "./thumbSizes.ts";
 import { MAX_STREAMED_VIDEO, NOT_STREAMABLE, OpenVideos, startVideo, videoFromBytes, type VideoAnswer } from "./videoStream.ts";
 import { accountMatch, recordAccountKeys, recordedAccountKeys } from "./accountSwitch.ts";
 import { hostNotice } from "./hostCall.ts";
@@ -1665,6 +1668,7 @@ export class ProtonSession {
     this.thumbWaiting.clear();
     this.faceCovers.clear();
     this.videos.clear();
+    this.smallThumbs.clear();
     this.trash.changed();
     lockVault();
     this.offlineResume = null;
@@ -1790,6 +1794,7 @@ export class ProtonSession {
     this.thumbWaiting.clear();
     this.faceCovers.clear();
     this.videos.clear();
+    this.smallThumbs.clear();
     this.trash.changed();
     this.timelineRun = null;
     this.session = null;
@@ -1832,6 +1837,7 @@ export class ProtonSession {
     this.thumbWaiting.clear();
     this.faceCovers.clear();
     this.videos.clear();
+    this.smallThumbs.clear();
     this.trash.changed();
     this.legacySignIn = false;
     this.recordedAccount = "";
@@ -2801,6 +2807,8 @@ export class ProtonSession {
   });
   /** Videos the window is playing, for the thumbnail server: see `videoSource`. */
   private videos = new OpenVideos((uid, signal) => this.videoSource(uid, signal));
+  /** Grid thumbnails cut down to the size the grid shows them: see `thumbSizes`. */
+  private smallThumbs = new SmallThumbs(undefined, { get: sizedGet, put: sizedPut });
   /** The trash as last read, shared by the window and the drive's listing: see `TrashListing`. */
   private trash = new TrashListing();
   /**
@@ -2832,7 +2840,10 @@ export class ProtonSession {
     if (!this.photos && !this.offlineOnly) throw new Error("Not signed in");
     return {
       base: await startThumbServer(
-        (uid, gone) => this.thumbnailFor(uid, gone),
+        (uid, gone, width) =>
+          width
+            ? this.smallThumbs.get(uid, width, () => this.thumbnailFor(uid, gone))
+            : this.thumbnailFor(uid, gone),
         (uid, box, gone) => this.faceCovers.get(uid, box, gone),
         (uid) => this.videos.get(uid),
       ),
