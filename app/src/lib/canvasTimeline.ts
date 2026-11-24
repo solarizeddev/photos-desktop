@@ -61,6 +61,8 @@ export type TimelineData = {
   offline: ReadonlySet<string> | undefined;
   local: ReadonlySet<string> | undefined;
   showBadges: boolean;
+  /** The bursts stacked on a tile: shots by the tile's uid. */
+  stacks?: ReadonlyMap<string, number>;
 };
 
 /** Whether two layouts put tiles in the same places: same width, columns, tile size and headers. */
@@ -227,7 +229,7 @@ export class CanvasTimeline {
   }
 
   private sameMarks(was: TimelineData, now: TimelineData): boolean {
-    return was.selected === now.selected && was.offline === now.offline && was.local === now.local && was.showBadges === now.showBadges;
+    return was.selected === now.selected && was.offline === now.offline && was.local === now.local && was.showBadges === now.showBadges && was.stacks === now.stacks;
   }
 
   private onlySelectionChanged(was: TimelineData, now: TimelineData): boolean {
@@ -237,6 +239,7 @@ export class CanvasTimeline {
       was.offline === now.offline &&
       was.local === now.local &&
       was.showBadges === now.showBadges &&
+      was.stacks === now.stacks &&
       was.selected.size > 0 === now.selected.size > 0
     );
   }
@@ -455,6 +458,7 @@ export class CanvasTimeline {
       tier: badgeTier(l.tile),
       selectionMode: d.selected.size > 0,
       showBadges: d.showBadges,
+      stack: d.stacks?.get(uid),
     });
     paintTile(
       this.ctx,

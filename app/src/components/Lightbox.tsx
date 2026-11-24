@@ -34,6 +34,7 @@ import { useProgressiveImage } from "../hooks/useProgressiveImage";
 import { formatBytes, formatDate, dimensionsOf } from "../lib/format";
 import { Confirm } from "./Confirm";
 import { ShareDialog } from "./ShareDialog";
+import { BurstPlayer } from "./BurstPlayer";
 import { AlbumPicker } from "./AlbumDialogs";
 import { ContextMenu, type MenuAction } from "./ContextMenu";
 import { ViewerShell, type ViewerStage } from "./ViewerShell";
@@ -161,6 +162,13 @@ type Props = {
    * where the album is the reader's own, so a shared album never offers it.
    */
   onRemovedFromAlbum?: (uid: string) => void;
+  /**
+   * The shots of the burst the open tile stacks, oldest first; the caller shows a shot picked
+   * in its strip in the tile's place (`onPickShot`), and spreads the stack out (`onUnstack`).
+   */
+  burst?: string[];
+  onPickShot?: (uid: string) => void;
+  onUnstack?: () => void;
 };
 
 /**
@@ -225,6 +233,9 @@ export function Lightbox({
   onCompress,
   onMakeGif,
   onRemovedFromAlbum,
+  burst,
+  onPickShot,
+  onUnstack,
 }: Props) {
   const t = useT();
   const neighbours = useCloudMedia(items, index, onJump);
@@ -1072,12 +1083,19 @@ export function Lightbox({
       }
       detailsExtra={detailsExtra}
       stageExtra={
-        motionKind ? (
-          <MotionClip
-            itemKey={uid}
-            kind={motionKind}
-            load={() => rpc<ClipPayload | null>("getMotionClip", { uid })}
-          />
+        motionKind || (burst && burst.length > 1 && onPickShot && onUnstack) ? (
+          <>
+            {motionKind && (
+              <MotionClip
+                itemKey={uid}
+                kind={motionKind}
+                load={() => rpc<ClipPayload | null>("getMotionClip", { uid })}
+              />
+            )}
+            {burst && burst.length > 1 && onPickShot && onUnstack && (
+              <BurstPlayer key={burst[0]} uids={burst} viewing={uid} onPick={onPickShot} onUnstack={onUnstack} />
+            )}
+          </>
         ) : undefined
       }
     >

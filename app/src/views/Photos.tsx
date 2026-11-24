@@ -212,6 +212,7 @@ import { unwarmedBatches, warmWholeBatch } from "../lib/warmBatches";
 import { bench, benchCount, benchSpan } from "../lib/benchProbe";
 import { maybeRunScrollBench } from "../lib/scrollBench";
 import { forgetNames } from "../lib/photoNames";
+import { forgetBurstStacks, stacksFrom, useBurstStacks } from "../hooks/useBurstStacks";
 import "../styles/Photos.css";
 
 /** Each category's mark in the filter menu, where there is one to draw. */
@@ -233,6 +234,8 @@ type TimelineItem = { uid: string; captureTime: number; tags: number[] };
 const PLACES_BATCH = 2000;
 type NodeMeta = { name: string; mediaType: string | null };
 const NO_ENTRIES: LibraryEntry[] = [];
+/** No photos, one copy for every empty answer. */
+const NO_UIDS: ReadonlySet<string> = new Set();
 type View = "photos" | "albums" | "shared" | "trash";
 
 /**
@@ -918,8 +921,9 @@ export function Photos({
     void connectThumbServer();
     return () => {
       disconnectThumbServer();
-      // The photo names the viewer kept go with the session that showed them.
+      // The photo names the viewer kept go with the session that showed them, and the bursts.
       forgetNames();
+      forgetBurstStacks();
     };
   }, []);
 
@@ -1664,7 +1668,7 @@ export function Photos({
     () => toEntries(localLabels.labels.map((l) => ({ name: l.name, keys: l.keys, cover: null, box: null }))),
     [toEntries, localLabels.labels],
   );
-  const openLabelPicker = () => setPickLabels([...selected].map((uid) => uid.slice(uid.indexOf("~") + 1)));
+  const openLabelPicker = () => setPickLabels(withShots([...selected]).map((uid) => uid.slice(uid.indexOf("~") + 1)));
   // The labels with photos, most used first, and each photo's labels: read live from the labels,
   // so a label put on or taken off a photo filters again at once.
   const labelsByUse = useMemo(() => labelUsage(labelEntries), [labelEntries]);
@@ -1769,7 +1773,53 @@ export function Photos({
   const textAlternatives = useMemo(() => alternatives(textQuery), [textQuery]);
   const hasText = textAlternatives.length > 0;
 
-  const filtered = useMemo(() => {
+  // Bursts stacked on their first shot, in the plain timeline only: a filter, a search or a
+  // date is a question about photos, answered with every one of them. Only the canvas
+  // timeline draws a stack's mark, so it needs the thumbnail server too.
+  const [openStacks, setOpenStacks] = useState<ReadonlySet<string>>(() => new Set());
+  /** The shot picked in the open stack's strip, shown in its tile's place. */
+  const [burstPick, setBurstPick] = useState<string | null>(null);
+  const stacking =
+    settingsLoaded &&
+    settings.stackBursts &&
+    view === "photos" &&
+    !!thumbBase &&
+    !uidFilter &&
+    categories.size === 0 &&
+    labelFilter.keys.length === 0 &&
+    !searching &&
+    mediaType === "all" &&
+    !activeDate &&
+    namePins.length === 0 &&
+    !hasText &&
+    timelineSort.by !== "name";
+  // Not while offline: the finder has no library to read then.
+  // The count only once the timeline is in: a part of it would read as a library that changed.
+  // Asked for to stack them, and for the Bursts filter, which goes by them as well as by the tag.
+  const { stacks: burstList, settled: burstsSettled } = useBurstStacks(
+    settingsLoaded && (settings.stackBursts || categories.has("burst")) && view === "photos" && !offline,
+    loading ? undefined : items.length,
+  );
+  /**
+   * Every shot of a burst the finder found. The Burst tag only marks what a phone's camera app
+   * said was a burst when it uploaded, which most photos never carry.
+   */
+  const burstCategory = categories.has("burst");
+  const burstShots = useMemo(() => (burstCategory ? new Set(burstList.flat()) : NO_UIDS), [burstCategory, burstList]);
+  const inCategory = useCallback(
+    (cat: (typeof CATEGORIES)[number], it: TimelineItem) =>
+      (cat.key === "burst" && burstShots.has(it.uid)) || !!it.tags?.some((tg) => cat.tags.includes(tg)),
+    [burstShots],
+  );
+  // Turned off and on again, every stack is stacked again.
+  const stackSetting = useRef(settings.stackBursts);
+  useEffect(() => {
+    if (stackSetting.current === settings.stackBursts) return;
+    stackSetting.current = settings.stackBursts;
+    setOpenStacks(new Set());
+  }, [settings.stackBursts]);
+
+  const prestack = useMemo(() => {
     // A person, a label or the offline set is the whole question: no category, search or
     // album hiding narrows it further, as none of their controls is shown with it.
     const ordered = (list: TimelineItem[]) => {
@@ -1794,7 +1844,7 @@ export function Photos({
     const selectedCats = CATEGORIES.filter((c) => categories.has(c.key));
     let base =
       selectedCats.length > 0
-        ? items.filter((it) => selectedCats.some((cat) => it.tags?.some((tg) => cat.tags.includes(tg))))
+        ? items.filter((it) => selectedCats.some((cat) => inCategory(cat, it)))
         : items;
 
     // Android parity: the album-hide only applies to the unfiltered timeline. A
@@ -1839,7 +1889,38 @@ export function Photos({
     }
     return ordered(base);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, allItems, categories, mediaType, labelFilter, labelsOfPhoto, textAlternatives, labelSearching, activeDate, namePins, searching, timelineSort, meta, settings.hideAlbumPhotos, albumMembers, uidFilter, namesOfPhoto, offlineAlbumItems, hidden]);
+  }, [items, allItems, categories, mediaType, labelFilter, labelsOfPhoto, textAlternatives, labelSearching, activeDate, namePins, searching, timelineSort, meta, settings.hideAlbumPhotos, albumMembers, uidFilter, namesOfPhoto, offlineAlbumItems, hidden, inCategory]);
+
+  // The stacks, from the shots the timeline holds now; a shot under a stack goes from it.
+  const bursts = useMemo(
+    () =>
+      stacking
+        ? stacksFrom(burstList, openStacks, !timelineSort.asc, new Set(prestack.map((it) => it.uid)))
+        : stacksFrom([], openStacks, true),
+    [stacking, burstList, openStacks, timelineSort.asc, prestack],
+  );
+  const filtered = useMemo(
+    () => (bursts.under.size > 0 ? prestack.filter((it) => !bursts.under.has(it.uid)) : prestack),
+    [prestack, bursts],
+  );
+  // A selected photo that went under a stack as the stacks came in is no longer on screen: its
+  // stack's tile stands for it, selected in its place.
+  useEffect(() => {
+    if (bursts.under.size === 0 || ![...selected].some((u) => bursts.under.has(u))) return;
+    sel.setSelected(new Set([...selected].map((u) => bursts.coverOf.get(u) ?? u)));
+    // Only a change of stacks moves the selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bursts]);
+  /** Every timeline photo by uid: a stack's shots are opened from it, not from the grid. */
+  const itemByUid = useMemo(() => new Map(items.map((it) => [it.uid, it])), [items]);
+  /**
+   * A tile with each burst it stacks spread out, for what is done to a selection: a stack's
+   * tile stands for all its shots.
+   */
+  const withShots = useCallback(
+    (uids: string[]) => (bursts.shotsOf.size > 0 ? [...new Set(uids.flatMap((u) => bursts.shotsOf.get(u) ?? [u]))] : uids),
+    [bursts],
+  );
 
 
   // The photos the Calendar lays out are the timeline's own, hidden ones out, and the ones
@@ -2036,11 +2117,11 @@ export function Photos({
         (seen.add(it.uid), true) &&
         (!activeDate || inDate(it.captureTime, activeDate)) &&
         namePins.every((pin) => pin.uids.has(it.uid)) &&
-        (selectedCats.length === 0 || selectedCats.some((cat) => it.tags?.some((tg) => cat.tags.includes(tg)))) &&
+        (selectedCats.length === 0 || selectedCats.some((cat) => inCategory(cat, it))) &&
         (mediaType === "all" ||
           (isVideo(it.tags, meta[it.uid]?.mediaType ?? cachedMediaType(it.uid)) ?? false) === (mediaType === "video")),
     );
-  }, [semanticHits, themeSlug, themeGroups, byLinkId, searching, uidFilter, filtered, activeDate, namePins, categories, mediaType, meta]);
+  }, [semanticHits, themeSlug, themeGroups, byLinkId, searching, uidFilter, filtered, activeDate, namePins, categories, mediaType, meta, inCategory]);
   /** What the grid shows, in its order: the photos found by their words, then by what they show.
    *  The viewer and the selection walk this. */
   const shown = useMemo(
@@ -2549,6 +2630,11 @@ export function Photos({
   /** Drop a trashed photo from the grid and keep the lightbox on a valid item. */
   function handleTrashed(uid: string) {
     setItems((prev) => prev.filter((it) => it.uid !== uid));
+    // A shot picked from a stack is not in the grid's list: the stack's tile stays where it is.
+    if (uid === burstPick) {
+      setBurstPick(null);
+      return;
+    }
     setLightboxIdx((i) => {
       if (i === null) return null;
       const remaining = shown.length - 1;
@@ -2684,7 +2770,7 @@ export function Photos({
    * nothing about it would leave the grid disagreeing with the trash.
    */
   async function trashSelected() {
-    const uids = [...selected];
+    const uids = withShots([...selected]);
     if (uids.length === 0) return;
     setError("");
     try {
@@ -2809,7 +2895,7 @@ export function Photos({
    * related parts a photo brings with it.
    */
   async function addSelectedToAlbum(albumUid: string) {
-    const uids = [...selected];
+    const uids = withShots([...selected]);
     if (uids.length === 0) return;
     setAlbumBusy(true);
     try {
@@ -2911,7 +2997,7 @@ export function Photos({
   // or save the originals into a folder the user picks with it off. `downloadPhotos`
   // picks the mode.
   async function downloadSelected() {
-    const all = [...selected];
+    const all = withShots([...selected]);
     if (all.length === 0) return;
     // Skip photos already downloaded; re-selecting one of those is a no-op. Nothing is
     // downloaded with the mount off, so there the whole selection goes.
@@ -3018,7 +3104,7 @@ export function Photos({
   // Remove the local copy of the selected photos (dehydrate back to cloud-only).
   // Reports the photos the host actually freed, not the ones asked for.
   async function freeUpSelected() {
-    const uids = [...selected].filter((u) => localUids.has(u));
+    const uids = withShots([...selected]).filter((u) => localUids.has(u));
     if (uids.length === 0) {
       setToast(t("download.notDownloaded"));
       sel.clear();
@@ -3036,7 +3122,7 @@ export function Photos({
   // Keep the selection inside the app, encrypted, so it opens with no connection.
   // Nothing is written to the Proton Photos folder: that is Download's job, above.
   async function offlineAddSelected() {
-    const uids = [...selected].filter((u) => !offlineUids.has(u));
+    const uids = withShots([...selected]).filter((u) => !offlineUids.has(u));
     if (uids.length === 0) {
       setToast(t("offline.alreadyOffline"));
       sel.clear();
@@ -3053,7 +3139,7 @@ export function Photos({
 
   /** Drop the app's own copies and reclaim the space they held. */
   async function offlineRemoveSelected() {
-    const uids = [...selected].filter((u) => offlineUids.has(u));
+    const uids = withShots([...selected]).filter((u) => offlineUids.has(u));
     if (uids.length === 0) {
       setToast(t("offline.noneOffline"));
       sel.clear();
@@ -3197,6 +3283,50 @@ export function Photos({
           : null;
 
   const current = lightboxIdx !== null ? shown[lightboxIdx] : null;
+  // A shot picked in a stack's strip is the photo the viewer shows and acts on, while the stack
+  // stays what it steps from.
+  const burstOfCurrent = current && stacking ? bursts.shotsOf.get(current.uid) : undefined;
+  const picked = current && burstPick && burstOfCurrent?.includes(burstPick) ? itemByUid.get(burstPick) : undefined;
+  const viewed = picked ?? current;
+
+  // The viewer is on a photo, not a place in the list: when stacks come in or change, the list
+  // moves under it, and it follows the photo (or the stack the photo went under).
+  const viewerAnchor = useRef<string | null>(null);
+  const viewerFollowed = useRef(false);
+  useEffect(() => {
+    viewerAnchor.current = lightboxIdx === null ? null : (shown[lightboxIdx]?.uid ?? null);
+    // Following its photo is no step: a shot picked in its stack stays.
+    if (viewerFollowed.current) viewerFollowed.current = false;
+    else setBurstPick(null);
+    // Only a step of the viewer's own sets what it is on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lightboxIdx]);
+  useEffect(() => {
+    const on = viewerAnchor.current;
+    if (lightboxIdx === null || !on || shown[lightboxIdx]?.uid === on) return;
+    let at = shown.findIndex((it) => it.uid === on);
+    let under = false;
+    if (at < 0) {
+      const cover = bursts.coverOf.get(on);
+      if (cover) {
+        at = shown.findIndex((it) => it.uid === cover);
+        under = at >= 0;
+      }
+    }
+    if (at < 0) {
+      // Gone from the list (trashed, hidden): what is open now is what it is on.
+      viewerAnchor.current = shown[lightboxIdx]?.uid ?? null;
+      return;
+    }
+    viewerAnchor.current = shown[at].uid;
+    // Gone under a stack that just came in: the stack's tile, showing the same shot.
+    if (under) setBurstPick(on);
+    if (at !== lightboxIdx) {
+      viewerFollowed.current = true;
+      setLightboxIdx(at);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shown]);
 
   // Rename and delete are the album header's own actions, pointed at whichever
   // album the click picked out rather than at a second copy of them.
@@ -3289,25 +3419,25 @@ export function Photos({
           key: "editDate",
           label: t("selection.editDate"),
           icon: <CalendarIcon size={14} />,
-          onSelect: () => openDateEdit([...selected]),
+          onSelect: () => openDateEdit(withShots([...selected])),
         },
         {
           key: "editPlace",
           label: t("selection.editPlace"),
           icon: <PlaceIcon size={14} />,
-          onSelect: () => openPlaceEdit([...selected]),
+          onSelect: () => openPlaceEdit(withShots([...selected])),
         },
         {
           key: "editText",
           label: t("metaEdit.menuText"),
           icon: <TextIcon size={14} />,
-          onSelect: () => openMetaEdit([...selected], "text"),
+          onSelect: () => openMetaEdit(withShots([...selected]), "text"),
         },
         {
           key: "stripMeta",
           label: t("metaEdit.menuStrip"),
           icon: <VisibilityOffIcon size={14} />,
-          onSelect: () => openMetaEdit([...selected], "strip"),
+          onSelect: () => openMetaEdit(withShots([...selected]), "strip"),
         },
         ...(oneVideo
           ? [
@@ -3333,7 +3463,7 @@ export function Photos({
           key: "compress",
           label: t("selection.compress"),
           icon: <CompressIcon size={14} />,
-          onSelect: () => setCompressAsk([...selected]),
+          onSelect: () => setCompressAsk(withShots([...selected])),
         },
         {
           key: "favorite",
@@ -3391,7 +3521,7 @@ export function Photos({
               label: t("selection.unhide"),
               icon: <VisibilityIcon size={14} />,
               onSelect: () => void runSelection(async () => {
-                await hidePhotos([...selected], false);
+                await hidePhotos(withShots([...selected]), false);
                 sel.clear();
               }),
             }
@@ -3399,7 +3529,7 @@ export function Photos({
               key: "hide",
               label: t("selection.hide"),
               icon: <VisibilityOffIcon size={14} />,
-              onSelect: () => setConfirmHide([...selected]),
+              onSelect: () => setConfirmHide(withShots([...selected])),
             },
         {
           key: "trash",
@@ -4381,7 +4511,11 @@ export function Photos({
             {!loading && hidingKnown && shown.length === 0 && albumMatches.length === 0 && !error && (
               <div className="g-empty">
                 <p className="g-empty-title">
-                  {activeFilterCount > 0 || hasText ? t("photos.noMatches") : t("photos.noPhotos")}
+                  {burstCategory && !burstsSettled && !offline
+                    ? t("photos.findingBursts")
+                    : activeFilterCount > 0 || hasText
+                      ? t("photos.noMatches")
+                      : t("photos.noPhotos")}
                 </p>
                 {!(activeFilterCount > 0 || hasText) && (
                   <p className="g-empty-sub">{t("photos.noPhotosSub")}</p>
@@ -4405,6 +4539,7 @@ export function Photos({
                 onToggle={sel.toggle}
                 onOpen={onCellClick}
                 onContext={onCellContext}
+                stacks={stacking ? bursts.counts : undefined}
                 offlineUids={offlineUids}
                 localUids={localUids}
                 covered={settingsOpen || uploadOpen}
@@ -4679,9 +4814,9 @@ export function Photos({
             onCancel={sel.clear}
             onAddToAlbum={() => setPickAlbum(true)}
             onLabels={settings.driveLabels ? openLabelPicker : undefined}
-            onEditDate={() => openDateEdit([...selected])}
-            onEditPlace={() => openPlaceEdit([...selected])}
-            onCompress={() => setCompressAsk([...selected])}
+            onEditDate={() => openDateEdit(withShots([...selected]))}
+            onEditPlace={() => openPlaceEdit(withShots([...selected]))}
+            onCompress={() => setCompressAsk(withShots([...selected]))}
             onMakeGif={oneVideo ? () => setGifFor(oneVideo) : undefined}
             onMakeCollage={collageUids ? () => setCollageFor(collageUids) : undefined}
             onDownload={() => void runSelection(downloadSelected)}
@@ -4694,12 +4829,12 @@ export function Photos({
               allSelectedOffline ? () => void runSelection(offlineRemoveSelected) : undefined
             }
             onTrash={() => setConfirmTrash(true)}
-            onHide={uidFilter?.back === "hidden" ? undefined : () => setConfirmHide([...selected])}
+            onHide={uidFilter?.back === "hidden" ? undefined : () => setConfirmHide(withShots([...selected]))}
             onUnhide={
               uidFilter?.back === "hidden"
                 ? () =>
                     void runSelection(async () => {
-                      await hidePhotos([...selected], false);
+                      await hidePhotos(withShots([...selected]), false);
                       sel.clear();
                     })
                 : undefined
@@ -5032,9 +5167,10 @@ export function Photos({
       {confirmTrash && (
         <Confirm
           title={t("confirm.trashTitle")}
+          // A stacked burst's tile goes with all its shots: the count says how many photos.
           message={t(
-            selected.size === 1 ? "confirm.trashCount.one" : "confirm.trashCount.other",
-            { count: selected.size },
+            withShots([...selected]).length === 1 ? "confirm.trashCount.one" : "confirm.trashCount.other",
+            { count: withShots([...selected]).length },
           )}
           confirmLabel={t("confirm.trashConfirm")}
           danger
@@ -5143,9 +5279,9 @@ export function Photos({
         />
       )}
 
-      {current && (
+      {current && viewed && (
         <Lightbox
-          uid={current.uid}
+          uid={viewed.uid}
           onDateEditStarted={startedRun}
           onCompress={(uid) => setCompressAsk([uid])}
           onMakeGif={(uid) => setGifFor(uid)}
@@ -5154,15 +5290,15 @@ export function Photos({
               <>
                 {settings.driveLabels && (
                   <PhotoLabels
-                    photoKey={current.uid.slice(current.uid.indexOf("~") + 1)}
+                    photoKey={viewed.uid.slice(viewed.uid.indexOf("~") + 1)}
                     labels={localLabels.labels}
                     act={localLabels.act}
-                    onAdd={() => setPickLabels([current.uid.slice(current.uid.indexOf("~") + 1)])}
+                    onAdd={() => setPickLabels([viewed.uid.slice(viewed.uid.indexOf("~") + 1)])}
                   />
                 )}
                 {settings.localFaces && (
                   <PhotoFaces
-                    uid={current.uid}
+                    uid={viewed.uid}
                     names={localEntries.named.map((e) => e.name)}
                     version={localFaces.status?.version ?? 0}
                     act={localFaces.act}
@@ -5171,16 +5307,25 @@ export function Photos({
               </>
             ) : undefined
           }
-          isLocal={localUids.has(current.uid)}
-          isOffline={offlineUids.has(current.uid)}
+          isLocal={localUids.has(viewed.uid)}
+          isOffline={offlineUids.has(viewed.uid)}
           // Only ever a definite answer, never a guess. A known video branches the
           // viewer straight to playback without waiting for the details; anything not
           // yet known is left undefined so the viewer falls back to the media type in
           // the details it fetches anyway. Passing "image" on a missing tag is what made
           // an untagged video unplayable: it looked definite, so the fallback that would
           // have caught it never ran.
-          kind={videoKind(current)}
-          fallbackUrl={cachedThumbnail(current.uid) ?? thumbUrl(current.uid)}
+          kind={videoKind(viewed)}
+          burst={burstOfCurrent}
+          onPickShot={(uid) => setBurstPick(uid === current.uid ? null : uid)}
+          onUnstack={() => {
+            const oldest = bursts.oldestOf.get(current.uid) ?? current.uid;
+            setBurstPick(null);
+            setOpenStacks((s) => new Set(s).add(oldest));
+            // Its shots come in after it, so it keeps its place; held to it all the same.
+            setOpenOnShow(viewed.uid);
+          }}
+          fallbackUrl={cachedThumbnail(viewed.uid) ?? thumbUrl(viewed.uid)}
           hasPrev={lightboxIdx! > 0}
           hasNext={lightboxIdx! < shown.length - 1}
           onPrev={() => setLightboxIdx((i) => (i === null ? i : Math.max(0, i - 1)))}
@@ -5190,18 +5335,21 @@ export function Photos({
           items={viewerItems}
           index={lightboxIdx!}
           onJump={setLightboxIdx}
-          onClose={() => setLightboxIdx(null)}
+          onClose={() => {
+            setBurstPick(null);
+            setLightboxIdx(null);
+          }}
           onTrashed={handleTrashed}
           onRenamed={handleRenamed}
           onEdited={handleEdited}
-          isFavorite={!!current.tags?.includes(TAG.Favorite)}
+          isFavorite={!!viewed.tags?.includes(TAG.Favorite)}
           onFavoriteChanged={handleFavoriteChanged}
           hiding={
-            hidden.photos.has(current.uid.slice(current.uid.lastIndexOf("~") + 1))
-              ? { hidden: true, toggle: () => void hidePhotos([current.uid], false) }
-              : hidden.isPhoto(current.uid)
+            hidden.photos.has(viewed.uid.slice(viewed.uid.lastIndexOf("~") + 1))
+              ? { hidden: true, toggle: () => void hidePhotos([viewed.uid], false) }
+              : hidden.isPhoto(viewed.uid)
                 ? undefined
-                : { hidden: false, toggle: () => setConfirmHide([current.uid]) }
+                : { hidden: false, toggle: () => setConfirmHide([viewed.uid]) }
           }
         />
       )}
