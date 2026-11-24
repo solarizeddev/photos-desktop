@@ -550,7 +550,14 @@ type LockStatus = {
   protect: boolean;
 };
 
+/** The least time between two scans started for the timeline's stacked bursts. */
+const BURST_RESCAN_MS = 5 * 60_000;
+
 export class ProtonSession {
+  /** When the duplicate finder was last started for the timeline's stacks. */
+  private burstScanAt = 0;
+  /** The timeline's count the last such scan was started for. */
+  private burstScanCount = -1;
   private session: Session | null = null;
   private username = "";
   private email = "";
@@ -2327,9 +2334,24 @@ export class ProtonSession {
       // As on the phone, a hidden photo is in no group.
       list: async () => {
         const hidden = hiddenStore.hiddenPhotoTest();
-        return (await this.getTimeline()).filter((item) => !hidden(item.uid)).map((item) => ({ uid: item.uid, captureTime: item.captureTime }));
+        return (await this.getTimeline())
+          .filter((item) => !hidden(item.uid))
+          .map((item) => ({ uid: item.uid, captureTime: item.captureTime, video: item.tags.includes(PhotoTag.Videos) }));
       },
       thumbnails: (uids) => this.duplicateThumbnails(photos, uids),
+      details: async (uids) => {
+        const meta = await this.getMetadata(uids);
+        const videos = meta.filter((m) => m.mediaType?.startsWith("video/")).map((m) => m.uid);
+        const lengths = new Map((videos.length ? await this.getDurations(videos) : []).map((d) => [d.uid, d.durationMs]));
+        // A length the server did not answer for is not "no length" (that one is noted with 0): the
+        // video is left out, so it counts as unknown until the next session asks again. None answered
+        // at all is the connection gone, and fails the batch.
+        const unread = new Set(videos.filter((u) => typeof metaGet(u)?.durationMs !== "number"));
+        if (unread.size > 0 && unread.size === videos.length) throw new Error("video lengths not read");
+        return meta
+          .filter((m) => !unread.has(m.uid))
+          .map((m) => ({ uid: m.uid, size: m.size ?? null, durationMs: lengths.get(m.uid) ?? null }));
+      },
       // Also a photo hidden after the scan, here or on another device.
       hiddenTest: () => hiddenStore.hiddenPhotoTest(),
       hiddenVersion: () => hiddenStore.version,
@@ -4179,6 +4201,39 @@ export class ProtonSession {
     );
     diag.log("duplicates", "trash", { trashed: result.trashed.length, failed: result.failed, skipped: result.skipped });
     return result;
+  }
+
+  /**
+   * The library's bursts, for the timeline to stack: each one's shots, oldest first, ignored
+   * ones too (ignoring is about clean-up, not about what a burst is). Starts the finder's scan
+   * when it has not run, which reads only photos it has not fingerprinted before.
+   */
+  burstStacks(since?: number, count?: number): { scanning: boolean; version: number; stacks?: string[][] } {
+    if (!this.photos) return { scanning: false, version: -1, stacks: [] };
+    const status = duplicateFinder.getStatus();
+    // Scanned again when the timeline has photos the last scan did not list (an upload, another
+    // device), or after a scan that failed, each at most every few minutes. Against the count
+    // the last scan was started for, not what it listed: the window's list is from its own
+    // load, and the two would differ for good once another device added one.
+    const stale =
+      (status.state === "done" && count !== undefined && this.burstScanCount !== -1 && count !== this.burstScanCount) ||
+      status.state === "failed";
+    if (status.state === "idle" || (stale && Date.now() - this.burstScanAt > BURST_RESCAN_MS)) {
+      this.burstScanAt = Date.now();
+      if (count !== undefined) this.burstScanCount = count;
+      duplicateFinder.start();
+    } else if (count !== undefined && this.burstScanCount === -1) {
+      // A scan the duplicates page started: taken as made for the timeline as it is.
+      this.burstScanCount = count;
+    }
+    const now = duplicateFinder.getStatus();
+    // Done reading but the groups still to be worked out is not settled yet either.
+    const scanning = now.state === "scanning" || now.state === "idle" || duplicateFinder.pending();
+    // Unchanged since the caller's copy: nothing more to send.
+    if (since === now.version) return { scanning, version: now.version };
+    const groups = duplicateFinder.groups();
+    const bursts = [...groups.burst, ...groups.ignored.filter((g) => g.kind === "burst")];
+    return { scanning: scanning || !groups.ready, version: now.version, stacks: bursts.map((g) => g.uids) };
   }
 
   duplicatesIgnore(uids: string[], on: boolean): DuplicateStatus {

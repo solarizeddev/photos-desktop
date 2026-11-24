@@ -455,6 +455,8 @@ const handlers: Record<string, (params: any, signal?: AbortSignal) => Promise<un
       (Array.isArray(p?.groups) ? p.groups : []).map((g: any) => ({ uids: uidList(g?.uids), keep: uidList(g?.keep) })),
       (Array.isArray(p?.whole) ? p.whole : []).map(uidList),
     ),
+  burstStacks: (p) =>
+    session.burstStacks(typeof p?.since === "number" ? p.since : undefined, typeof p?.count === "number" ? p.count : undefined),
   duplicatesIgnore: (p) => session.duplicatesIgnore(uidList(p?.uids), p?.on !== false),
   restorePhotos: (p) => session.restorePhotos(p.uids),
   deletePhotosForever: (p) => session.deletePhotosForever(p.uids),

@@ -75,6 +75,16 @@ describe("marking every group at once", () => {
     const single: BulkGroup = { key: "z", kind: "identical", uids: ["z"] };
     expect(unmarkedBulkGroups(new Map(), [single])).toEqual([]);
   });
+
+  it("takes possible duplicates too, keeping the preferred copy, but not bursts", () => {
+    const video: BulkGroup = { key: "p|q|r", kind: "same", uids: ["p", "q", "r"], keep: 1 };
+    const photo: BulkGroup = { key: "s|u", kind: "same", uids: ["s", "u"] };
+    const burst: BulkGroup = { key: "x|y", kind: "burst", uids: ["x", "y"] };
+    const marks = markEvery(new Map(), [video, photo, burst]);
+    expect([...marks.get(video.key)!]).toEqual(["p", "r"]);
+    expect([...marks.get(photo.key)!]).toEqual(["u"]);
+    expect(marks.has(burst.key)).toBe(false);
+  });
 });
 
 describe("moving the marked copies in parts", () => {
