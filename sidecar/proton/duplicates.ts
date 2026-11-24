@@ -165,8 +165,11 @@ function decodeRecord(text: string): Fingerprint | null {
   return { bits, quality: raw[HASH_WORDS * 4], color: Uint8Array.from(raw.subarray(HASH_WORDS * 4 + 1)) };
 }
 
-/** The fingerprint of a thumbnail, turned upright and brought near the phone's 256 pixels. */
-export async function fingerprintOf(bytes: Buffer): Promise<Fingerprint | null> {
+/**
+ * The fingerprint of a thumbnail, or of a picture file by its path, turned upright and brought
+ * near the phone's 256 pixels.
+ */
+export async function fingerprintOf(bytes: Buffer | string): Promise<Fingerprint | null> {
   const sharp = (await import("sharp")).default;
   const { data, info } = await sharp(bytes, { failOn: "none" })
     .rotate()
@@ -293,6 +296,25 @@ export class DuplicateFinder {
   /** Every photo the timeline listing went through since sign-in, with a content hash or without. */
   listedUids(): ReadonlySet<string> {
     return this.listed;
+  }
+
+  /**
+   * A library photo's fingerprint: the one the scan made, or one made now from its small
+   * thumbnail, and kept, when the scan has not reached it. Null for one with no picture to read.
+   */
+  async printOf(uid: string): Promise<Fingerprint | null> {
+    this.load();
+    const known = this.prints.get(uid);
+    if (known) return known;
+    if (this.unreadable.has(uid) || !this.source) return null;
+    for await (const { uid: got, bytes } of this.source.thumbnails([uid])) {
+      if (got !== uid) continue;
+      const fp = bytes ? await this.fingerprint(bytes).catch(() => null) : null;
+      if (fp) this.prints.set(uid, fp);
+      else this.unreadable.add(uid);
+      return fp;
+    }
+    return null;
   }
 
   /** Photos moved to the trash anywhere in the app: no group holds them from now on. */

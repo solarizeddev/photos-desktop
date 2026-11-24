@@ -5194,9 +5194,9 @@ export function Photos({
           checks={uploads.checks}
           reasons={uploads.reasons}
           progress={uploads.status.importing}
-          onConfirm={(exclude, albums) => {
+          onConfirm={(exclude, albums, upload) => {
             openUpload();
-            void uploads.confirmImport(exclude, albums, true);
+            void uploads.confirmImport(exclude, albums, true, upload);
           }}
           onDiscard={() => void uploads.discardImport()}
         />

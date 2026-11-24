@@ -129,6 +129,18 @@ describe("the duplicate finder", () => {
     expect(f.getStatus()).toMatchObject({ state: "done", done: 6, total: 6 });
   });
 
+  it("hands out a photo's fingerprint before the scan reaches it, reading its thumbnail once", async () => {
+    const { f, asked } = finder([
+      { uid: "v~a", t: 1, look: 5 },
+      { uid: "v~b", t: 2, look: null },
+    ]);
+    expect(await f.printOf("v~a")).toEqual(fpOf(5));
+    expect(await f.printOf("v~a")).toEqual(fpOf(5));
+    expect(await f.printOf("v~b")).toBeNull();
+    expect(await f.printOf("v~b")).toBeNull();
+    expect(asked).toEqual(["v~a", "v~b"]);
+  });
+
   it("asks again for a photo the source did not answer, and not for one without a thumbnail", async () => {
     const photos = [
       { uid: "v~a", t: 1, look: 1 },

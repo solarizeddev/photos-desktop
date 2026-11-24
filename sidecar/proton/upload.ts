@@ -74,7 +74,8 @@ import { diag } from "./diag.ts";
 import { readMp4CreationTime } from "./mp4Date.ts";
 import { readVideoTags } from "./videoTags.ts";
 import { withRetry } from "./transient.ts";
-import { contentHashOf, photoRootHashKey, type LibraryIndex } from "./importMatch.ts";
+import { contentHashOf, matchFile, photoRootHashKey, type LibraryIndex, type ProbableWhy } from "./importMatch.ts";
+import { fingerprintOf } from "./duplicates.ts";
 import { freshNode } from "./dateEdit.ts";
 import { watchSlowUploads } from "./api.ts";
 import { PhotoTag, ThumbnailType } from "@protontech/drive-sdk";
@@ -184,10 +185,14 @@ export type ImportState = {
   parts: number;
   /** The folders the import reads, once ready: the host makes frames from these. */
   roots?: string[];
-  /** While reviewing: how many items, how many checked against the library, how many found. */
+  /**
+   * While reviewing: how many items, how many checked against the library, how many found, and
+   * how many probably there in other bytes.
+   */
   items?: number;
   checked?: number;
   already?: number;
+  probable?: number;
   /** Whether the check reads the library's content hashes; false is Proton's name-and-bytes check only. */
   byContent?: boolean;
 };
@@ -1996,14 +2001,19 @@ export type ReviewItem = {
 };
 
 /**
- * What the library check found for one item: not yet checked, new, or already there (the same
- * bytes, under any name, in the library or earlier in the export). One already there is not
- * uploaded: the photo the library has goes into the album instead.
+ * What the library check found for one item: not yet checked, new, already there (the same
+ * bytes, under any name, in the library or earlier in the export), or probably there (the same
+ * photo in other bytes, see importMatch.ts). One already there is not uploaded: the photo the
+ * library has goes into the album instead. One probably there is the user's to decide: the
+ * review shows those apart, and `confirmImport` is told which of them go up.
  */
-export type ReviewCheck = "pending" | "new" | "already";
+export type ReviewCheck = "pending" | "new" | "already" | "probable";
 
-/** Why an item is already there: the library has its bytes, or the export holds them before it. */
-export type ReviewReason = "same_file" | "same_in_export";
+/**
+ * Why an item is already there: the library has its bytes, or the export holds them before it;
+ * or why it is probably there.
+ */
+export type ReviewReason = "same_file" | "same_in_export" | ProbableWhy;
 
 /** The export under review, between `prepareImport` and `confirmImport` or `discardImport`. */
 let review: {
@@ -2017,6 +2027,14 @@ let review: {
   reasons: (ReviewReason | null)[];
   /** The photo already in the library, for an item found there, and for its Live video. */
   found: Map<string, string>;
+  /**
+   * The photo an item probably in the library is, to go into its album in its place when the
+   * user keeps it out; null when there is none to point to (a hidden photo, a video matched by
+   * date, a smaller copy than the export's).
+   */
+  probable: Map<string, string | null>;
+  /** Files whose date is the export's own record, not one read off the file for the review. */
+  datedByExport: Set<string>;
   /** Items whose match is a hidden photo: left out, so the hidden one is not put in an album. */
   hiddenMatch: Set<string>;
   /** An item whose bytes another item of the export has: by its id, that item's id. */
@@ -2048,8 +2066,10 @@ export function prepareImport(
   void (async () => {
     try {
       const plan = await planExport(job.roots, (name) => !!mediaTypeOf(name));
+      const datedByExport = new Set<string>();
       for (const item of plan.items) {
         if (job.myFiles) item.album = job.myFiles.albumOf.get(item.file) ?? null;
+        else if (item.sidecar?.takenMs) datedByExport.add(item.file);
         if (!item.sidecar?.takenMs) item.sidecar = { favorited: false, ...item.sidecar, takenMs: await capturedAt(item.file) };
       }
       if (plan.items.length === 0) {
@@ -2083,6 +2103,8 @@ export function prepareImport(
         checks: items.map((): ReviewCheck => "pending"),
         reasons: items.map((): ReviewReason | null => null),
         found: new Map<string, string>(),
+        probable: new Map<string, string | null>(),
+        datedByExport,
         hiddenMatch: new Set<string>(),
         copyOf: new Map<number, number>(),
         verifiedNew: new Set<string>(),
@@ -2099,6 +2121,7 @@ export function prepareImport(
         items: items.length,
         checked: 0,
         already: 0,
+        probable: 0,
       };
       void checkReview(photos, current, library);
     } catch (e) {
@@ -2116,10 +2139,12 @@ export function prepareImport(
 const HASH_CONCURRENCY = 3;
 
 /**
- * Marks each reviewed item new or already in the library, by its bytes only: the library's
- * content hashes find the same file under any name, and Proton's own check by name and bytes
- * covers the rest. The same bytes twice in the export go up once. A file whose check fails
- * counts as new, and is asked about again when it uploads.
+ * Marks each reviewed item new or already in the library by its bytes: the library's content
+ * hashes find the same file under any name, and Proton's own check by name and bytes covers
+ * the rest. The same bytes twice in the export go up once. When the library's dates and looks
+ * are here too, the files it does not have byte for byte get a second look (`checkProbable`),
+ * and stay unchecked until then. A file whose check fails counts as new, and is asked about
+ * again when it uploads.
  */
 async function checkReview(
   photos: any,
@@ -2139,7 +2164,12 @@ async function checkReview(
     if (review !== current || status.importing?.phase !== "review") return;
     status.importing.checked = (status.importing.checked ?? 0) + 1;
     if (current.checks[i] === "already") status.importing.already = (status.importing.already ?? 0) + 1;
+    if (current.checks[i] === "probable") status.importing.probable = (status.importing.probable ?? 0) + 1;
   };
+  // Files the library does not have byte for byte, for the second look, with their SHA-1s.
+  const probing = !!index?.canMatchProbable();
+  const rest: number[] = [];
+  const sha1s = new Map<number, string>();
   /** The library photo with these bytes: by content under any name, else by name and bytes. */
   const inLibrary = async (path: string, sha1: string): Promise<string | null> =>
     index?.sameFile(sha1) ?? (await findInLibrary(photos, path, signal, sha1));
@@ -2228,6 +2258,11 @@ async function checkReview(
             current.checks[i] = "already";
             current.reasons[i] = "same_file";
             if (index?.hidden(exact)) current.hiddenMatch.add(item.file);
+          } else if (probing) {
+            // New by its bytes, and unchecked until the second look.
+            current.verifiedNew.add(item.file);
+            sha1s.set(i, sha1);
+            rest.push(i);
           } else {
             current.checks[i] = "new";
             current.verifiedNew.add(item.file);
@@ -2245,6 +2280,140 @@ async function checkReview(
     }
   };
   await Promise.all(Array.from({ length: HASH_CONCURRENCY }, worker));
+  if (index && rest.length > 0 && !signal.aborted) await checkProbable(current, index, rest, sha1s, settled);
+}
+
+/** How many files the second look works on at once: mostly small reads and a fingerprint each. */
+const PROBE_CONCURRENCY = 6;
+
+/**
+ * The second look, at the files the library does not have byte for byte: whether it probably
+ * has the same photo in other bytes (importMatch.ts), among the library photos no exact copy
+ * has claimed, each for one file at most. A video's length is what the host read off the file
+ * before the review; the export's own videos are looked at together first, for a series in it,
+ * or many of one size and length. A file whose look fails counts as new.
+ */
+async function checkProbable(
+  current: NonNullable<typeof review>,
+  index: LibraryIndex,
+  ids: number[],
+  sha1s: Map<number, string>,
+  settled: (i: number) => void,
+): Promise<void> {
+  const signal = current.abort.signal;
+  const claimed = new Set<string>();
+  current.plan.forEach((item, i) => {
+    const uid = current.reasons[i] === "same_file" ? current.found.get(item.file) : undefined;
+    if (uid) claimed.add(uid);
+  });
+  const pool = async (width: number, one: (i: number) => Promise<void>) => {
+    let next = 0;
+    const worker = async () => {
+      for (;;) {
+        const k = next++;
+        if (k >= ids.length || signal.aborted) return;
+        await one(ids[k]).catch(() => {});
+      }
+    };
+    await Promise.all(Array.from({ length: width }, worker));
+  };
+  const isVideo = (i: number) => (mediaTypeOf(current.plan[i].file) ?? "").startsWith("video/");
+  // The export's own date where it has one, else what the file itself says; never the name or
+  // the file's times, which say when it was copied, not taken.
+  const takenOf = async (i: number) => {
+    const item = current.plan[i];
+    return current.datedByExport.has(item.file) ? (item.sidecar?.takenMs ?? null) : await takenForMatch(item.file);
+  };
+  const mediaByKey = new Map(Object.entries(current.media).map(([path, info]) => [frameKey(path), info]));
+  const videoFacts = new Map<number, { size: number | null; durationMs: number | null; takenMs: number | null }>();
+  await pool(PROBE_CONCURRENCY, async (i) => {
+    if (!isVideo(i)) return;
+    const file = current.plan[i].file;
+    const seconds = Number(mediaByKey.get(frameKey(file))?.durationSec);
+    videoFacts.set(i, {
+      size: await stat(file).then((st) => st.size).catch(() => null),
+      durationMs: Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : null,
+      takenMs: await takenOf(i),
+    });
+  });
+  if (signal.aborted) return;
+  const sizeLength = (f: { size: number | null; durationMs: number | null }) => `${f.size}:${f.durationMs}`;
+  const sizeLengthCount = new Map<string, number>();
+  for (const f of videoFacts.values()) {
+    if (f.size && f.durationMs) sizeLengthCount.set(sizeLength(f), (sizeLengthCount.get(sizeLength(f)) ?? 0) + 1);
+  }
+  // In time order, so a video's half hour either side is a short walk from it.
+  const dated = [...videoFacts.entries()]
+    .filter(([, f]) => f.takenMs !== null && !!f.durationMs)
+    .sort((a, b) => a[1].takenMs! - b[1].takenMs!);
+  const placeOf = new Map(dated.map(([i], at) => [i, at]));
+  /** Whether the export holds other videos of about this one's length within half an hour. */
+  const exportSeries = (i: number) => {
+    const at = placeOf.get(i);
+    if (at === undefined) return false;
+    const me = dated[at][1];
+    const near = (j: number) => {
+      const f = dated[j][1];
+      return Math.abs(f.takenMs! - me.takenMs!) > 2_000 && Math.abs(f.durationMs! - me.durationMs!) <= 1_000;
+    };
+    for (let j = at - 1; j >= 0 && me.takenMs! - dated[j][1].takenMs! <= 30 * 60_000; j--) if (near(j)) return true;
+    for (let j = at + 1; j < dated.length && dated[j][1].takenMs! - me.takenMs! <= 30 * 60_000; j++) if (near(j)) return true;
+    return false;
+  };
+  await pool(PROBE_CONCURRENCY, async (i) => {
+    if (current.checks[i] !== "pending") return;
+    const item = current.plan[i];
+    try {
+      const video = isVideo(i);
+      const fact = videoFacts.get(i);
+      const file = {
+        sha1: sha1s.get(i) ?? "",
+        takenMs: fact ? fact.takenMs : await takenOf(i),
+        video,
+        size: fact?.size ?? null,
+        durationMs: fact?.durationMs ?? null,
+        inSeries: video && exportSeries(i),
+        crowded: !!fact?.size && !!fact.durationMs && (sizeLengthCount.get(sizeLength(fact)) ?? 0) > 4,
+        print: async () => (video ? null : fingerprintOf(item.file)),
+      };
+      let match = await matchFile(index, file, claimed);
+      // Two files that took the same library photo at once: the later one looks again without it.
+      for (let tries = 0; match.verdict === "probable" && claimed.has(match.uid) && tries < 3; tries++) {
+        match = await matchFile(index, file, claimed);
+      }
+      if (signal.aborted) return;
+      if (match.verdict === "probable" && !claimed.has(match.uid)) {
+        claimed.add(match.uid);
+        current.checks[i] = "probable";
+        current.reasons[i] = match.why;
+        // What may stand in for it in its album: never a hidden photo, nor a video matched by
+        // its date, nor a library copy lighter than the export's file.
+        const standIn = match.hidden || match.why === "same_time_video" || match.why === "smaller_in_library";
+        current.probable.set(item.file, standIn ? null : match.uid);
+      } else current.checks[i] = "new";
+    } catch {
+      if (!signal.aborted) current.checks[i] = "new";
+    }
+    if (current.checks[i] !== "pending") settled(i);
+  });
+}
+
+/**
+ * When a file was taken, for matching it: its EXIF date, or a video's recorded time. Never the
+ * name or the file's own times, which say when it was copied, not taken.
+ */
+async function takenForMatch(path: string): Promise<number | null> {
+  try {
+    const exif = await exifFactsOf(path);
+    if (exif.captureTime) return exif.captureTime.getTime();
+    if ((mediaTypeOf(path) ?? "").startsWith("video/")) {
+      const recorded = await readMp4CreationTime(path).catch(() => null);
+      if (recorded) return recorded.getTime();
+    }
+  } catch {
+    /* no date to go by */
+  }
+  return null;
 }
 
 /**
@@ -2311,12 +2480,15 @@ export function getImportChecks(): { checks: ReviewCheck[]; reasons: (ReviewReas
  * Queues the reviewed export, less what was left out. `albums` false puts everything on
  * the timeline; `live` false uploads a Live Photo's two files as two separate items. An item
  * whose library copy is a hidden photo is left out, so the hidden photo is not put in an album.
+ * Of the items probably in the library, those in `upload` go up; the others do not, the photo
+ * the library has going into the album in their place where there is one to point to.
  */
 export function confirmImport(
   photos: any,
   exclude: number[] = [],
   albums = true,
   live = true,
+  upload: number[] = [],
 ): void {
   const current = review;
   if (!current) return;
@@ -2327,6 +2499,7 @@ export function confirmImport(
   status.importing = undefined;
 
   const left = new Set(exclude);
+  const uploadAnyway = new Set(upload);
   const leftByUser = new Set(exclude);
   // Of the copies of a first item the user left out, one goes in its place, carrying the
   // albums of the others, which stay out: the same bytes still go up once.
@@ -2357,10 +2530,17 @@ export function confirmImport(
       const firstFile = current.plan[first].file;
       const found = current.found.get(firstFile);
       if (found) current.found.set(item.file, found);
+      if (current.probable.has(firstFile)) current.probable.set(item.file, current.probable.get(firstFile)!);
+      if (uploadAnyway.has(first)) uploadAnyway.add(id);
       if (current.hiddenMatch.has(firstFile)) current.hiddenMatch.add(item.file);
       if (current.verifiedNew.has(firstFile)) current.verifiedNew.add(item.file);
     }
     if (current.hiddenMatch.has(item.file)) left.add(id);
+    if (current.checks[id] === "probable" && !uploadAnyway.has(id) && !left.has(id)) {
+      const uid = current.probable.get(item.file);
+      if (uid) current.found.set(item.file, uid);
+      else left.add(id);
+    }
   });
   const kept = current.plan.filter((_, id) => !left.has(id));
   // Left-out files are never uploaded, so their unpacked copies go now, but not a video a kept

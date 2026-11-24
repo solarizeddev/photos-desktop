@@ -52,6 +52,8 @@ export type ImportState = {
   items?: number;
   checked?: number;
   already?: number;
+  /** How many are probably in the library in other bytes. */
+  probable?: number;
   /** Whether the check reads the library's content hashes; false is Proton's name-and-bytes check only. */
   byContent?: boolean;
 };
@@ -71,9 +73,19 @@ export type ReviewItem = {
   favorite?: boolean;
   alsoIn?: string[];
 };
-export type ReviewCheck = "pending" | "new" | "already";
-/** Why an item is already there: the library has its bytes, or the export holds them before it. */
-export type ReviewReason = "same_file" | "same_in_export";
+export type ReviewCheck = "pending" | "new" | "already" | "probable";
+/**
+ * Why an item is already there: the library has its bytes, or the export holds them before it;
+ * or why it is probably there.
+ */
+export type ReviewReason =
+  | "same_file"
+  | "same_in_export"
+  | "same_time_look"
+  | "same_time"
+  | "same_time_video"
+  | "same_size_video"
+  | "smaller_in_library";
 export type UploadStatus = {
   running: boolean;
   total: number;
@@ -237,11 +249,11 @@ export function useUploads(onFinished: () => void) {
   const reviewLoaded = useRef(false);
   const marksAt = useRef(-1);
 
-  /** Uploads the reviewed export, less what was left out. */
-  const confirmImport = useCallback(async (exclude: number[], albums: boolean, live: boolean) => {
+  /** Uploads the reviewed export, less what was left out; `upload`: those probably in the library that go up. */
+  const confirmImport = useCallback(async (exclude: number[], albums: boolean, live: boolean, upload: number[] = []) => {
     try {
       // The review stays until the sidecar takes it, so a refusal keeps what was chosen.
-      await rpc("confirmImport", { exclude, albums, live });
+      await rpc("confirmImport", { exclude, albums, live, upload });
       setReview(null);
       setChecks([]);
       setReasons([]);

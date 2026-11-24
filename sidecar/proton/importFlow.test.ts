@@ -31,6 +31,7 @@ import sharp from "sharp";
 
 import * as up from "./upload.ts";
 import * as im from "./importMatch.ts";
+import { fingerprintOf } from "./duplicates.ts";
 import { forgetCompressedUploads, rememberCompressedUpload } from "./compressedUploads.ts";
 import { initStore, setDataKey } from "./store.ts";
 
@@ -69,12 +70,26 @@ function tree(name: string, files: Record<string, string | Buffer>): string {
 }
 const sidecar = (seconds: number) => JSON.stringify({ photoTakenTime: { timestamp: String(seconds) } });
 
-/** A library photo; `live` is the video joined to it, for a Live Photo, `liveTrashed` once trashed. */
-type Lib = { uid: string; video?: boolean; bytes?: Buffer; live?: Buffer; liveTrashed?: boolean; hidden?: boolean; name?: string };
+/**
+ * A library photo; `live` is the video joined to it, for a Live Photo, `liveTrashed` once trashed.
+ * `taken` is its capture time in seconds, and `ms` a video's length, for a library given with
+ * its dates and looks.
+ */
+type Lib = {
+  uid: string;
+  video?: boolean;
+  bytes?: Buffer;
+  live?: Buffer;
+  liveTrashed?: boolean;
+  hidden?: boolean;
+  name?: string;
+  taken?: number;
+  ms?: number;
+};
 
 function world(
   lib: Lib[],
-  opts: { failFirstCommitOf?: string; failAsks?: { name: string; times: number }; unlisted?: string[] } = {},
+  opts: { failFirstCommitOf?: string; failAsks?: { name: string; times: number }; unlisted?: string[]; looks?: boolean } = {},
 ) {
   const uploads: { name: string; meta: any; uid: string }[] = [];
   const added: { album: string; uids: string[] }[] = [];
@@ -162,6 +177,21 @@ function world(
       listed,
       KEY,
       (uid: string) => !!lib.find((x) => x.uid === uid)?.hidden,
+      opts.looks
+        ? {
+            photos: lib.map((l) => ({
+              uid: l.uid,
+              captureTime: (l.taken ?? 0) * 1000,
+              video: !!l.video,
+              size: l.bytes?.length ?? null,
+              durationMs: l.ms ?? null,
+            })),
+            printOf: async (uid: string) => {
+              const l = lib.find((x) => x.uid === uid);
+              return l?.bytes && !l.video ? fingerprintOf(l.bytes) : null;
+            },
+          }
+        : null,
     );
   return { photos, uploads, added, asked, looked, library };
 }
@@ -226,6 +256,7 @@ async function run(
   root: string,
   w: ReturnType<typeof world>,
   exclude: (ids: Record<string, string>) => number[] = () => [],
+  upload: (ids: Record<string, string>) => number[] = () => [],
 ) {
   up.startImport([root]);
   await settle((s) => s.importing?.phase === "ready");
@@ -238,7 +269,7 @@ async function run(
   for (const i of review.items) verdict[i.name] = `${checks.checks[i.id]}/${checks.reasons[i.id] ?? ""}`;
   const byPath: Record<string, string> = {};
   for (const i of review.items) byPath[i.path.split(/[\\/]/).slice(-2).join("/")] = String(i.id);
-  up.confirmImport(w.photos, exclude(byPath), true, true);
+  up.confirmImport(w.photos, exclude(byPath), true, true, upload(byPath).map(Number));
   let done: any = null;
   try { done = await settle(finished); } catch { done = up.getUploadStatus(); }
   return { verdict, done, byContent, rows: up.getUploadStatus().items.map((i: any) => `${i.name}:${i.status}`) };
@@ -665,3 +696,69 @@ describe("an export imported against the library", () => {
   });
 });
 
+describe("an export imported against a library given with its dates and looks", () => {
+  it("asks about the same photo in other bytes, and puts the library's photo in its album unless told to upload it", async () => {
+    const B = await picture(61), Bre = await sharp(B).resize(1200, 900).jpeg({ quality: 60 }).toBuffer();
+    const O = await picture(62), N = await picture(63);
+    const files = {
+      "Trip/b.jpg": Bre, "Trip/metadata/b.jpg.json": sidecar(T0 + 1000),
+      // Taken the same second as a library photo, but another picture.
+      "Trip/o.jpg": O, "Trip/metadata/o.jpg.json": sidecar(T0 + 2000),
+      "Trip/n.jpg": N, "Trip/metadata/n.jpg.json": sidecar(T0 + 3000),
+    };
+    const lib = [
+      { uid: "lib-b", bytes: B, name: "b0.jpg", taken: T0 + 1000 },
+      { uid: "lib-x", bytes: await picture(64), name: "x.jpg", taken: T0 + 2000 },
+    ];
+    const kept = world(lib, { looks: true });
+    const r = await run(tree("probable-kept", files), kept);
+    expect(r.verdict["b.jpg"]).toBe("probable/same_time_look");
+    expect(r.verdict["o.jpg"]).toBe("new/");
+    expect(r.verdict["n.jpg"]).toBe("new/");
+    expect(kept.uploads.map((u) => u.name).sort()).toEqual(["n.jpg", "o.jpg"]);
+    expect(kept.added.flatMap((a) => a.uids)).toContain("lib-b");
+
+    const sent = world(lib, { looks: true });
+    await run(tree("probable-sent", files), sent, () => [], (ids) => [Number(ids["Trip/b.jpg"])]);
+    expect(sent.uploads.map((u) => u.name).sort()).toEqual(["b.jpg", "n.jpg", "o.jpg"]);
+    expect(sent.added.flatMap((a) => a.uids)).not.toContain("lib-b");
+  });
+
+  it("takes no library photo another file is an exact copy of: a burst's next frame is new", async () => {
+    const F1 = await picture(71), F2 = await sharp(F1).modulate({ brightness: 1.03 }).jpeg({ quality: 88 }).toBuffer();
+    const root = tree("probable-burst", {
+      "Trip/f1.jpg": F1, "Trip/metadata/f1.jpg.json": sidecar(T0 + 4000),
+      "Trip/f2.jpg": F2, "Trip/metadata/f2.jpg.json": sidecar(T0 + 4000),
+    });
+    const w = world([{ uid: "lib-f1", bytes: F1, name: "f1.jpg", taken: T0 + 4000 }], { looks: true });
+    const r = await run(root, w);
+    expect(r.verdict["f1.jpg"]).toBe("already/same_file");
+    expect(r.verdict["f2.jpg"]).toBe("new/");
+    expect(w.uploads.map((u) => u.name)).toEqual(["f2.jpg"]);
+  });
+
+  it("leaves out a video of the same second it was not told to upload, never putting the library's in its place", async () => {
+    const V = Buffer.alloc(6000, 41);
+    const root = tree("probable-video", {
+      "Trip/clip.mp4": V, "Trip/metadata/clip.mp4.json": sidecar(T0 + 5000),
+      "Trip/n.jpg": await picture(82), "Trip/metadata/n.jpg.json": sidecar(T0 + 6000),
+    });
+    const w = world([{ uid: "lib-clip", video: true, bytes: Buffer.alloc(6500, 42), name: "clip0.mp4", taken: T0 + 5000 }], {
+      looks: true,
+    });
+    const r = await run(root, w);
+    expect(r.verdict["clip.mp4"]).toBe("probable/same_time_video");
+    expect(w.uploads.map((u) => u.name)).toEqual(["n.jpg"]);
+    expect(w.added.flatMap((a) => a.uids)).not.toContain("lib-clip");
+  });
+
+  it("dates a file for matching by its own record, never by its name or when it was copied", async () => {
+    const B = await picture(81), Bre = await sharp(B).resize(1200, 900).jpeg({ quality: 60 }).toBuffer();
+    // No record and no EXIF: its date would be the copy's, which says nothing.
+    const root = tree("probable-undated", { "Trip/b.jpg": Bre });
+    const now = Math.round(Date.now() / 1000);
+    const w = world([{ uid: "lib-b", bytes: B, name: "b0.jpg", taken: now }], { looks: true });
+    const r = await run(root, w);
+    expect(r.verdict["b.jpg"]).toBe("new/");
+  });
+});

@@ -314,6 +314,7 @@ const handlers: Record<string, (params: any, signal?: AbortSignal) => Promise<un
       Array.isArray(p.exclude) ? p.exclude.filter((x: unknown) => Number.isInteger(x)) : [],
       p.albums !== false,
       p.live !== false,
+      Array.isArray(p.upload) ? p.upload.filter((x: unknown) => Number.isInteger(x)) : [],
     ),
   discardImport: () => session.discardImport(),
   dropReplaced: () => session.dropReplaced(),

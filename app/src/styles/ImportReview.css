@@ -65,6 +65,16 @@
   border-top: 1px solid var(--border);
 }
 
+/* Probably in the library in other bytes: a section of its own, and the choice for it. */
+.ir-probable {
+  padding: 0 5px;
+  font-size: 11px;
+  color: var(--status-pending);
+}
+.ir-probable-bar {
+  color: var(--fg-primary);
+}
+
 /* The album switch and the hint share the picker's footer with its two buttons. */
 .ir-foot {
   align-items: center;
